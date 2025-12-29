@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+build/
+*.xcworkspace
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+xcuserdata/
+*.moved-aside
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.swiftpm/
+.swiftpm/
+Package.resolved
+
+# Logs
+*.log
+
+# Fastlane (if ever added)
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# SPM build artifacts
+.build/
