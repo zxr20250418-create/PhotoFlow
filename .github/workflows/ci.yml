@@ -33,3 +33,18 @@ jobs:
         run: |
           echo "Checking version consistency..."
           bash scripts/check_versions.sh
+
+  # --- Auto Comment Section ---
+  notify:
+    needs: build
+    runs-on: ubuntu-latest
+    if: success() && github.event_name == 'pull_request'
+    steps:
+      - name: Comment success message on PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          message: |
+            ✅ **CI Build Passed**
+            - All checks completed successfully.
+            - You can safely merge this PR.
+            _Generated automatically by CI workflow._
