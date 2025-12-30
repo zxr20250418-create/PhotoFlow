@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "ERROR: working tree is dirty; commit or stash changes before closeout." >&2
+  exit 1
+fi
+
 git switch main
 
 git pull --ff-only
