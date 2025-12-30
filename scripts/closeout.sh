@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -n "$(git status --porcelain)" ]]; then
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
   echo "ERROR: working tree is dirty; commit or stash changes before closeout." >&2
   exit 1
 fi
