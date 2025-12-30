@@ -4,15 +4,32 @@ on:
   push:
     branches: [ main ]
   pull_request:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Check versions
-        run: bash scripts/check_versions.sh
-      - name: Build iOS
-        run: bash scripts/build_ios.sh
-      - name: Build watchOS
-        run: bash scripts/build_watch.sh
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest
+
+      - name: Build iOS app
+        run: |
+          echo "Building iOS app..."
+          bash scripts/build_ios.sh
+
+      - name: Build watchOS app
+        run: |
+          echo "Building watchOS app..."
+          bash scripts/build_watch.sh
+
+      - name: Verify version consistency
+        run: |
+          echo "Checking version consistency..."
+          bash scripts/check_versions.sh
