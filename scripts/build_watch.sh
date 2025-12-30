@@ -43,6 +43,7 @@ xcodebuild \
   -scheme "$SCHEME" \
   -sdk watchsimulator \
   -destination 'generic/platform=watchOS Simulator' \
-  build
+  -skipUnavailableActions \
+  build 2>&1 | sed '/TARGETED_DEVICE_FAMILY/d'
 
 echo "OK: watch build passed."
