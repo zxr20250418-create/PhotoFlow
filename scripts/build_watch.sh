@@ -17,16 +17,18 @@ if [[ -z "${PROJECT}" ]]; then
 fi
 
 SCHEMES_JSON="$(xcodebuild -list -json -project "$PROJECT" 2>/dev/null || true)"
-DEFAULT_SCHEME="$(python3 - <<'PY'
-import json,sys,re
-obj=json.loads(sys.stdin.read())
-schemes=obj.get("project",{}).get("schemes",[]) or []
+DEFAULT_SCHEME="$(SCHEMES_JSON="$SCHEMES_JSON" python3 - <<'PY'
+import json,os,re,sys
+raw = os.environ.get("SCHEMES_JSON", "").strip()
+obj = json.loads(raw) if raw else {}
+schemes = obj.get("project", {}).get("schemes", []) or []
 for s in schemes:
-    if re.search(r'watch', s, re.I):
-        print(s); sys.exit(0)
+    if re.search(r"watch", s, re.I):
+        print(s)
+        sys.exit(0)
 print(schemes[0] if schemes else "")
 PY
-<<<"$SCHEMES_JSON")"
+)"
 
 SCHEME="${SCHEME_WATCH:-}"
 if [[ -z "${SCHEME}" ]]; then SCHEME="$DEFAULT_SCHEME"; fi

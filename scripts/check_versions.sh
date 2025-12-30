@@ -11,13 +11,14 @@ if [[ -z "${PROJECT}" ]]; then
 fi
 
 SCHEMES_JSON="$(xcodebuild -list -json -project "$PROJECT" 2>/dev/null)"
-SCHEMES="$(python3 - <<'PY'
-import json,sys
-obj=json.loads(sys.stdin.read())
-schemes=obj.get("project",{}).get("schemes",[]) or []
+SCHEMES="$(SCHEMES_JSON="$SCHEMES_JSON" python3 - <<'PY'
+import json,os
+raw = os.environ.get("SCHEMES_JSON", "").strip()
+obj = json.loads(raw) if raw else {}
+schemes = obj.get("project", {}).get("schemes", []) or []
 print("\n".join(schemes))
 PY
-<<<"$SCHEMES_JSON")"
+)"
 
 if [[ -z "${SCHEMES}" ]]; then
   echo "ERROR: No schemes found in project: $PROJECT"
@@ -37,8 +38,8 @@ while IFS= read -r scheme; do
     echo "WARN: cannot read build settings for scheme: $scheme (skipped)"
     continue
   fi
-  mv="$(printf "%s\n" "$settings" | awk -F' = ' '$1 ~ /MARKETING_VERSION$/ {print $2; exit}')"
-  bv="$(printf "%s\n" "$settings" | awk -F' = ' '$1 ~ /CURRENT_PROJECT_VERSION$/ {print $2; exit}')"
+  mv="$(printf "%s\n" "$settings" | awk -F' = ' '$1 ~ /MARKETING_VERSION$/ { if (!seen) { print $2; seen=1 } }')"
+  bv="$(printf "%s\n" "$settings" | awk -F' = ' '$1 ~ /CURRENT_PROJECT_VERSION$/ { if (!seen) { print $2; seen=1 } }')"
 
   printf "%-40s %-15s %-10s\n" "$scheme" "${mv:-<empty>}" "${bv:-<empty>}"
 

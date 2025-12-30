@@ -16,13 +16,14 @@ if [[ -z "${SCHEMES_JSON}" ]]; then
   exit 1
 fi
 
-DEFAULT_SCHEME="$(python3 - <<'PY'
-import json,sys
-obj=json.loads(sys.stdin.read())
-schemes=obj.get("project",{}).get("schemes",[]) or []
+DEFAULT_SCHEME="$(SCHEMES_JSON="$SCHEMES_JSON" python3 - <<'PY'
+import json,os
+raw = os.environ.get("SCHEMES_JSON", "").strip()
+obj = json.loads(raw) if raw else {}
+schemes = obj.get("project", {}).get("schemes", []) or []
 print(schemes[0] if schemes else "")
 PY
-<<<"$SCHEMES_JSON")"
+)"
 
 SCHEME="${SCHEME_IOS:-PhotoFlow}"
 if [[ -z "${SCHEME}" ]]; then SCHEME="$DEFAULT_SCHEME"; fi
