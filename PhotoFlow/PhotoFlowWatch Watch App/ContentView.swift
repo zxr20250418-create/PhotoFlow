@@ -51,8 +51,13 @@ struct ContentView: View {
 
             VStack(spacing: 10) {
                 VStack(spacing: 4) {
-                    Text(isOnDuty ? stageLabel : "未上班")
-                        .font(.headline)
+                    if isOnDuty {
+                        Text(stageLabel)
+                            .font(.headline)
+                    } else {
+                        Text("未上班，无法开始记录")
+                            .font(.headline)
+                    }
                     Text("总时长 \(format(durations.total))")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -64,13 +69,6 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
-                Button(isOnDuty ? "下班" : "上班") {
-                    isOnDuty.toggle()
-                    if !isOnDuty {
-                        resetSession()
-                    }
-                }
-                .buttonStyle(.bordered)
             }
             .padding()
             .alert(item: $activeAlert) { alert in
