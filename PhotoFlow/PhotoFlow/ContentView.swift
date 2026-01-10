@@ -70,13 +70,6 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
-                if stage == .shooting {
-                    Button("尝试直接结束（应被拒绝）") {
-                        activeAlert = .cannotEndWhileShooting
-                    }
-                    .buttonStyle(.bordered)
-                }
-
                 Button(isOnDuty ? "下班" : "上班") {
                     isOnDuty.toggle()
                     if !isOnDuty {
