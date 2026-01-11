@@ -85,6 +85,8 @@ struct ContentView: View {
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
+    @State private var now = Date()
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
 
     init(syncStore: WatchSyncStore) {
@@ -92,23 +94,20 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let now = context.date
-                let durations = computeDurations(now: now)
+        let durations = computeDurations(now: now)
 
-                VStack(spacing: 4) {
-                    if syncStore.isOnDuty {
-                        Text(stageLabel)
-                            .font(.headline)
-                    } else {
-                        Text("未上班，无法开始记录")
-                            .font(.headline)
-                    }
-                    Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+        VStack(spacing: 10) {
+            VStack(spacing: 4) {
+                if syncStore.isOnDuty {
+                    Text(stageLabel)
+                        .font(.headline)
+                } else {
+                    Text("未上班，无法开始记录")
+                        .font(.headline)
                 }
+                Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Button(action: handlePrimaryAction) {
@@ -121,6 +120,7 @@ struct ContentView: View {
         .alert(item: $activeAlert) { alert in
             Alert(title: Text(alert.message))
         }
+        .onReceive(ticker) { now = $0 }
     }
 
     private var stageLabel: String {
@@ -172,7 +172,10 @@ struct ContentView: View {
             session.endedAt = now
             syncStore.sendSessionEvent(event: "end", timestamp: now.timeIntervalSince1970)
         case .ended:
-            resetSession()
+            session = Session()
+            session.shootingStart = now
+            stage = .shooting
+            syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
         }
     }
 

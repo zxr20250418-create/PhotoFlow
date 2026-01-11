@@ -1,13 +1,13 @@
 # Exec Report
 
-- Scope: Fix live timer refresh for iOS + watch ContentView.
+- Scope: Fix iOS + watch start-on-first-tap and live timer refresh.
 - Changes:
-  - Wrapped the stage/title + duration display in `TimelineView(.periodic(from: .now, by: 1))` to tick every second.
-  - Recomputed total duration as `(endedAt ?? now) - shootingStart` and current stage as `now - stageStart` so numbers update immediately after entering Shooting.
+  - Updated .ended handling to start a new shooting session in one tap (reset session, set shootingStart, stage = .shooting; watch sends startShooting event).
+  - Added a 1s ticker and local `now` state; timers compute from `(endedAt ?? now) - shootingStart` and stage start so numbers tick immediately.
 
 ## Manual Verification
-1) iOS: tap “上班” then “开始拍摄” and confirm total/current stage timers start ticking within 1s.
-2) watchOS: trigger “开始拍摄” and confirm total/current stage timers tick immediately.
+1) In "已结束" state, tap "开始拍摄" once and confirm it enters Shooting immediately and timer starts within 1s (iOS + watch).
+2) In idle, tap "开始拍摄" once and confirm timer starts within 1s (iOS + watch).
 
 ## Build
 - iOS scheme: PhotoFlow

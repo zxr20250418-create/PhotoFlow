@@ -119,6 +119,8 @@ struct ContentView: View {
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
+    @State private var now = Date()
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
 
     init(syncStore: WatchSyncStore) {
@@ -126,19 +128,16 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 16) {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let now = context.date
-                let durations = computeDurations(now: now)
+        let durations = computeDurations(now: now)
 
-                VStack(spacing: 8) {
-                    Text(syncStore.isOnDuty ? stageLabel : "未上班")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+        VStack(spacing: 16) {
+            VStack(spacing: 8) {
+                Text(syncStore.isOnDuty ? stageLabel : "未上班")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Button(action: handlePrimaryAction) {
@@ -160,6 +159,7 @@ struct ContentView: View {
         .alert(item: $activeAlert) { alert in
             Alert(title: Text(alert.message))
         }
+        .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
             applySessionEvent(event)
@@ -212,7 +212,9 @@ struct ContentView: View {
             stage = .ended
             session.endedAt = now
         case .ended:
-            resetSession()
+            session = Session()
+            session.shootingStart = now
+            stage = .shooting
         }
     }
 
