@@ -7,8 +7,33 @@ EVIDENCE="${EVIDENCE:-true}"
 PR_TITLE="${PR_TITLE:-}"
 DELETE_LOCAL_BRANCH="${DELETE_LOCAL_BRANCH:-true}"
 BYPASS_RG="${BYPASS_RG:-false}"
+DRY_RUN="${DRY_RUN:-false}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  LOCAL_BUILD="false"
+fi
+
+if [ -n "$(git status --porcelain)" ]; then
+  dirty_worktree=""
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if [[ "$line" == "??"* ]]; then
+      dirty_worktree+="$line"$'\n'
+      continue
+    fi
+    y="${line:1:1}"
+    if [[ "$y" != " " ]]; then
+      dirty_worktree+="$line"$'\n'
+    fi
+  done < <(git status --porcelain)
+  if [ -n "$dirty_worktree" ]; then
+    echo "ERROR: working tree not clean"
+    git status --porcelain
+    exit 1
+  fi
+fi
 
 gh auth status >/dev/null
 
@@ -40,6 +65,10 @@ if [[ -n "$extra_paths" ]]; then
   echo "$extra_paths" >&2
   echo "Allowed: scripts/*.sh, docs/AGENTS/verify.md, docs/AGENTS/verify_auto.md" >&2
   exit 1
+fi
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "==> DRY_RUN=true (skip commit/push/PR/merge/evidence)"
+  exit 0
 fi
 if [[ -n "$(git diff --cached --name-only)" ]]; then
   git commit -m "chore: ship (auto gate pass)"
