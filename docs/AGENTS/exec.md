@@ -14,3 +14,13 @@
   - `xcodebuild -project PhotoFlow.xcodeproj -scheme PhotoFlow -destination 'generic/platform=iOS Simulator' build`
 - watchOS scheme: PhotoFlowWatch Watch App
   - `xcodebuild -project PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' build`
+
+## TC-WATCH-WIDGET-V0 Placeholder Widget
+- Scope: Added a watchOS WidgetKit placeholder implementation (no App Group, no deep link).
+- Files:
+  - PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift
+
+## Manual Verification
+1) Create the watchOS Widget Extension target (steps in PR description) and add `PhotoFlowWatchWidget.swift` to it.
+2) Build the watch app + widget extension with `xcodebuild` (commands in PR description).
+3) In the watch simulator, add the PhotoFlow complication/Smart Stack widget and confirm it shows placeholder state, elapsed, and last updated time.
