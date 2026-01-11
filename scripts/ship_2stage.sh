@@ -6,6 +6,7 @@ LOCAL_BUILD="${LOCAL_BUILD:-true}"
 EVIDENCE="${EVIDENCE:-true}"
 PR_TITLE="${PR_TITLE:-}"
 DELETE_LOCAL_BRANCH="${DELETE_LOCAL_BRANCH:-true}"
+BYPASS_RG="${BYPASS_RG:-false}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -18,7 +19,12 @@ if [[ "$cur" == "$DEFAULT_BRANCH" ]]; then
 fi
 
 LOCAL_BUILD="$LOCAL_BUILD" bash scripts/auto_gate.sh
-grep -q "AUTO_GATE=PASS" docs/AGENTS/verify.md || die "AUTO_GATE not PASS"
+grep -q "AUTO_GATE=PASS" docs/AGENTS/verify_auto.md || die "AUTO_GATE not PASS"
+if [[ "$BYPASS_RG" != "true" ]]; then
+  grep -q "RG-V1: PASS" docs/AGENTS/verify.md || die "RG-V1 not PASS"
+else
+  echo "==> BYPASS_RG=true (skip RG-V1 gate)"
+fi
 
 git add -A ':(exclude)docs/SESSIONS' || true
 if [[ -n "$(git diff --cached --name-only)" ]]; then

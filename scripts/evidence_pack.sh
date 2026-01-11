@@ -17,6 +17,9 @@ mkdir -p artifacts
   echo "== Recent commits"
   git log --oneline -n 20 || true
   echo
+  echo "== verify_auto.md (first 200 lines)"
+  sed -n '1,200p' docs/AGENTS/verify_auto.md 2>/dev/null || echo "(missing docs/AGENTS/verify_auto.md)"
+  echo
   echo "== verify.md (first 200 lines)"
   sed -n '1,200p' docs/AGENTS/verify.md 2>/dev/null || echo "(missing docs/AGENTS/verify.md)"
   echo
