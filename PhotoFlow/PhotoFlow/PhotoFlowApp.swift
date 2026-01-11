@@ -9,9 +9,11 @@ import SwiftUI
 
 @main
 struct PhotoFlowApp: App {
+    @StateObject private var syncStore = WatchSyncStore()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(syncStore: syncStore)
         }
     }
 }
