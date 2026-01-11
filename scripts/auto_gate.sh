@@ -3,7 +3,7 @@ set -euo pipefail
 source "$(dirname "$0")/config.sh"
 
 LOCAL_BUILD="${LOCAL_BUILD:-true}"
-VERIFY_OUT="${VERIFY_OUT:-docs/AGENTS/verify.md}"
+VERIFY_OUT="${VERIFY_OUT:-docs/AGENTS/verify_auto.md}"
 
 mkdir -p artifacts docs/AGENTS
 
