@@ -1,0 +1,119 @@
+import SwiftUI
+import WidgetKit
+
+struct PhotoFlowWidgetEntry: TimelineEntry {
+    let date: Date
+    let isRunning: Bool
+    let elapsedText: String
+    let lastUpdated: Date
+}
+
+struct PhotoFlowWidgetProvider: TimelineProvider {
+    func placeholder(in context: Context) -> PhotoFlowWidgetEntry {
+        sampleEntry(isRunning: true)
+    }
+
+    func getSnapshot(in context: Context, completion: @escaping (PhotoFlowWidgetEntry) -> Void) {
+        completion(sampleEntry(isRunning: true))
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<PhotoFlowWidgetEntry>) -> Void) {
+        let entry = sampleEntry(isRunning: false)
+        completion(Timeline(entries: [entry], policy: .never))
+    }
+
+    private func sampleEntry(isRunning: Bool) -> PhotoFlowWidgetEntry {
+        PhotoFlowWidgetEntry(
+            date: Date(),
+            isRunning: isRunning,
+            elapsedText: "12:34",
+            lastUpdated: Date()
+        )
+    }
+}
+
+struct PhotoFlowWidgetView: View {
+    @Environment(\.widgetFamily) private var family
+    let entry: PhotoFlowWidgetProvider.Entry
+
+    var body: some View {
+        Group {
+            switch family {
+            case .accessoryCircular:
+                VStack(spacing: 2) {
+                    Text(entry.isRunning ? "Running" : "Stopped")
+                        .font(.caption2)
+                    Text(entry.elapsedText)
+                        .font(.caption2.monospacedDigit())
+                }
+            case .accessoryRectangular:
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.isRunning ? "Running" : "Stopped")
+                        .font(.caption)
+                    Text("Elapsed \(entry.elapsedText)")
+                        .font(.caption2.monospacedDigit())
+                    Text(entry.lastUpdated, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            case .accessoryCorner:
+                VStack(spacing: 2) {
+                    Text(entry.elapsedText)
+                        .font(.caption2.monospacedDigit())
+                    Text(entry.isRunning ? "Run" : "Stop")
+                        .font(.caption2)
+                }
+            default:
+                VStack(spacing: 2) {
+                    Text(entry.isRunning ? "Running" : "Stopped")
+                        .font(.caption)
+                    Text(entry.elapsedText)
+                        .font(.caption2.monospacedDigit())
+                }
+            }
+        }
+        .containerBackground(.fill.tertiary, for: .widget)
+    }
+}
+
+struct PhotoFlowWatchWidget: Widget {
+    let kind = "PhotoFlowWatchWidget"
+
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: kind, provider: PhotoFlowWidgetProvider()) { entry in
+            PhotoFlowWidgetView(entry: entry)
+        }
+        .configurationDisplayName("PhotoFlow")
+        .description("Shows session status and elapsed time.")
+        .supportedFamilies([
+            .accessoryCircular,
+            .accessoryRectangular,
+            .accessoryCorner
+        ])
+    }
+}
+
+@main
+struct PhotoFlowWatchWidgetBundle: WidgetBundle {
+    var body: some Widget {
+        PhotoFlowWatchWidget()
+    }
+}
+
+#Preview("Accessory Circular", as: .accessoryCircular) {
+    PhotoFlowWatchWidget()
+} timeline: {
+    PhotoFlowWidgetEntry(date: Date(), isRunning: true, elapsedText: "12:34", lastUpdated: Date())
+}
+
+#Preview("Accessory Rectangular", as: .accessoryRectangular) {
+    PhotoFlowWatchWidget()
+} timeline: {
+    PhotoFlowWidgetEntry(date: Date(), isRunning: false, elapsedText: "12:34", lastUpdated: Date())
+}
+
+#Preview("Accessory Corner", as: .accessoryCorner) {
+    PhotoFlowWatchWidget()
+} timeline: {
+    PhotoFlowWidgetEntry(date: Date(), isRunning: true, elapsedText: "12:34", lastUpdated: Date())
+}

@@ -14,3 +14,32 @@
   - `xcodebuild -project PhotoFlow.xcodeproj -scheme PhotoFlow -destination 'generic/platform=iOS Simulator' build`
 - watchOS scheme: PhotoFlowWatch Watch App
   - `xcodebuild -project PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' build`
+
+## TC-WATCH-WIDGET-V0 Placeholder Widget
+- Scope: Added a watchOS WidgetKit placeholder implementation (no App Group, no deep link).
+- Files:
+  - PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift
+
+## Manual Verification
+1) Create the watchOS Widget Extension target (steps in PR description) and add `PhotoFlowWatchWidget.swift` to it.
+2) Build the watch app + widget extension with `xcodebuild` (commands in PR description).
+3) In the watch simulator, add the PhotoFlow complication/Smart Stack widget and confirm it shows placeholder state, elapsed, and last updated time.
+
+## TC-WATCH-WIDGET-V0 Target Wiring
+- Changes:
+  - Added watchOS Widget Extension target `PhotoFlowWatchWidgetExtension` and embedded it in the watch app.
+  - Wired widget extension Info.plist and build phases (sources, frameworks, resources).
+  - Added shared scheme for the widget extension so `xcodebuild` can target watchOS Simulator without manual setup.
+  - Linked WidgetKit and SwiftUI frameworks for the extension.
+
+## Manual Verification
+1) Build and run the watch app in the watch simulator.
+2) Long-press the watch face, add a complication or Smart Stack widget.
+3) Confirm the PhotoFlow widget shows placeholder state, elapsed time, and last updated time.
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' build`
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' build`
+- Fallback (no signing):
+  - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
