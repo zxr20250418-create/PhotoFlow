@@ -224,20 +224,29 @@ struct ContentView: View {
     }
 
     private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
-        let timestamp = Date(timeIntervalSince1970: event.timestamp)
+        let timestampSeconds = normalizeEpochSeconds(event.timestamp)
+        let timestamp = Date(timeIntervalSince1970: timestampSeconds)
         switch event.event {
         case "startShooting":
-            stage = .shooting
+            session = Session()
             session.shootingStart = timestamp
+            stage = .shooting
         case "startSelecting":
-            stage = .selecting
             session.selectingStart = timestamp
+            stage = .selecting
         case "end":
-            stage = .ended
             session.endedAt = timestamp
+            stage = .ended
         default:
             break
         }
+    }
+
+    private func normalizeEpochSeconds(_ value: TimeInterval) -> TimeInterval {
+        if value > 1_000_000_000_000 {
+            return value / 1000
+        }
+        return value
     }
 
     private func computeDurations(now: Date) -> (total: TimeInterval, currentStage: TimeInterval) {

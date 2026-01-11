@@ -1,13 +1,13 @@
 # Exec Report
 
-- Scope: Fix iOS + watch start-on-first-tap and live timer refresh.
+- Scope: Fix iOS handling of watch session_event startShooting to keep total ticking.
 - Changes:
-  - Updated .ended handling to start a new shooting session in one tap (reset session, set shootingStart, stage = .shooting; watch sends startShooting event).
-  - Added a 1s ticker and local `now` state; timers compute from `(endedAt ?? now) - shootingStart` and stage start so numbers tick immediately.
+  - On iOS, startShooting now resets the in-memory session and sets shootingStart before entering Shooting, so total duration starts immediately.
+  - Added epoch normalization (ms vs s) before converting watch timestamps to Date.
 
 ## Manual Verification
-1) In "已结束" state, tap "开始拍摄" once and confirm it enters Shooting immediately and timer starts within 1s (iOS + watch).
-2) In idle, tap "开始拍摄" once and confirm timer starts within 1s (iOS + watch).
+1) From watch, tap “开始拍摄” once.
+2) On iPhone, confirm total duration starts ticking immediately (not waiting for end).
 
 ## Build
 - iOS scheme: PhotoFlow
