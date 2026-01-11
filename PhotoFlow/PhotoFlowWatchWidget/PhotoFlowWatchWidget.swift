@@ -142,8 +142,10 @@ struct PhotoFlowWatchWidgetBundle: WidgetBundle {
     PhotoFlowWidgetEntry(date: Date(), isRunning: false, elapsedText: "12:34", lastUpdated: Date())
 }
 
+#if os(watchOS)
 #Preview("Accessory Corner", as: .accessoryCorner) {
     PhotoFlowWatchWidget()
 } timeline: {
     PhotoFlowWidgetEntry(date: Date(), isRunning: true, elapsedText: "12:34", lastUpdated: Date())
 }
+#endif
