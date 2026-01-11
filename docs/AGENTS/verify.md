@@ -1,25 +1,26 @@
 # Automated Gate
 
-- Time: 2026-01-11T10:05:15+08:00
-- Branch: chore/pipeline-smoke
-- Head: d7c2c46
+- Time: 2026-01-11T10:12:17+08:00
+- Branch: work/ship-0111101217
+- Head: 754f17f
 - LOCAL_BUILD: true
 - XCODEPROJ: PhotoFlow/PhotoFlow.xcodeproj
 - IOS_SCHEME: PhotoFlow
 - WATCH_SCHEME: PhotoFlowWatch Watch App
 
 ## Build logs
-- iOS: artifacts/ios_build_d7c2c46.log
-- watch: artifacts/watch_build_d7c2c46.log
+- iOS: artifacts/ios_build_754f17f.log
+- watch: artifacts/watch_build_754f17f.log
 
 AUTO_GATE=PASS
 
 ## Git snapshot
-## chore/pipeline-smoke
-?? docs/AGENTS/pipeline_smoke.md
-?? docs/AGENTS/verify.md
+## work/ship-0111101217
+ M docs/AGENTS/verify.md
 
 ## Recent commits
+754f17f Merge pull request #12 from zxr20250418-create/chore/pipeline-smoke
+6a753ec chore: ship (auto gate pass)
 d7c2c46 Merge pull request #11 from zxr20250418-create/chore/ship-2stage-scripts
 659110d fix: wire iOS app to syncStore
 cd4b9d3 fix(watch): inject WatchSyncStore into ContentView
@@ -28,5 +29,3 @@ cd4b9d3 fix(watch): inject WatchSyncStore into ContentView
 c3cb810 fix: set shootingStart on watch-start events (total ticks)
 5387dcc fix: start on first tap and live timer refresh
 ad8195c fix: live timer refresh on iOS+watch
-e45c0e2 ui(watch): remove duty toggle button
-bf40a67 feat: tc0.1 watch minimal record skeleton (T01-T03)
