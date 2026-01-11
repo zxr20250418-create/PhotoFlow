@@ -7,21 +7,16 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		315DCCB87E57429DAAD0E77B /* System/Library/Frameworks/WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 19D185F1705B4A10A9FB513A /* System/Library/Frameworks/WidgetKit.framework */; };
+		3CB7B759B4DD41098D465ADC /* WidgetStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E96ADCF7B604CD296196EC2 /* WidgetStateStore.swift */; };
+		3EC6AACEB49445BF82A83719 /* WidgetStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E96ADCF7B604CD296196EC2 /* WidgetStateStore.swift */; };
+		5418A3BF2AE14E70BC2A5EFD /* System/Library/Frameworks/SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83010CC62EA54C53B3033CF7 /* System/Library/Frameworks/SwiftUI.framework */; };
+		5CB4EF6AF0C940F0B3FCBE8F /* PhotoFlowWatchWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */; };
 		AC0B07982F035063002F32BE /* PhotoFlowWatch Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = AC0B078E2F035061002F32BE /* PhotoFlowWatch Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B673031599274D8C9D735664 /* PhotoFlowWatchWidgetExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A98B2891110D48A7B0F00ADC /* PhotoFlowWatchWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		5CB4EF6AF0C940F0B3FCBE8F /* PhotoFlowWatchWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */; };
-		315DCCB87E57429DAAD0E77B /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 19D185F1705B4A10A9FB513A /* WidgetKit.framework */; };
-		5418A3BF2AE14E70BC2A5EFD /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83010CC62EA54C53B3033CF7 /* SwiftUI.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		AC0B07962F035063002F32BE /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = AC0B07742F034E64002F32BE /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = AC0B078D2F035061002F32BE;
-			remoteInfo = "PhotoFlowWatch Watch App";
-		};
 		88292673CFF14E26AD62E348 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = AC0B07742F034E64002F32BE /* Project object */;
@@ -29,20 +24,16 @@
 			remoteGlobalIDString = DEE03859A0CD410D8DC98777;
 			remoteInfo = PhotoFlowWatchWidgetExtension;
 		};
+		AC0B07962F035063002F32BE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AC0B07742F034E64002F32BE /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AC0B078D2F035061002F32BE;
+			remoteInfo = "PhotoFlowWatch Watch App";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		AC0B079C2F035063002F32BE /* Embed Watch Content */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
-			dstSubfolderSpec = 16;
-			files = (
-				AC0B07982F035063002F32BE /* PhotoFlowWatch Watch App.app in Embed Watch Content */,
-			);
-			name = "Embed Watch Content";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		5AA39ADAE54F48D8B9040686 /* Embed App Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -54,16 +45,29 @@
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AC0B079C2F035063002F32BE /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				AC0B07982F035063002F32BE /* PhotoFlowWatch Watch App.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		19D185F1705B4A10A9FB513A /* System/Library/Frameworks/WidgetKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		1A31F71047694B1887457878 /* PhotoFlowWatchWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PhotoFlowWatchWidgetExtension.entitlements; sourceTree = "<group>"; };
+		4A95CF753F384D118C977302 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoFlowWatchWidget.swift; sourceTree = "<group>"; };
+		83010CC62EA54C53B3033CF7 /* System/Library/Frameworks/SwiftUI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		9E96ADCF7B604CD296196EC2 /* WidgetStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetStateStore.swift; sourceTree = "<group>"; };
+		A98B2891110D48A7B0F00ADC /* PhotoFlowWatchWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PhotoFlowWatchWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		AC0B077C2F034E64002F32BE /* PhotoFlow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhotoFlow.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AC0B078E2F035061002F32BE /* PhotoFlowWatch Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "PhotoFlowWatch Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		A98B2891110D48A7B0F00ADC /* PhotoFlowWatchWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = PhotoFlowWatchWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoFlowWatchWidget.swift; sourceTree = "<group>"; };
-		4A95CF753F384D118C977302 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		19D185F1705B4A10A9FB513A /* WidgetKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
-		83010CC62EA54C53B3033CF7 /* SwiftUI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -80,6 +84,15 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		3A52AF99AF984C4286ABF5FB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				315DCCB87E57429DAAD0E77B /* System/Library/Frameworks/WidgetKit.framework in Frameworks */,
+				5418A3BF2AE14E70BC2A5EFD /* System/Library/Frameworks/SwiftUI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AC0B07792F034E64002F32BE /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -94,23 +107,42 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		3A52AF99AF984C4286ABF5FB /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				315DCCB87E57429DAAD0E77B /* WidgetKit.framework in Frameworks */,
-				5418A3BF2AE14E70BC2A5EFD /* SwiftUI.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		7821C124211948D282BF2669 /* PhotoFlowWatchWidget */ = {
+			isa = PBXGroup;
+			children = (
+				7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */,
+				4A95CF753F384D118C977302 /* Info.plist */,
+				1A31F71047694B1887457878 /* PhotoFlowWatchWidgetExtension.entitlements */,
+			);
+			path = PhotoFlowWatchWidget;
+			sourceTree = "<group>";
+		};
+		CB3750592AB14C9B8363BDFC /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				9E96ADCF7B604CD296196EC2 /* WidgetStateStore.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		A90243BEA88547C9B72FE002 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				19D185F1705B4A10A9FB513A /* System/Library/Frameworks/WidgetKit.framework */,
+				83010CC62EA54C53B3033CF7 /* System/Library/Frameworks/SwiftUI.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		AC0B07732F034E64002F32BE = {
 			isa = PBXGroup;
 			children = (
 				AC0B077E2F034E64002F32BE /* PhotoFlow */,
 				AC0B078F2F035061002F32BE /* PhotoFlowWatch Watch App */,
+				CB3750592AB14C9B8363BDFC /* Shared */,
 				7821C124211948D282BF2669 /* PhotoFlowWatchWidget */,
 				A90243BEA88547C9B72FE002 /* Frameworks */,
 				AC0B077D2F034E64002F32BE /* Products */,
@@ -125,24 +157,6 @@
 				A98B2891110D48A7B0F00ADC /* PhotoFlowWatchWidgetExtension.appex */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		7821C124211948D282BF2669 /* PhotoFlowWatchWidget */ = {
-			isa = PBXGroup;
-			children = (
-				7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */,
-				4A95CF753F384D118C977302 /* Info.plist */,
-			);
-			path = PhotoFlowWatchWidget;
-			sourceTree = "<group>";
-		};
-		A90243BEA88547C9B72FE002 /* Frameworks */ = {
-			isa = PBXGroup;
-			children = (
-				19D185F1705B4A10A9FB513A /* WidgetKit.framework */,
-				83010CC62EA54C53B3033CF7 /* SwiftUI.framework */,
-			);
-			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -258,6 +272,13 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		8953250600D74A25B7A85416 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AC0B077A2F034E64002F32BE /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -272,16 +293,18 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		8953250600D74A25B7A85416 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		40D7B5BB075B4F0CB3ED1BD4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5CB4EF6AF0C940F0B3FCBE8F /* PhotoFlowWatchWidget.swift in Sources */,
+				3EC6AACEB49445BF82A83719 /* WidgetStateStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AC0B07782F034E64002F32BE /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -293,33 +316,56 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		40D7B5BB075B4F0CB3ED1BD4 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				5CB4EF6AF0C940F0B3FCBE8F /* PhotoFlowWatchWidget.swift in Sources */,
+				3CB7B759B4DD41098D465ADC /* WidgetStateStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		AC0B07972F035063002F32BE /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = AC0B078D2F035061002F32BE /* PhotoFlowWatch Watch App */;
-			targetProxy = AC0B07962F035063002F32BE /* PBXContainerItemProxy */;
-		};
 		2368657C564B44A5AA45E46F /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = DEE03859A0CD410D8DC98777 /* PhotoFlowWatchWidgetExtension */;
 			targetProxy = 88292673CFF14E26AD62E348 /* PBXContainerItemProxy */;
 		};
+		AC0B07972F035063002F32BE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AC0B078D2F035061002F32BE /* PhotoFlowWatch Watch App */;
+			targetProxy = AC0B07962F035063002F32BE /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		2CE62DD7EACA4C28B26CB0D8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ENTITLEMENTS = PhotoFlowWatchWidget/PhotoFlowWatchWidgetExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KXMLG2TV28;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PhotoFlowWatchWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhengxinrong.PhotoFlow.watchkitapp.widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.6;
+			};
+			name = Release;
+		};
 		AC0B07852F034E66002F32BE /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -512,6 +558,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGNING_ENTITLEMENTS = "PhotoFlowWatch Watch App/PhotoFlowWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
@@ -545,6 +592,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGNING_ENTITLEMENTS = "PhotoFlowWatch Watch App/PhotoFlowWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
@@ -576,6 +624,7 @@
 		BAD21626C1274EB8AFC00427 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGNING_ENTITLEMENTS = PhotoFlowWatchWidget/PhotoFlowWatchWidgetExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
@@ -602,38 +651,18 @@
 			};
 			name = Debug;
 		};
-		2CE62DD7EACA4C28B26CB0D8 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = KXMLG2TV28;
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = PhotoFlowWatchWidget/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.zhengxinrong.PhotoFlow.watchkitapp.widget;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = watchos;
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 4;
-				WATCHOS_DEPLOYMENT_TARGET = 10.6;
-			};
-			name = Release;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		0F33E2FF78224C94BD719987 /* Build configuration list for PBXNativeTarget "PhotoFlowWatchWidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BAD21626C1274EB8AFC00427 /* Debug */,
+				2CE62DD7EACA4C28B26CB0D8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		AC0B07772F034E64002F32BE /* Build configuration list for PBXProject "PhotoFlow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -657,15 +686,6 @@
 			buildConfigurations = (
 				AC0B079A2F035063002F32BE /* Debug */,
 				AC0B079B2F035063002F32BE /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		0F33E2FF78224C94BD719987 /* Build configuration list for PBXNativeTarget "PhotoFlowWatchWidgetExtension" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				BAD21626C1274EB8AFC00427 /* Debug */,
-				2CE62DD7EACA4C28B26CB0D8 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

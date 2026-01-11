@@ -1,4 +1,5 @@
 /xcuserdata/
+**/xcuserdata/
 *.xcuserstate
 .DS_Store
 docs/SESSIONS/

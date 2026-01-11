@@ -8,6 +8,7 @@
 import Combine
 import SwiftUI
 import WatchConnectivity
+import WidgetKit
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
@@ -39,6 +40,12 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
+
+    func sessionDidBecomeInactive(_ session: WCSession) { }
+
+    func sessionDidDeactivate(_ session: WCSession) {
+        session.activate()
+    }
 
     func sessionReachabilityDidChange(_ session: WCSession) { }
 
@@ -121,6 +128,12 @@ struct ContentView: View {
             Alert(title: Text(alert.message))
         }
         .onReceive(ticker) { now = $0 }
+        .onReceive(syncStore.$isOnDuty) { isOnDuty in
+            if !isOnDuty {
+                resetSession()
+                updateWidgetState(isRunning: false, startedAt: nil)
+            }
+        }
     }
 
     private var stageLabel: String {
@@ -163,19 +176,23 @@ struct ContentView: View {
             stage = .shooting
             session.shootingStart = now
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
+            updateWidgetState(isRunning: true, startedAt: now)
         case .shooting:
             stage = .selecting
             session.selectingStart = now
             syncStore.sendSessionEvent(event: "startSelecting", timestamp: now.timeIntervalSince1970)
+            updateWidgetState(isRunning: true, startedAt: session.shootingStart)
         case .selecting:
             stage = .ended
             session.endedAt = now
             syncStore.sendSessionEvent(event: "end", timestamp: now.timeIntervalSince1970)
+            updateWidgetState(isRunning: false, startedAt: nil)
         case .ended:
             session = Session()
             session.shootingStart = now
             stage = .shooting
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
+            updateWidgetState(isRunning: true, startedAt: now)
         }
     }
 
@@ -213,6 +230,12 @@ struct ContentView: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func updateWidgetState(isRunning: Bool, startedAt: Date?) {
+        WidgetStateStore.writeState(isRunning: isRunning, startedAt: startedAt, lastUpdatedAt: Date())
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetStateStore.widgetKind)
+        print("Widget state updated: running=\(isRunning)")
     }
 }
 
