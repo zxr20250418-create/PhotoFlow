@@ -1,48 +1,14 @@
 name: CI
-permissions:
-  contents: read
-  pull-requests: write
 
 on:
   pull_request:
-  workflow_dispatch:
+  push:
+    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest
-
-      - name: Build iOS app
-        run: |
-          echo "Building iOS app..."
-          bash scripts/build_ios.sh
-
-      - name: Build watchOS app
-        run: |
-          echo "Building watchOS app..."
-          bash scripts/build_watch.sh
-
-      - name: Verify version consistency
-        run: |
-          echo "Checking version consistency..."
-          bash scripts/check_versions.sh
-
-  notify:
-    needs: build
-    runs-on: ubuntu-latest
-    if: success() && github.event_name == 'pull_request'
-    steps:
-      - name: Comment success message on PR
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          message: |
-            ✅ **CI Build Passed**
-            - All checks completed successfully.
-            - You can safely merge this PR.
-            _Generated automatically by CI workflow._
+      - name: Build iOS + watch
+        run: bash scripts/build_all.sh

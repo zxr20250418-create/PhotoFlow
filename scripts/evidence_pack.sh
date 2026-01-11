@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pwd
+PR_NUM="${1:-}"
+OUT="${2:-}"
 
-date -u
+mkdir -p artifacts
 
-echo "branch: $(git branch --show-current)"
-echo "head: $(git rev-parse HEAD)"
-
-git status -sb
-
-git log -n 5
-
-ls -la docs scripts .github/workflows | sed -n '1,200p'
+{
+  echo "== Evidence"
+  echo "Time: $(date -Iseconds)"
+  echo "Repo: $(pwd)"
+  echo
+  echo "== Git status"
+  git status -sb || true
+  echo
+  echo "== Recent commits"
+  git log --oneline -n 20 || true
+  echo
+  echo "== verify.md (first 200 lines)"
+  sed -n '1,200p' docs/AGENTS/verify.md 2>/dev/null || echo "(missing docs/AGENTS/verify.md)"
+  echo
+  if [[ -n "$PR_NUM" ]]; then
+    echo "== PR #$PR_NUM checks"
+    gh pr checks "$PR_NUM" || true
+  fi
+} | tee "$OUT" >/dev/null

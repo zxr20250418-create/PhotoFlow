@@ -5,7 +5,79 @@
 //  Created by 郑鑫荣 on 2025/12/30.
 //
 
+import Combine
 import SwiftUI
+import WatchConnectivity
+
+@MainActor
+final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
+    struct SessionEvent: Identifiable {
+        let id = UUID()
+        let event: String
+        let timestamp: TimeInterval
+    }
+
+    @Published var isOnDuty = false
+    @Published var incomingEvent: SessionEvent?
+
+    override init() {
+        super.init()
+        guard WCSession.isSupported() else { return }
+        WCSession.default.delegate = self
+        WCSession.default.activate()
+    }
+
+    func setOnDuty(_ value: Bool) {
+        isOnDuty = value
+        sendOnDutyUpdate(value)
+    }
+
+    private func sendOnDutyUpdate(_ value: Bool) {
+        guard WCSession.isSupported() else { return }
+        let payload: [String: Any] = [
+            "isOnDuty": value,
+            "ts": Int(Date().timeIntervalSince1970)
+        ]
+        do {
+            try WCSession.default.updateApplicationContext(payload)
+        } catch {
+            // Non-fatal; watch will catch up on next change.
+        }
+    }
+
+    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
+
+    func sessionDidBecomeInactive(_ session: WCSession) { }
+
+    func sessionDidDeactivate(_ session: WCSession) {
+        session.activate()
+    }
+
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        handleSessionPayload(message)
+    }
+
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+        handleSessionPayload(userInfo)
+    }
+
+    private func handleSessionPayload(_ payload: [String: Any]) {
+        guard let type = payload["type"] as? String, type == "session_event" else { return }
+        guard let event = payload["event"] as? String else { return }
+        let timestamp: TimeInterval?
+        if let value = payload["t"] as? Int {
+            timestamp = TimeInterval(value)
+        } else if let value = payload["t"] as? Double {
+            timestamp = value
+        } else {
+            timestamp = nil
+        }
+        guard let resolvedTimestamp = timestamp else { return }
+        Task { @MainActor in
+            incomingEvent = SessionEvent(event: event, timestamp: resolvedTimestamp)
+        }
+    }
+}
 
 struct ContentView: View {
     enum Stage {
@@ -44,44 +116,53 @@ struct ContentView: View {
         }
     }
 
-    @State private var isOnDuty = false
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
+    @State private var now = Date()
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @ObservedObject var syncStore: WatchSyncStore
+
+    init(syncStore: WatchSyncStore) {
+        self.syncStore = syncStore
+    }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let now = context.date
-            let durations = computeDurations(now: now)
+        let durations = computeDurations(now: now)
 
-            VStack(spacing: 16) {
-                VStack(spacing: 8) {
-                    Text(isOnDuty ? stageLabel : "未上班")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Button(action: handlePrimaryAction) {
-                    Text(primaryButtonTitle)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button(isOnDuty ? "下班" : "上班") {
-                    isOnDuty.toggle()
-                    if !isOnDuty {
-                        resetSession()
-                    }
-                }
-                .buttonStyle(.bordered)
+        VStack(spacing: 16) {
+            VStack(spacing: 8) {
+                Text(syncStore.isOnDuty ? stageLabel : "未上班")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-            .padding()
-            .alert(item: $activeAlert) { alert in
-                Alert(title: Text(alert.message))
+
+            Button(action: handlePrimaryAction) {
+                Text(primaryButtonTitle)
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
+
+            Button(syncStore.isOnDuty ? "下班" : "上班") {
+                let nextOnDuty = !syncStore.isOnDuty
+                syncStore.setOnDuty(nextOnDuty)
+                if !nextOnDuty {
+                    resetSession()
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding()
+        .alert(item: $activeAlert) { alert in
+            Alert(title: Text(alert.message))
+        }
+        .onReceive(ticker) { now = $0 }
+        .onReceive(syncStore.$incomingEvent) { event in
+            guard let event = event else { return }
+            applySessionEvent(event)
         }
     }
 
@@ -99,7 +180,7 @@ struct ContentView: View {
     }
 
     private var primaryButtonTitle: String {
-        if !isOnDuty {
+        if !syncStore.isOnDuty {
             return "开始拍摄"
         }
         switch stage {
@@ -115,7 +196,7 @@ struct ContentView: View {
     }
 
     private func handlePrimaryAction() {
-        guard isOnDuty else {
+        guard syncStore.isOnDuty else {
             activeAlert = .notOnDuty
             return
         }
@@ -131,7 +212,9 @@ struct ContentView: View {
             stage = .ended
             session.endedAt = now
         case .ended:
-            resetSession()
+            session = Session()
+            session.shootingStart = now
+            stage = .shooting
         }
     }
 
@@ -140,38 +223,50 @@ struct ContentView: View {
         session = Session()
     }
 
-    private func computeDurations(now: Date) -> (total: TimeInterval, currentStage: TimeInterval) {
-        let total: TimeInterval
-        let currentStage: TimeInterval
+    private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
+        let timestampSeconds = normalizeEpochSeconds(event.timestamp)
+        let timestamp = Date(timeIntervalSince1970: timestampSeconds)
+        switch event.event {
+        case "startShooting":
+            session = Session()
+            session.shootingStart = timestamp
+            stage = .shooting
+        case "startSelecting":
+            session.selectingStart = timestamp
+            stage = .selecting
+        case "end":
+            session.endedAt = timestamp
+            stage = .ended
+        default:
+            break
+        }
+    }
 
+    private func normalizeEpochSeconds(_ value: TimeInterval) -> TimeInterval {
+        if value > 1_000_000_000_000 {
+            return value / 1000
+        }
+        return value
+    }
+
+    private func computeDurations(now: Date) -> (total: TimeInterval, currentStage: TimeInterval) {
+        guard let shootingStart = session.shootingStart else {
+            return (0, 0)
+        }
+        let endTime = session.endedAt ?? now
+        let total = max(0, endTime.timeIntervalSince(shootingStart))
+
+        let currentStage: TimeInterval
         switch stage {
-        case .idle:
-            total = 0
-            currentStage = 0
         case .shooting:
-            guard let shootingStart = session.shootingStart else {
-                return (0, 0)
-            }
-            total = max(0, now.timeIntervalSince(shootingStart))
-            currentStage = total
+            currentStage = max(0, now.timeIntervalSince(shootingStart))
         case .selecting:
-            guard let shootingStart = session.shootingStart,
-                  let selectingStart = session.selectingStart else {
-                return (0, 0)
+            if let selectingStart = session.selectingStart {
+                currentStage = max(0, now.timeIntervalSince(selectingStart))
+            } else {
+                currentStage = 0
             }
-            let shooting = max(0, selectingStart.timeIntervalSince(shootingStart))
-            let selecting = max(0, now.timeIntervalSince(selectingStart))
-            total = shooting + selecting
-            currentStage = selecting
-        case .ended:
-            guard let shootingStart = session.shootingStart,
-                  let selectingStart = session.selectingStart,
-                  let endedAt = session.endedAt else {
-                return (0, 0)
-            }
-            let shooting = max(0, selectingStart.timeIntervalSince(shootingStart))
-            let selecting = max(0, endedAt.timeIntervalSince(selectingStart))
-            total = shooting + selecting
+        case .idle, .ended:
             currentStage = 0
         }
 
@@ -187,5 +282,5 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(syncStore: WatchSyncStore())
 }
