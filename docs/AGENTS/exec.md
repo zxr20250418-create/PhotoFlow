@@ -43,3 +43,24 @@
 - Fallback (no signing):
   - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
   - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+
+## TC-WATCH-WIDGET-V1 Shared State
+- App Group: `group.com.zhengxinrong.photoflow`
+- Keys:
+  - `pf_widget_isRunning` (Bool)
+  - `pf_widget_startedAt` (Double unix ts, optional)
+  - `pf_widget_lastUpdatedAt` (Double unix ts)
+- Writes: `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift` (`handlePrimaryAction`, `onReceive` for on-duty changes via `updateWidgetState` -> `WidgetCenter.reloadTimelines`).
+- Reads: `PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift` via `WidgetStateStore`.
+
+## Manual Verification
+1) Build and run the watch app in the watch simulator.
+2) Add the PhotoFlow complication or Smart Stack widget.
+3) Tap Start/Next/End in the watch app; confirm widget updates running/stopped, elapsed, and last updated.
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' build`
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' build`
+- Fallback (no signing):
+  - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
