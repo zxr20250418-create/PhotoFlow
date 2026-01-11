@@ -14,12 +14,12 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (PhotoFlowWidgetEntry) -> Void) {
-        completion(sampleEntry(isRunning: true))
+        completion(entryFromStore())
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<PhotoFlowWidgetEntry>) -> Void) {
-        let entry = sampleEntry(isRunning: false)
-        completion(Timeline(entries: [entry], policy: .never))
+        let entry = entryFromStore()
+        completion(Timeline(entries: [entry], policy: .after(nextRefreshDate(from: entry))))
     }
 
     private func sampleEntry(isRunning: Bool) -> PhotoFlowWidgetEntry {
@@ -29,6 +29,36 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
             elapsedText: "12:34",
             lastUpdated: Date()
         )
+    }
+
+    private func entryFromStore() -> PhotoFlowWidgetEntry {
+        let now = Date()
+        guard WidgetStateStore.isAvailable else {
+            return sampleEntry(isRunning: true)
+        }
+        let state = WidgetStateStore.readState(now: now)
+        let elapsedText = formatElapsed(isRunning: state.isRunning, startedAt: state.startedAt, now: now)
+        return PhotoFlowWidgetEntry(
+            date: now,
+            isRunning: state.isRunning,
+            elapsedText: elapsedText,
+            lastUpdated: state.lastUpdatedAt
+        )
+    }
+
+    private func formatElapsed(isRunning: Bool, startedAt: Date?, now: Date) -> String {
+        guard isRunning, let startedAt else { return "00:00" }
+        let totalSeconds = max(0, Int(now.timeIntervalSince(startedAt)))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func nextRefreshDate(from entry: PhotoFlowWidgetEntry) -> Date {
+        if entry.isRunning {
+            return entry.date.addingTimeInterval(60)
+        }
+        return entry.date.addingTimeInterval(15 * 60)
     }
 }
 
@@ -77,7 +107,7 @@ struct PhotoFlowWidgetView: View {
 }
 
 struct PhotoFlowWatchWidget: Widget {
-    let kind = "PhotoFlowWatchWidget"
+    let kind = WidgetStateStore.widgetKind
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: PhotoFlowWidgetProvider()) { entry in
