@@ -26,7 +26,21 @@ else
   echo "==> BYPASS_RG=true (skip RG-V1 gate)"
 fi
 
-git add -A ':(exclude)docs/SESSIONS' || true
+git add scripts/*.sh docs/AGENTS/verify.md docs/AGENTS/verify_auto.md 2>/dev/null || true
+extra_paths=""
+while IFS= read -r path; do
+  case "$path" in
+    scripts/*.sh|docs/AGENTS/verify.md|docs/AGENTS/verify_auto.md) ;;
+    "") ;;
+    *) extra_paths+="${path}"$'\n' ;;
+  esac
+done < <(git diff --name-only --cached)
+if [[ -n "$extra_paths" ]]; then
+  echo "ERROR: ship_2stage allowlist violation. Unapproved files staged:" >&2
+  echo "$extra_paths" >&2
+  echo "Allowed: scripts/*.sh, docs/AGENTS/verify.md, docs/AGENTS/verify_auto.md" >&2
+  exit 1
+fi
 if [[ -n "$(git diff --cached --name-only)" ]]; then
   git commit -m "chore: ship (auto gate pass)"
 fi
