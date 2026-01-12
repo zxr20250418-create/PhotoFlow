@@ -174,3 +174,17 @@
   - Result: ** BUILD SUCCEEDED **
 - xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
   - Result: ** BUILD SUCCEEDED **
+
+## TC-DL3-PREFLIGHT-EMBEDDED-WATCHAPP
+
+## Preflight Commands
+- `./scripts/check_embedded_watch_app.sh`
+- `./scripts/preflight_device_install.sh` (builds Debug-iphoneos then runs checks)
+
+## Failure Meanings
+- Missing WKWatchKitApp / WKApplication present: watch app Info.plist is wrong; remove WKApplication and keep WKWatchKitApp.
+- Missing WKCompanionAppBundleIdentifier: watch app Info.plist missing companion bundle id.
+- UIDeviceFamily missing 4: watch app is being built for iPhone device families; check watch app target settings.
+- No WatchKit appex in PlugIns: watch app is not embedding the WatchKit extension; check embed phase and target dependency.
+- photoflow scheme missing: URL scheme not present in watch app plist; set REQUIRE_PHOTOFLOW_URL=1 to fail when required.
+- Widget appex check failing: use scripts/check_embedded_widget_appex.sh once it exists to validate WidgetKit appex keys.
