@@ -1,43 +1,31 @@
-## ACTIVE — TC-DEVICE-INSTALL-FIX-WIDGET-APPEX
-
-ID: TC-DEVICE-INSTALL-FIX-WIDGET-APPEX
-Title: Fix “install then disappear” by making embedded widget appex metadata valid for WidgetKit
+## ACTIVE — TC-WIDGET-CN-V2A
+ID: TC-WIDGET-CN-V2A
+Title: Watch widget 文案中文化（v2a，仅改文案）
 AssignedTo: Executor
 
-Allowed files (ONLY):
-- PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift
-- PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift
-- PhotoFlow/PhotoFlowWatchWidget/Info.plist
-- PhotoFlow/PhotoFlow.xcodeproj/project.pbxproj (ONLY if needed to ensure the widget extension target uses the correct Info.plist / disable generated Info.plist injection)
-
 Goal:
-- Device install no longer rolls back (“install then disappear”).
-- Embedded appex passes metadata rules for WidgetKit.
+- 小组件/Complication 显示中文文案：
+  - 状态：拍摄中 / 选片中 / 已停止（短文案：拍摄 / 选片 / 停止）
+  - “Elapsed” -> “用时”
+  - “Updated/Last updated” -> “更新 HH:mm”（24小时制，不出现“上午/下午”）
 
-Scope:
-1) Keep PR #24 fixes (iphoneos build must remain BUILD SUCCEEDED).
-2) Fix embedded appex Info.plist so that for extension point `com.apple.widgetkit-extension`:
-   - `NSExtensionPrincipalClass` must be ABSENT
-   - `NSExtensionMainStoryboard` must be ABSENT
-   - `CFBundleExecutable` present & non-empty, and the executable file exists inside the `.appex`
-   - `CFBundleName` present & non-empty
-   - `NSExtensionPointIdentifier == com.apple.widgetkit-extension`
-3) If those forbidden keys keep reappearing, allow minimal pbxproj/build-settings change to:
-   - force `INFOPLIST_FILE` to `PhotoFlow/PhotoFlowWatchWidget/Info.plist` for the widget target (all configs)
-   - disable `GENERATE_INFOPLIST_FILE` for the widget target
-   - remove any `INFOPLIST_KEY_NSExtensionPrincipalClass` / storyboard injection
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift
+- docs/AGENTS/exec.md（只追加记录，允许提交）
+
+Forbidden:
+- 不允许修改 project.pbxproj / Info.plist / entitlements / 任何目标配置
+- 不新增/删除 target，不改任何 build settings
+- 不改共享存储结构（不新增 keys，不改写入逻辑）
 
 Acceptance:
-- `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*` then
-  `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
-  => `BUILD SUCCEEDED`
-- Embedded appex inspection (Debug-iphoneos) shows:
-  - `CFBundleExecutable` / `CFBundleName` present
-  - `NSExtensionPrincipalClass` absent
-  - `NSExtensionMainStoryboard` absent
-  - `NSExtensionPointIdentifier` correct
-- Running on device succeeds (no install rollback).
-- Update `docs/AGENTS/exec.md` with the commands + inspection output.
+- accessoryRectangular：三行中文（状态 / 用时 xx:xx / 更新 HH:mm）
+- accessoryCircular & accessoryCorner：短中文（拍摄/选片/停止），必要时仍显示用时
+- xcodebuild 构建通过（CODE_SIGNING_ALLOWED=NO 可）：
+  - watch app scheme + widget scheme
 
 StopCondition:
-- Update PR #24 (preferred) or open a new PR, CI green, `docs/AGENTS/exec.md` updated; STOP.
+- PR opened to main（不合并）
+- CI green
+- exec.md 追加“改了哪些文案 + 时间格式 + 验证命令”
+- STOP
