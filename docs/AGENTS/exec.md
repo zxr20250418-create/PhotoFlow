@@ -43,3 +43,41 @@
 - Fallback (no signing):
   - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
   - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+
+## TC-DEVICE-INSTALL-FIX-WIDGET-APPEX
+
+## Build
+- `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*`
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Embedded AppEx Inspection
+- `APP_EX=/Users/zhengxinrong/Library/Developer/Xcode/DerivedData/PhotoFlow-ejgklfquxzampbhawgvwoufqsvze/Build/Products/Debug-iphoneos/PhotoFlow.app/Watch/PhotoFlowWatch Watch App.app/PlugIns/PhotoFlowWatchWidgetExtension.appex`
+- `plutil -p "$APP_EX/Info.plist" | egrep 'CFBundleExecutable|CFBundleName|NSExtensionPointIdentifier|NSExtensionPrincipalClass|NSExtensionMainStoryboard'`
+  - `"CFBundleExecutable" => "PhotoFlowWatchWidgetExtension"`
+  - `"CFBundleName" => "PhotoFlowWatchWidgetExtension"`
+  - `"NSExtensionPointIdentifier" => "com.apple.widgetkit-extension"`
+- `ls -lah "$APP_EX"`
+  - `Info.plist`
+  - `PhotoFlowWatchWidgetExtension`
+  - `PhotoFlowWatchWidgetExtension.debug.dylib`
+  - `__preview.dylib`
+
+## TC-DEVICE-INSTALL-FIX-WIDGET-APPEX (retry)
+
+## Build
+- `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*`
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Embedded AppEx Inspection
+- `APP_EX=/Users/zhengxinrong/Library/Developer/Xcode/DerivedData/PhotoFlow-ejgklfquxzampbhawgvwoufqsvze/Build/Products/Debug-iphoneos/PhotoFlow.app/Watch/PhotoFlowWatch Watch App.app/PlugIns/PhotoFlowWatchWidgetExtension.appex`
+- `plutil -p "$APP_EX/Info.plist" | egrep 'CFBundleExecutable|CFBundleName|NSExtensionPointIdentifier|NSExtensionPrincipalClass|NSExtensionMainStoryboard'`
+  - `"CFBundleExecutable" => "PhotoFlowWatchWidgetExtension"`
+  - `"CFBundleName" => "PhotoFlowWatchWidgetExtension"`
+  - `"NSExtensionPointIdentifier" => "com.apple.widgetkit-extension"`
+- `ls -lah "$APP_EX"`
+  - `__preview.dylib`
+  - `Info.plist`
+  - `PhotoFlowWatchWidgetExtension`
+  - `PhotoFlowWatchWidgetExtension.debug.dylib`

@@ -4,18 +4,22 @@
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>PhotoFlow</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleName</key>
+	<string>PhotoFlowWatchWidgetExtension</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSExtension</key>
-    <dict>
-        <key>NSExtensionPointIdentifier</key>
-        <string>com.apple.widgetkit-extension</string>
-        <key>NSExtensionPrincipalClass</key>
-        <string>WidgetKit.WidgetExtension</string>
-    </dict>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.widgetkit-extension</string>
+	</dict>
 </dict>
 </plist>
