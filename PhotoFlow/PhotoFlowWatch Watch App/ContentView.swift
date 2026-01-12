@@ -40,6 +40,14 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
 
+#if os(iOS)
+    func sessionDidBecomeInactive(_ session: WCSession) { }
+
+    func sessionDidDeactivate(_ session: WCSession) {
+        session.activate()
+    }
+#endif
+
     func sessionReachabilityDidChange(_ session: WCSession) { }
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
