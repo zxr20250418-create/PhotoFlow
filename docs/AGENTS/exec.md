@@ -125,3 +125,33 @@
   - Result: ** BUILD SUCCEEDED **
 - xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
   - Result: ** BUILD SUCCEEDED **
+
+## TC-DEEPLINK-DL1-ROUTING
+
+## Supported URL Formats
+- `photoflow://stage/shooting`
+- `photoflow://stage/selecting`
+- `photoflow://stage/stopped`
+- Any other URL is ignored safely (no crash).
+
+## Routing Behavior (state variables)
+- Sets local in-memory state only (no sync / no widget writes):
+  - `shooting`: `stage=.shooting`, clears `selectingStart/endedAt`, ensures `shootingStart` exists (missing -> `now`).
+  - `selecting`: `stage=.selecting`, clears `endedAt`, ensures `shootingStart/selectingStart` exist (missing -> `now`).
+  - `stopped`: `stage=.ended`, sets `endedAt=now` only if `shootingStart` exists (otherwise leaves timestamps empty).
+
+## DEBUG Manual Test Hook
+- Watch app (DEBUG builds) shows 3 buttons:
+  - `DEBUG: stage/shooting`
+  - `DEBUG: stage/selecting`
+  - `DEBUG: stage/stopped`
+- Tap to simulate `onOpenURL` routing without URL scheme registration (DL-3).
+
+## Build
+- `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*`
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
