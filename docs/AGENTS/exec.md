@@ -81,3 +81,17 @@
   - `Info.plist`
   - `PhotoFlowWatchWidgetExtension`
   - `PhotoFlowWatchWidgetExtension.debug.dylib`
+
+## TC-WIDGET-CN-V2A
+
+## Text Updates
+- Running -> 拍摄中 (short: 拍摄)
+- Stopped -> 已停止 (short: 停止)
+- Elapsed -> 用时
+- Updated -> 更新 HH:mm (DateFormatter dateFormat = H:mm)
+
+## Build
+- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build
+  - Result: ** BUILD SUCCEEDED **
+- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build
+  - Result: ** BUILD SUCCEEDED **

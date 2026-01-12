@@ -36,23 +36,41 @@ struct PhotoFlowWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: PhotoFlowWidgetProvider.Entry
 
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "H:mm"
+        return formatter
+    }()
+
+    private var statusText: String {
+        entry.isRunning ? "拍摄中" : "已停止"
+    }
+
+    private var shortStatusText: String {
+        entry.isRunning ? "拍摄" : "停止"
+    }
+
+    private var updatedText: String {
+        "更新 \(Self.timeFormatter.string(from: entry.lastUpdated))"
+    }
+
     var body: some View {
         Group {
             switch family {
             case .accessoryCircular:
                 VStack(spacing: 2) {
-                    Text(entry.isRunning ? "Running" : "Stopped")
+                    Text(shortStatusText)
                         .font(.caption2)
                     Text(entry.elapsedText)
                         .font(.caption2.monospacedDigit())
                 }
             case .accessoryRectangular:
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.isRunning ? "Running" : "Stopped")
+                    Text(statusText)
                         .font(.caption)
-                    Text("Elapsed \(entry.elapsedText)")
+                    Text("用时 \(entry.elapsedText)")
                         .font(.caption2.monospacedDigit())
-                    Text(entry.lastUpdated, style: .time)
+                    Text(updatedText)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -61,13 +79,13 @@ struct PhotoFlowWidgetView: View {
                 VStack(spacing: 2) {
                     Text(entry.elapsedText)
                         .font(.caption2.monospacedDigit())
-                    Text(entry.isRunning ? "Run" : "Stop")
+                    Text(shortStatusText)
                         .font(.caption2)
                 }
 #endif
             default:
                 VStack(spacing: 2) {
-                    Text(entry.isRunning ? "Running" : "Stopped")
+                    Text(statusText)
                         .font(.caption)
                     Text(entry.elapsedText)
                         .font(.caption2.monospacedDigit())
