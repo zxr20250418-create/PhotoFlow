@@ -8,6 +8,36 @@
 import Combine
 import SwiftUI
 import WatchConnectivity
+import WidgetKit
+
+private enum WidgetStateStore {
+    static let appGroupId = "group.com.zhengxinrong.photoflow"
+    static let widgetKind = "PhotoFlowWatchWidget"
+    static let keyIsRunning = "pf_widget_isRunning"
+    static let keyStartedAt = "pf_widget_startedAt"
+    static let keyLastUpdatedAt = "pf_widget_lastUpdatedAt"
+    static let keyStage = "pf_widget_stage"
+    static let stageShooting = "shooting"
+    static let stageSelecting = "selecting"
+    static let stageStopped = "stopped"
+
+    static func writeState(
+        isRunning: Bool,
+        startedAt: Date?,
+        stage: String,
+        lastUpdatedAt: Date = Date()
+    ) {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+        defaults.set(isRunning, forKey: keyIsRunning)
+        if let startedAt {
+            defaults.set(startedAt.timeIntervalSince1970, forKey: keyStartedAt)
+        } else {
+            defaults.removeObject(forKey: keyStartedAt)
+        }
+        defaults.set(stage, forKey: keyStage)
+        defaults.set(lastUpdatedAt.timeIntervalSince1970, forKey: keyLastUpdatedAt)
+    }
+}
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
@@ -171,19 +201,23 @@ struct ContentView: View {
             stage = .shooting
             session.shootingStart = now
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
+            updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
         case .shooting:
             stage = .selecting
             session.selectingStart = now
             syncStore.sendSessionEvent(event: "startSelecting", timestamp: now.timeIntervalSince1970)
+            updateWidgetState(isRunning: true, startedAt: session.shootingStart, stage: WidgetStateStore.stageSelecting)
         case .selecting:
             stage = .ended
             session.endedAt = now
             syncStore.sendSessionEvent(event: "end", timestamp: now.timeIntervalSince1970)
+            updateWidgetState(isRunning: false, startedAt: nil, stage: WidgetStateStore.stageStopped)
         case .ended:
             session = Session()
             session.shootingStart = now
             stage = .shooting
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
+            updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
         }
     }
 
@@ -221,6 +255,11 @@ struct ContentView: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func updateWidgetState(isRunning: Bool, startedAt: Date?, stage: String) {
+        WidgetStateStore.writeState(isRunning: isRunning, startedAt: startedAt, stage: stage)
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetStateStore.widgetKind)
     }
 }
 

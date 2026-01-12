@@ -95,3 +95,33 @@
   - Result: ** BUILD SUCCEEDED **
 - xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build
   - Result: ** BUILD SUCCEEDED **
+
+## TC-WIDGET-CN-V2B
+
+## Store Contract
+- App Group: group.com.zhengxinrong.photoflow
+- Keys:
+  - pf_widget_isRunning (Bool)
+  - pf_widget_startedAt (Double, unix ts)
+  - pf_widget_lastUpdatedAt (Double, unix ts)
+  - pf_widget_stage (String): shooting | selecting | stopped (missing -> stopped)
+
+## Stage Mapping
+- shooting -> 拍摄中 (short: 拍摄)
+- selecting -> 选片中 (short: 选片)
+- stopped/unknown -> 已停止 (short: 停止)
+- Updated line: 更新 HH:mm (DateFormatter dateFormat = H:mm)
+
+## Write Points
+- startShooting -> stage=shooting (isRunning=true, startedAt=now)
+- startSelecting -> stage=selecting (isRunning=true, startedAt=shootingStart)
+- end -> stage=stopped (isRunning=false, startedAt=nil)
+- restart -> stage=shooting (isRunning=true, startedAt=now)
+
+## Build
+- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build
+  - Result: ** BUILD SUCCEEDED **
+- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build
+  - Result: ** BUILD SUCCEEDED **
+- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
+  - Result: ** BUILD SUCCEEDED **
