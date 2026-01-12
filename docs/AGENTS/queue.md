@@ -1,33 +1,43 @@
-## ACTIVE — TC-IOS-BUILD-FIX-WIDGETKIT
-ID: TC-IOS-BUILD-FIX-WIDGETKIT
-Title: Fix iphoneos build so device install stops “install then disappear”
+## ACTIVE — TC-DEVICE-INSTALL-FIX-WIDGET-APPEX
+
+ID: TC-DEVICE-INSTALL-FIX-WIDGET-APPEX
+Title: Fix “install then disappear” by making embedded widget appex metadata valid for WidgetKit
 AssignedTo: Executor
 
 Allowed files (ONLY):
 - PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift
 - PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift
+- PhotoFlow/PhotoFlowWatchWidget/Info.plist
+- PhotoFlow/PhotoFlow.xcodeproj/project.pbxproj (ONLY if needed to ensure the widget extension target uses the correct Info.plist / disable generated Info.plist injection)
 
 Goal:
-- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO
-  returns BUILD SUCCEEDED
+- Device install no longer rolls back (“install then disappear”).
+- Embedded appex passes metadata rules for WidgetKit.
 
 Scope:
-- Add iOS-only WCSessionDelegate methods wrapped in #if os(iOS) (no override)
-- Guard all .accessoryCorner usage so iphoneos build never compiles watch-only symbols:
-  - #Preview(accessoryCorner) under #if os(watchOS)
-  - .supportedFamilies includes .accessoryCorner only on watchOS
+1) Keep PR #24 fixes (iphoneos build must remain BUILD SUCCEEDED).
+2) Fix embedded appex Info.plist so that for extension point `com.apple.widgetkit-extension`:
+   - `NSExtensionPrincipalClass` must be ABSENT
+   - `NSExtensionMainStoryboard` must be ABSENT
+   - `CFBundleExecutable` present & non-empty, and the executable file exists inside the `.appex`
+   - `CFBundleName` present & non-empty
+   - `NSExtensionPointIdentifier == com.apple.widgetkit-extension`
+3) If those forbidden keys keep reappearing, allow minimal pbxproj/build-settings change to:
+   - force `INFOPLIST_FILE` to `PhotoFlow/PhotoFlowWatchWidget/Info.plist` for the widget target (all configs)
+   - disable `GENERATE_INFOPLIST_FILE` for the widget target
+   - remove any `INFOPLIST_KEY_NSExtensionPrincipalClass` / storyboard injection
 
-Forbidden:
-- No project.pbxproj / Info.plist / entitlements changes
-- No other files
+Acceptance:
+- `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*` then
+  `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  => `BUILD SUCCEEDED`
+- Embedded appex inspection (Debug-iphoneos) shows:
+  - `CFBundleExecutable` / `CFBundleName` present
+  - `NSExtensionPrincipalClass` absent
+  - `NSExtensionMainStoryboard` absent
+  - `NSExtensionPointIdentifier` correct
+- Running on device succeeds (no install rollback).
+- Update `docs/AGENTS/exec.md` with the commands + inspection output.
 
 StopCondition:
-- BUILD SUCCEEDED
-- Embedded appex inspection output shows:
-  - NSExtensionPointIdentifier == com.apple.widgetkit-extension
-  - CFBundleExecutable + CFBundleName present and non-empty
-  - NSExtensionPrincipalClass absent
-  - NSExtensionMainStoryboard absent
-- PR opened to main (no merge)
-- docs/AGENTS/exec.md updated with commands + outputs
-- STOP
+- Update PR #24 (preferred) or open a new PR, CI green, `docs/AGENTS/exec.md` updated; STOP.
