@@ -43,3 +43,12 @@
 - Fallback (no signing):
   - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
   - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+
+## AppEx Preflight Check
+- Run:
+  - `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*`
+  - `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - `./scripts/check_embedded_widget_appex.sh`
+- Expected output:
+  - PASS: `ALL CHECKS PASSED`
+  - FAIL: `FAIL: <reason>`
