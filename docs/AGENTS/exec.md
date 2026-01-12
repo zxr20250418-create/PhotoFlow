@@ -255,3 +255,27 @@
 - xcrun devicectl device uninstall app --device 202 com.zhengxinrong.PhotoFlow --quiet || true
 - xcrun devicectl device install app --device 202 "$APP_PATH"
   - ERROR: MIInstallerErrorDomain 102 (WatchKitAppInvalidUIDeviceFamily): WatchKit 2.0 app's UIDeviceFamily key does not specify that it's compatible with device family 4.
+
+## TC-DL3-WATCHKIT-EMBED-FIX
+
+## Build
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild clean build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -configuration Debug -destination 'id=00008120-00064CDE34E8C01E' -allowProvisioningUpdates`
+  - Result: ** BUILD SUCCEEDED **
+
+## Debug-watchsimulator WatchKit Extension Check
+- `APP_EX=$(ls -d ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-watchsimulator/PhotoFlowWatch\ Watch\ Extension.appex 2>/dev/null | head -n 1); plutil -p "$APP_EX/Info.plist" | egrep 'NSExtensionPointIdentifier|NSExtensionPrincipalClass'`
+  - "NSExtensionPointIdentifier" => "com.apple.watchkit"
+  - "NSExtensionPrincipalClass" => "WKExtension"
+
+## Debug-iphoneos Embedded Watch App PlugIns
+- `IOS_APP=$(ls -d ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-iphoneos/PhotoFlow.app | head -n 1); WATCH_APP="$IOS_APP/Watch/PhotoFlowWatch Watch App.app"; ls -la "$WATCH_APP/PlugIns" | sed -n '1,120p'`
+  - total 0
+  - drwxr-xr-x   4 zhengxinrong  staff  128  1 13 01:14 .
+  - drwxr-xr-x  12 zhengxinrong  staff  384  1 13 01:14 ..
+  - drwxr-xr-x   8 zhengxinrong  staff  256  1 13 01:14 PhotoFlowWatch Watch Extension.appex
+  - drwxr-xr-x   8 zhengxinrong  staff  256  1 13 01:14 PhotoFlowWatchWidgetExtension.appex
+- `IOS_APP=$(ls -d ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-iphoneos/PhotoFlow.app | head -n 1); WATCH_APP="$IOS_APP/Watch/PhotoFlowWatch Watch App.app"; plutil -p "$WATCH_APP/PlugIns/PhotoFlowWatch Watch Extension.appex/Info.plist" | egrep 'NSExtensionPointIdentifier|NSExtensionPrincipalClass'`
+  - "NSExtensionPointIdentifier" => "com.apple.watchkit"
+  - "NSExtensionPrincipalClass" => "WKExtension"
