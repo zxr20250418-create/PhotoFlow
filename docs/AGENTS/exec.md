@@ -233,3 +233,25 @@
 - `xcrun devicectl device uninstall app --device 202 com.zhengxinrong.PhotoFlow --quiet || true`
 - `xcrun devicectl device install app --device 202 "$APP_PATH"`
   - ERROR: com.zhengxinrong.PhotoFlow.watchkitapp: Missing WKCompanionAppBundleIdentifier key in WatchKit 2.0 app's Info.plist
+
+## TC-DEEPLINK-DL3-UIDEVICEFAMILY
+
+## Watch App Info.plist Update
+- Added UIDeviceFamily = [4] to PhotoFlow/PhotoFlowWatch Watch App/PhotoFlowWatchAppInfo.plist.
+
+## Build
+- xcodebuild clean build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug -destination 'id=00008120-00064CDE34E8C01E' -allowProvisioningUpdates
+  - Result: ** BUILD SUCCEEDED **
+
+## Embedded Watch App UIDeviceFamily Check
+- plutil -p "$WATCH_APP_PLIST" | awk 'BEGIN{p=0} /"UIDeviceFamily"/{p=1} p{print} p && /^  ]/{exit}'
+  - "UIDeviceFamily" => [
+    0 => 1
+    1 => 2
+    ]
+  - Note: embedded Watch app plist still shows 1/2 after rebuild.
+
+## devicectl Install
+- xcrun devicectl device uninstall app --device 202 com.zhengxinrong.PhotoFlow --quiet || true
+- xcrun devicectl device install app --device 202 "$APP_PATH"
+  - ERROR: MIInstallerErrorDomain 102 (WatchKitAppInvalidUIDeviceFamily): WatchKit 2.0 app's UIDeviceFamily key does not specify that it's compatible with device family 4.
