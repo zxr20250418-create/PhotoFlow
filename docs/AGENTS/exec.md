@@ -155,3 +155,22 @@
   - Result: ** BUILD SUCCEEDED **
 - `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
   - Result: ** BUILD SUCCEEDED **
+
+## TC-DEEPLINK-DL2-WIDGETURL
+
+## Widget URL Mapping
+- shooting -> photoflow://stage/shooting
+- selecting -> photoflow://stage/selecting
+- stopped -> photoflow://stage/stopped
+
+## Manual Test
+1) Change stage in watch app (拍摄/选片/停止).
+2) Tap the widget; confirm the app receives photoflow://stage/<stage>.
+
+## Build
+- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build
+  - Result: ** BUILD SUCCEEDED **
+- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build
+  - Result: ** BUILD SUCCEEDED **
+- xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
+  - Result: ** BUILD SUCCEEDED **

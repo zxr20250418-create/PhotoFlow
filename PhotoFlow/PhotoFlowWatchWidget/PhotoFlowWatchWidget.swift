@@ -139,6 +139,11 @@ struct PhotoFlowWidgetView: View {
         "更新 \(Self.timeFormatter.string(from: entry.lastUpdated))"
     }
 
+    private var widgetURL: URL? {
+        let stage = WidgetStateStore.normalizedStage(entry.stage)
+        return URL(string: "photoflow://stage/\(stage)")
+    }
+
     var body: some View {
         Group {
             switch family {
@@ -178,6 +183,7 @@ struct PhotoFlowWidgetView: View {
             }
         }
         .containerBackground(.fill.tertiary, for: .widget)
+        .widgetURL(widgetURL)
     }
 }
 
