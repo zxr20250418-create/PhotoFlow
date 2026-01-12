@@ -126,6 +126,48 @@
 - xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
   - Result: ** BUILD SUCCEEDED **
 
+## TC-DEEPLINK-DL3-SCHEME
+
+## Watch URL Scheme
+- Watch app registers URL scheme: `photoflow`
+- Key: `CFBundleURLTypes` (in watch app built `Info.plist`)
+
+## Project Wiring
+- Watch app target uses explicit Info.plist:
+  - `INFOPLIST_FILE = "PhotoFlowWatch Watch App/PhotoFlowWatchAppInfo.plist"`
+  - `GENERATE_INFOPLIST_FILE = NO`
+- Widget extension `Info.plist` unchanged.
+
+## Build (clean)
+- `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*`
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Embedded AppEx Inspection (Debug-iphoneos)
+- `APP_EX=~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-iphoneos/PhotoFlow.app/Watch/PhotoFlowWatch\\ Watch\\ App.app/PlugIns/PhotoFlowWatchWidgetExtension.appex`
+- `plutil -p "$APP_EX/Info.plist" | egrep 'CFBundleExecutable|CFBundleName|NSExtensionPointIdentifier|NSExtensionPrincipalClass|NSExtensionMainStoryboard'`
+  - `"CFBundleExecutable" => "PhotoFlowWatchWidgetExtension"`
+  - `"CFBundleName" => "PhotoFlowWatchWidgetExtension"`
+  - `"NSExtensionPointIdentifier" => "com.apple.widgetkit-extension"`
+  - (no `NSExtensionPrincipalClass` / `NSExtensionMainStoryboard`)
+
+## Watch App Info.plist Check (Debug-watchsimulator)
+- `WATCH_APP_PLIST=~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-watchsimulator/PhotoFlowWatch\\ Watch\\ App.app/Info.plist`
+- `plutil -p "$WATCH_APP_PLIST" | egrep 'CFBundleURLTypes|photoflow'`
+  - `"CFBundleURLTypes" => [...]`
+  - `photoflow`
+
+## Manual Smoke (required, needs signed Run)
+- Xcode Run `PhotoFlow` to a physical iPhone (Debug):
+  - App installs and does **not** “install then disappear”.
+- On Watch: add the widget/complication, tap it:
+  - Opens watch app via `photoflow://stage/<shooting|selecting|stopped>`
+  - DL-1 routing lands on the expected stage screen.
+
 ## TC-DEEPLINK-DL1-ROUTING
 
 ## Supported URL Formats
