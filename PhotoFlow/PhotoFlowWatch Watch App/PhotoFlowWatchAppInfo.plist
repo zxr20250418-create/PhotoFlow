@@ -20,8 +20,6 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>WKWatchKitApp</key>
 	<true/>
-	<key>WKApplication</key>
-	<true/>
 	<key>WKCompanionAppBundleIdentifier</key>
 	<string>com.zhengxinrong.PhotoFlow</string>
 	<key>UIDeviceFamily</key>

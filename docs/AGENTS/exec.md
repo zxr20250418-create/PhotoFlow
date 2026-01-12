@@ -279,3 +279,14 @@
 - `IOS_APP=$(ls -d ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-iphoneos/PhotoFlow.app | head -n 1); WATCH_APP="$IOS_APP/Watch/PhotoFlowWatch Watch App.app"; plutil -p "$WATCH_APP/PlugIns/PhotoFlowWatch Watch Extension.appex/Info.plist" | egrep 'NSExtensionPointIdentifier|NSExtensionPrincipalClass'`
   - "NSExtensionPointIdentifier" => "com.apple.watchkit"
   - "NSExtensionPrincipalClass" => "WKExtension"
+
+## TC-DL3-WKAPPLICATION-REMOVE
+
+## Embedded Watch App Plist Check
+- `IOS_APP=$(ls -d ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-iphoneos/PhotoFlow.app | head -n 1); WATCH_PLIST=$(ls -d "$IOS_APP/Watch/PhotoFlowWatch Watch App.app/Info.plist" | head -n 1); plutil -p "$WATCH_PLIST" | egrep 'WKWatchKitApp|WKApplication'`
+  - "WKWatchKitApp" => 1
+
+## devicectl Install
+- `xcrun devicectl device uninstall app --device 202 com.zhengxinrong.PhotoFlow --quiet || true`
+- `xcrun devicectl device install app --device 202 "$IOS_APP"`
+  - App installed: bundleID com.zhengxinrong.PhotoFlow
