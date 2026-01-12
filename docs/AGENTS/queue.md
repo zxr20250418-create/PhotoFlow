@@ -1,38 +1,39 @@
-## ACTIVE — TC-DL3-WATCHKIT-EMBED-FIX
-ID: TC-DL3-WATCHKIT-EMBED-FIX
-Title: Fix embedded WatchKit Extension missing in Debug-iphoneos
+## ACTIVE — TC-PREFLIGHT-EMBEDDED-WATCHAPP
+ID: TC-PREFLIGHT-EMBEDDED-WATCHAPP
+Title: Add embedded Watch App + Widget appex preflight checks (prevent install regressions)
 AssignedTo: Executor
 
+Goal:
+- Any PR touching `Info.plist` / `project.pbxproj` / targets/embedding must pass preflight locally before merge.
+- Preflight must catch:
+  1) Watch app plist errors (e.g. `WKApplication`/`WKWatchKitApp` conflicts, `UIDeviceFamily` missing `4`, missing `WKCompanionAppBundleIdentifier`)
+  2) WatchKit extension not embedded (ValidateEmbeddedBinary-class failures)
+  3) WidgetKit appex metadata invalid (existing script)
+
 AllowedFiles:
-- PhotoFlow/PhotoFlow.xcodeproj/project.pbxproj
-- PhotoFlow/PhotoFlowWatch Watch App/PhotoFlowWatchExtensionInfo.plist (may add + commit)
-- docs/AGENTS/exec.md
+- scripts/check_embedded_watch_app.sh (new)
+- scripts/preflight_device_install.sh (new, optional wrapper)
+- docs/AGENTS/exec.md (append usage)
+- docs/AGENTS/queue.md (this card)
+- .gitignore (only if needed)
 
 Forbidden:
-- Do NOT modify any Swift
-- Do NOT modify widget extension Info.plist
-- Do NOT modify entitlements (unless install explicitly reports signing/entitlements; this card does not cover it)
-- Do NOT commit xcuserdata
-
-Goal:
-- `xcodebuild clean build -scheme "PhotoFlow"` (signed) no longer fails at `ValidateEmbeddedBinary`
-- Debug-iphoneos embedded Watch App contains WatchKit Extension `.appex`
+- Do NOT modify any Swift.
+- Do NOT modify `project.pbxproj` / any `Info.plist` in this task.
 
 Acceptance:
-A) Signed build succeeds (no forced -sdk):
-- `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*`
-- `xcodebuild clean build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -configuration Debug -destination 'id=00008120-00064CDE34E8C01E' -allowProvisioningUpdates`
-- Result: `BUILD SUCCEEDED` and no `ValidateEmbeddedBinary` error
+1) After building Debug-iphoneos `PhotoFlow` (CODE_SIGNING_ALLOWED=NO ok), preflight verifies:
+   A) Embedded watch app `Info.plist`:
+      - `WKWatchKitApp == true`
+      - `WKApplication` ABSENT (must not exist)
+      - `WKCompanionAppBundleIdentifier` non-empty
+      - `UIDeviceFamily` includes `4`
+      - `CFBundleURLTypes` contains scheme `photoflow` (if DL-3 enabled)
+   B) Embedded watch app `PlugIns` contains WatchKit extension `.appex` (NOT just widget `.appex`)
+      - Its `Info.plist` has `NSExtensionPointIdentifier == com.apple.watchkit`
+   C) Embedded widget `.appex` passes `scripts/check_embedded_widget_appex.sh` (existing)
+2) `docs/AGENTS/exec.md` documents how to run preflight + PASS/FAIL meaning.
+3) Open PR to main (no merge) and STOP.
 
-B) Debug-iphoneos artifact evidence:
-- `IOS_APP=~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-iphoneos/PhotoFlow.app`
-- `WATCH_APP="$IOS_APP/Watch/PhotoFlowWatch Watch App.app"`
-- `ls -la "$WATCH_APP/PlugIns"` shows BOTH:
-  - `PhotoFlowWatch Watch Extension.appex` (WatchKit extension)
-  - `PhotoFlowWatchWidgetExtension.appex` (WidgetKit extension)
-- `plutil -p "$WATCH_APP/PlugIns/PhotoFlowWatch Watch Extension.appex/Info.plist" | grep NSExtensionPointIdentifier`
-  - Must be `com.apple.watchkit`
-
-StopCondition:
-- Executor updates existing PR (or opens new PR), CI green, `docs/AGENTS/exec.md` includes the evidence outputs above; STOP
-- Coordinator re-runs the signed build command above to confirm pass before merging feature PRs
+PolicyUpdate:
+- Any future PR that touches `Info.plist` / `project.pbxproj` MUST paste preflight output into `docs/AGENTS/exec.md` before Coordinator merges.
