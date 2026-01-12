@@ -216,3 +216,20 @@
   - Result: ** BUILD SUCCEEDED **
 - xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
   - Result: ** BUILD SUCCEEDED **
+
+## TC-DEEPLINK-DL3-WATCH-PLIST
+
+## Watch App Info.plist Keys Added
+- WKWatchKitApp = YES
+- WKApplication = YES
+
+## Embedded Watch App Info.plist Check
+- `plutil -p "$WATCH_PLIST" | egrep 'WKWatchKitApp|WKApplication|CFBundleURLTypes'`
+  - "CFBundleURLTypes" => [
+  - "WKApplication" => 1
+  - "WKWatchKitApp" => 1
+
+## devicectl Install
+- `xcrun devicectl device uninstall app --device 202 com.zhengxinrong.PhotoFlow --quiet || true`
+- `xcrun devicectl device install app --device 202 "$APP_PATH"`
+  - ERROR: com.zhengxinrong.PhotoFlow.watchkitapp: Missing WKCompanionAppBundleIdentifier key in WatchKit 2.0 app's Info.plist
