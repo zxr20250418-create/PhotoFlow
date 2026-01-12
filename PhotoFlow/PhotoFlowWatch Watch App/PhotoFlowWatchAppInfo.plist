@@ -22,6 +22,8 @@
 	<true/>
 	<key>WKApplication</key>
 	<true/>
+	<key>WKCompanionAppBundleIdentifier</key>
+	<string>com.zhengxinrong.PhotoFlow</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
