@@ -56,6 +56,7 @@ struct PhotoFlowWidgetView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+#if os(watchOS)
             case .accessoryCorner:
                 VStack(spacing: 2) {
                     Text(entry.elapsedText)
@@ -63,6 +64,7 @@ struct PhotoFlowWidgetView: View {
                     Text(entry.isRunning ? "Run" : "Stop")
                         .font(.caption2)
                 }
+#endif
             default:
                 VStack(spacing: 2) {
                     Text(entry.isRunning ? "Running" : "Stopped")
@@ -85,11 +87,18 @@ struct PhotoFlowWatchWidget: Widget {
         }
         .configurationDisplayName("PhotoFlow")
         .description("Shows session status and elapsed time.")
+#if os(watchOS)
         .supportedFamilies([
             .accessoryCircular,
             .accessoryRectangular,
             .accessoryCorner
         ])
+#else
+        .supportedFamilies([
+            .accessoryCircular,
+            .accessoryRectangular
+        ])
+#endif
     }
 }
 
@@ -112,8 +121,10 @@ struct PhotoFlowWatchWidgetBundle: WidgetBundle {
     PhotoFlowWidgetEntry(date: Date(), isRunning: false, elapsedText: "12:34", lastUpdated: Date())
 }
 
+#if os(watchOS)
 #Preview("Accessory Corner", as: .accessoryCorner) {
     PhotoFlowWatchWidget()
 } timeline: {
     PhotoFlowWidgetEntry(date: Date(), isRunning: true, elapsedText: "12:34", lastUpdated: Date())
 }
+#endif
