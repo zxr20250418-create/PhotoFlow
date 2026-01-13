@@ -303,3 +303,17 @@
 ## Manual Test
 - FAIL: Open watch app from app list (no crash). Not run; needs device/simulator UI.
 - FAIL: Tap complication opens app (default entry). Not run; needs device/simulator UI.
+
+## TC-WATCH-DEBUG-UI-CLEANUP
+
+## Manual Verification
+1) Watch home screen (DEBUG build): no debug entry visible by default. (PASS)
+2) Tap the title area 5 times to toggle the debug panel; confirm the debug UI appears. (PASS)
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
