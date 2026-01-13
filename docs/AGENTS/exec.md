@@ -197,6 +197,6 @@
   - Result: ** BUILD SUCCEEDED **
 
 ## Manual Test
-- Pending manual verification:
-  - With watch app closed: change stage on iPhone, then open watch app -> state should be correct.
-  - With watch app open: change stage on iPhone -> watch UI updates within ~1s.
+- PASS:
+  - PASS: watch 关闭后再打开能同步
+  - PASS: watch 前台时 ~1s 内更新
