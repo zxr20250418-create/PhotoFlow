@@ -10,48 +10,49 @@ Status: ABANDONED (rollback; PR #33 closed)
 ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
-## ACTIVE — TC-SYNC-PHONE-TO-WATCH-V1
+## DONE — TC-SYNC-PHONE-TO-WATCH-V1
 ID: TC-SYNC-PHONE-TO-WATCH-V1
-Title: 手机端操作同步到手表端（stage/计时状态）V1
+Status: DONE (merged)
+
+## ACTIVE — TC-SYNC-PHONE-TO-WATCH-V2-CONSISTENCY
+ID: TC-SYNC-PHONE-TO-WATCH-V2-CONSISTENCY
+Title: 断连/后台最终一致性（updateApplicationContext）V2
 AssignedTo: Executor
 
 Goal:
-- 手机端按“拍摄/选片/停止”（或对应动作）后，手表端 UI 在合理时间内同步更新。
-- 不依赖 App Group 跨设备（App Group 只用于同设备：watch app ↔ widget）。
-- 最终一致（表端不在前台也能收到），前台时尽量即时。
+- Watch 长时间没开/不在前台时，iPhone 多次切换 stage，Watch 下次打开必须显示“最后一次状态”（最终一致）。
+- 前台仍保持 1s 内更新（V1 fast path 不回退）。
 
 Scope (Allowed files ONLY):
-- iPhone app：PhoneConnectivity / WCSession 管理相关 Swift 文件（当前 iOS 侧连接管理文件）
-- Watch app：WatchConnectivityManager / WatchSyncStore / WCSession delegate 相关 Swift 文件
-- （如需要）双方各自的 State Store 文件（但不新增 target/pbxproj）
+- `PhotoFlow/PhotoFlow/ContentView.swift`（iPhone 侧同步发送处）
+- `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift`（watch 侧接收/应用处）
 - `docs/AGENTS/exec.md`（追加）
 
 Forbidden:
 - 禁止修改 `Info.plist` / `project.pbxproj` / entitlements / targets / build settings
-- 禁止新增 URL scheme / deep link
-- 禁止重构 UI，只改同步链路
+- 不新增文件/不重构架构
 
-Protocol / Implementation requirements:
-1) iPhone→Watch 必须使用“双通道”：
-   - Always: `updateApplicationContext(payload)` 作为最终一致
-   - If reachable: `sendMessage(payload)` 作为即时刷新
-2) Watch 端必须实现并处理：
-   - `didReceiveApplicationContext`（最终一致）
-   - `didReceiveMessage`（即时）
-3) Payload 必须包含：`stage`（shooting/selecting/stopped）、`isRunning`、`startedAt`、`lastUpdatedAt`（按已有字段/键）
-4) 写入 watch 本地状态后触发 UI 更新；必要时写入 watch 的 app group store 供 widget 更新（同设备）。
+Implementation requirements:
+1) Payload 增加“去乱序”字段（不破坏兼容）：
+   - `pf_sync_seq` (Int) 或 `pf_sync_lastUpdatedAt` (Double unix ts) 作为版本号
+   - Watch 端只应用“更新更晚/seq 更大”的 payload，旧的忽略
+2) Watch 端在启动/激活时主动拉取最新 applicationContext：
+   - 在 WCSession 激活完成后读取 `session.receivedApplicationContext` / `applicationContext` 并 apply（确保最终一致）
+3) `applyIncomingState` 必须在主线程/MainActor
+4) 将 lastApplied seq/ts 持久化到本地 UserDefaults（watch 本机即可），防止重复回滚
 
 Acceptance:
-- 手表 app 在后台/未打开时：手机端切 stage，之后打开手表 app 看到状态已同步（<=10s 或下一次激活时一致）。
-- 手表 app 在前台时：手机端切 stage，1s 内更新（可接受轻微延迟）。
-- `xcodebuild` BUILD SUCCEEDED：
-  - `PhotoFlowWatch Watch App`（watchOS simulator）
-  - `PhotoFlowWatchWidgetExtension`（watchOS simulator）
-  - `PhotoFlow`（iphoneos，`CODE_SIGNING_ALLOWED=NO`）
-- `docs/AGENTS/exec.md` 记录：payload 格式、发送策略、接收点、手动测试步骤与结果。
+- 手动测试通过（记录在 `docs/AGENTS/exec.md`）：
+  A) watch app 完全关闭：iPhone 连续切换 stage 5 次（shooting/selecting/stopped…），等待 10s，打开 watch app -> 显示最后一次 stage
+  B) watch app 前台：iPhone 切换 stage -> 1s 内更新
+  C) iPhone 与 watch 临时断连（例如关 watch 蓝牙/飞行模式再恢复）：恢复后打开 watch -> 仍是最后状态
+- `xcodebuild` BUILD SUCCEEDED（`CODE_SIGNING_ALLOWED=NO` 可）：
+  - `PhotoFlowWatch Watch App`
+  - `PhotoFlowWatchWidgetExtension`
+  - `PhotoFlow`（iphoneos）
 
 StopCondition:
 - PR opened to `main`（不合并）
 - CI green
-- `docs/AGENTS/exec.md` 更新
+- `docs/AGENTS/exec.md` 追加：payload 字段、去乱序逻辑、测试步骤与结果
 - STOP
