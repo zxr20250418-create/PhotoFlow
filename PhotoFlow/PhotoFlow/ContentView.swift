@@ -11,6 +11,16 @@ import WatchConnectivity
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
+    fileprivate enum StageSyncKey {
+        static let stage = "pf_widget_stage"
+        static let isRunning = "pf_widget_isRunning"
+        static let startedAt = "pf_widget_startedAt"
+        static let lastUpdatedAt = "pf_widget_lastUpdatedAt"
+        static let stageShooting = "shooting"
+        static let stageSelecting = "selecting"
+        static let stageStopped = "stopped"
+    }
+
     struct SessionEvent: Identifiable {
         let id = UUID()
         let event: String
@@ -43,6 +53,31 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         } catch {
             // Non-fatal; watch will catch up on next change.
         }
+    }
+
+    func sendStageSync(stage: String, isRunning: Bool, startedAt: Date?, lastUpdatedAt: Date) {
+        guard WCSession.isSupported() else { return }
+        var payload: [String: Any] = [
+            StageSyncKey.stage: stage,
+            StageSyncKey.isRunning: isRunning,
+            StageSyncKey.lastUpdatedAt: lastUpdatedAt.timeIntervalSince1970
+        ]
+        if let startedAt {
+            payload[StageSyncKey.startedAt] = startedAt.timeIntervalSince1970
+        }
+        let session = WCSession.default
+        do {
+            try session.updateApplicationContext(payload)
+        } catch {
+            print("WCSession updateApplicationContext failed: \(error.localizedDescription)")
+        }
+        let usedReachable = session.isReachable
+        if usedReachable {
+            session.sendMessage(payload, replyHandler: nil) { error in
+                print("WCSession sendMessage failed: \(error.localizedDescription)")
+            }
+        }
+        print("WCSession sent state payload=\(payload) reachable=\(usedReachable)")
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
@@ -216,11 +251,13 @@ struct ContentView: View {
             session.shootingStart = now
             stage = .shooting
         }
+        syncStageState(now: now)
     }
 
     private func resetSession() {
         stage = .idle
         session = Session()
+        syncStageState(now: Date())
     }
 
     private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
@@ -278,6 +315,26 @@ struct ContentView: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func syncStageState(now: Date) {
+        let stageValue: String
+        switch stage {
+        case .shooting:
+            stageValue = WatchSyncStore.StageSyncKey.stageShooting
+        case .selecting:
+            stageValue = WatchSyncStore.StageSyncKey.stageSelecting
+        case .idle, .ended:
+            stageValue = WatchSyncStore.StageSyncKey.stageStopped
+        }
+        let isRunning = stageValue != WatchSyncStore.StageSyncKey.stageStopped
+        let startedAt = isRunning ? session.shootingStart : nil
+        syncStore.sendStageSync(
+            stage: stageValue,
+            isRunning: isRunning,
+            startedAt: startedAt,
+            lastUpdatedAt: now
+        )
     }
 }
 

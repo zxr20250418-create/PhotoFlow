@@ -41,7 +41,15 @@ private enum WidgetStateStore {
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
+    struct IncomingState: Equatable {
+        let stage: String
+        let isRunning: Bool
+        let startedAt: Date?
+        let lastUpdatedAt: Date
+    }
+
     @Published var isOnDuty = false
+    @Published var incomingState: IncomingState?
 
     override init() {
         super.init()
@@ -85,6 +93,53 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         Task { @MainActor in
             isOnDuty = value
         }
+        applyStatePayload(applicationContext)
+    }
+
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        applyStatePayload(message)
+    }
+
+    private func applyStatePayload(_ payload: [String: Any]) {
+        let hasStateKey = payload.keys.contains(WidgetStateStore.keyStage)
+            || payload.keys.contains(WidgetStateStore.keyIsRunning)
+            || payload.keys.contains(WidgetStateStore.keyStartedAt)
+            || payload.keys.contains(WidgetStateStore.keyLastUpdatedAt)
+        guard hasStateKey else { return }
+
+        let stage = normalizedStage(payload[WidgetStateStore.keyStage] as? String)
+        let isRunning = payload[WidgetStateStore.keyIsRunning] as? Bool ?? (stage != WidgetStateStore.stageStopped)
+        let startedAtSeconds = parseEpoch(payload[WidgetStateStore.keyStartedAt])
+        let lastUpdatedSeconds = parseEpoch(payload[WidgetStateStore.keyLastUpdatedAt]) ?? Date().timeIntervalSince1970
+        let state = IncomingState(
+            stage: stage,
+            isRunning: isRunning,
+            startedAt: startedAtSeconds.map { Date(timeIntervalSince1970: $0) },
+            lastUpdatedAt: Date(timeIntervalSince1970: lastUpdatedSeconds)
+        )
+        Task { @MainActor in
+            incomingState = state
+        }
+        print("WCSession received state stage=\(stage) running=\(isRunning)")
+    }
+
+    private func normalizedStage(_ value: String?) -> String {
+        switch value {
+        case WidgetStateStore.stageShooting, WidgetStateStore.stageSelecting, WidgetStateStore.stageStopped:
+            return value ?? WidgetStateStore.stageStopped
+        default:
+            return WidgetStateStore.stageStopped
+        }
+    }
+
+    private func parseEpoch(_ value: Any?) -> TimeInterval? {
+        if let seconds = value as? Double {
+            return seconds
+        }
+        if let seconds = value as? Int {
+            return TimeInterval(seconds)
+        }
+        return nil
     }
 }
 
@@ -183,6 +238,10 @@ struct ContentView: View {
             Alert(title: Text(alert.message))
         }
         .onReceive(ticker) { now = $0 }
+        .onReceive(syncStore.$incomingState) { state in
+            guard let state else { return }
+            applyIncomingState(state)
+        }
         .onOpenURL { url in
             handleDeepLink(url)
         }
@@ -284,9 +343,48 @@ struct ContentView: View {
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
-    private func updateWidgetState(isRunning: Bool, startedAt: Date?, stage: String) {
-        WidgetStateStore.writeState(isRunning: isRunning, startedAt: startedAt, stage: stage)
+    private func updateWidgetState(isRunning: Bool, startedAt: Date?, stage: String, lastUpdatedAt: Date = Date()) {
+        WidgetStateStore.writeState(
+            isRunning: isRunning,
+            startedAt: startedAt,
+            stage: stage,
+            lastUpdatedAt: lastUpdatedAt
+        )
         WidgetCenter.shared.reloadTimelines(ofKind: WidgetStateStore.widgetKind)
+    }
+
+    private func applyIncomingState(_ state: WatchSyncStore.IncomingState) {
+        let stageValue = state.stage
+        switch stageValue {
+        case WidgetStateStore.stageShooting:
+            stage = .shooting
+            session.shootingStart = state.startedAt ?? state.lastUpdatedAt
+            session.selectingStart = nil
+            session.endedAt = nil
+        case WidgetStateStore.stageSelecting:
+            stage = .selecting
+            session.shootingStart = state.startedAt ?? state.lastUpdatedAt
+            session.selectingStart = state.lastUpdatedAt
+            session.endedAt = nil
+        default:
+            if let startedAt = state.startedAt {
+                stage = .ended
+                session.shootingStart = startedAt
+                session.selectingStart = nil
+                session.endedAt = state.lastUpdatedAt
+            } else {
+                stage = .idle
+                session = Session()
+            }
+        }
+
+        updateWidgetState(
+            isRunning: state.isRunning,
+            startedAt: state.startedAt,
+            stage: stageValue,
+            lastUpdatedAt: state.lastUpdatedAt
+        )
+        print("Applied watch state stage=\(stageValue)")
     }
 
     private func handleDeepLink(_ url: URL) {
