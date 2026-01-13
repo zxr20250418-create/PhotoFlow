@@ -41,6 +41,10 @@ private enum WidgetStateStore {
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
+    private enum SyncOrderKey {
+        static let lastAppliedAt = "pf_sync_lastAppliedAt"
+    }
+
     struct IncomingState: Equatable {
         let stage: String
         let isRunning: Bool
@@ -54,8 +58,12 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     override init() {
         super.init()
         guard WCSession.isSupported() else { return }
-        WCSession.default.delegate = self
-        WCSession.default.activate()
+        let session = WCSession.default
+        session.delegate = self
+        session.activate()
+        if session.activationState == .activated {
+            applyLatestContextIfAvailable(from: session)
+        }
     }
 
     func sendSessionEvent(event: String, timestamp: TimeInterval) {
@@ -76,7 +84,10 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
 
-    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
+    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+        guard error == nil, activationState == .activated else { return }
+        applyLatestContextIfAvailable(from: session)
+    }
 
 #if os(iOS)
     func sessionDidBecomeInactive(_ session: WCSession) { }
@@ -110,17 +121,47 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         let stage = normalizedStage(payload[WidgetStateStore.keyStage] as? String)
         let isRunning = payload[WidgetStateStore.keyIsRunning] as? Bool ?? (stage != WidgetStateStore.stageStopped)
         let startedAtSeconds = parseEpoch(payload[WidgetStateStore.keyStartedAt])
-        let lastUpdatedSeconds = parseEpoch(payload[WidgetStateStore.keyLastUpdatedAt]) ?? Date().timeIntervalSince1970
+        let lastUpdatedSeconds = parseEpoch(payload[WidgetStateStore.keyLastUpdatedAt])
+        guard shouldApplyState(lastUpdatedAtSeconds: lastUpdatedSeconds) else { return }
+        let resolvedLastUpdatedSeconds = lastUpdatedSeconds ?? Date().timeIntervalSince1970
         let state = IncomingState(
             stage: stage,
             isRunning: isRunning,
             startedAt: startedAtSeconds.map { Date(timeIntervalSince1970: $0) },
-            lastUpdatedAt: Date(timeIntervalSince1970: lastUpdatedSeconds)
+            lastUpdatedAt: Date(timeIntervalSince1970: resolvedLastUpdatedSeconds)
         )
         Task { @MainActor in
             incomingState = state
         }
         print("WCSession received state stage=\(stage) running=\(isRunning)")
+    }
+
+    private func applyLatestContextIfAvailable(from session: WCSession) {
+        let receivedContext = session.receivedApplicationContext
+        let context = receivedContext.isEmpty ? session.applicationContext : receivedContext
+        guard !context.isEmpty else { return }
+        if let value = context["isOnDuty"] as? Bool {
+            isOnDuty = value
+        }
+        applyStatePayload(context)
+    }
+
+    private func shouldApplyState(lastUpdatedAtSeconds: TimeInterval?) -> Bool {
+        let defaults = UserDefaults.standard
+        let lastApplied = defaults.double(forKey: SyncOrderKey.lastAppliedAt)
+        guard let lastUpdatedAtSeconds else {
+            if lastApplied > 0 {
+                print("WCSession ignored state missing lastUpdatedAt")
+                return false
+            }
+            return true
+        }
+        if lastApplied > 0, lastUpdatedAtSeconds <= lastApplied {
+            print("WCSession ignored out-of-order state lastUpdated=\(lastUpdatedAtSeconds) lastApplied=\(lastApplied)")
+            return false
+        }
+        defaults.set(lastUpdatedAtSeconds, forKey: SyncOrderKey.lastAppliedAt)
+        return true
     }
 
     private func normalizedStage(_ value: String?) -> String {
@@ -353,6 +394,7 @@ struct ContentView: View {
         WidgetCenter.shared.reloadTimelines(ofKind: WidgetStateStore.widgetKind)
     }
 
+    @MainActor
     private func applyIncomingState(_ state: WatchSyncStore.IncomingState) {
         let stageValue = state.stage
         switch stageValue {
