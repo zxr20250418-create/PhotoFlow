@@ -126,6 +126,8 @@
 - xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
   - Result: ** BUILD SUCCEEDED **
 
+## HISTORY: Legacy Deep Link Notes (for audit only)
+
 ## TC-DEEPLINK-DL1-ROUTING
 
 ## Supported URL Formats
@@ -263,3 +265,41 @@
 
 ## Manual Test
 - PASS: Add circular/corner/rectangular complications and tap each → PhotoFlow Watch App opens (default entry), no crash.
+
+## TC-CLEANUP-DEEPLINK-RESIDUALS
+
+## Removed
+- Watch app: onOpenURL + deep link parsing helpers.
+- Watch app: DEBUG stage deep link buttons.
+- Widget: no widgetURL/link usage (already removed in prior PR).
+
+## Repo Check
+- `rg "photoflow://|handleDeepLink|onOpenURL|DEBUG: stage" -n`
+  - Output:
+    - docs/AGENTS/exec.md:134:- `photoflow://stage/shooting`
+    - docs/AGENTS/exec.md:135:- `photoflow://stage/selecting`
+    - docs/AGENTS/exec.md:136:- `photoflow://stage/stopped`
+    - docs/AGENTS/exec.md:147:  - `DEBUG: stage/shooting`
+    - docs/AGENTS/exec.md:148:  - `DEBUG: stage/selecting`
+    - docs/AGENTS/exec.md:149:  - `DEBUG: stage/stopped`
+    - docs/AGENTS/exec.md:150:- Tap to simulate `onOpenURL` routing without URL scheme registration (DL-3).
+    - docs/AGENTS/exec.md:164:- shooting -> photoflow://stage/shooting
+    - docs/AGENTS/exec.md:165:- selecting -> photoflow://stage/selecting
+    - docs/AGENTS/exec.md:166:- stopped -> photoflow://stage/stopped
+    - docs/AGENTS/exec.md:170:2) Tap the widget; confirm the app receives photoflow://stage/<stage>.
+    - docs/AGENTS/queue.md:31:Title: 清理深链残留（photoflow/onOpenURL/DEBUG deep link），避免未来误触
+    - docs/AGENTS/queue.md:35:- 移除所有深链相关残留：`photoflow://`、`onOpenURL`/`handleDeepLink`、`DEBUG` stage 深链测试入口
+    - docs/AGENTS/queue.md:51:  - `photoflow://`、`handleDeepLink`、`onOpenURL`、`DEBUG: stage`
+  - Notes: matches are limited to exec.md history and the queue task card (queue.md is not edited).
+
+## Build
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- FAIL: Open watch app from app list (no crash). Not run; needs device/simulator UI.
+- FAIL: Tap complication opens app (default entry). Not run; needs device/simulator UI.
