@@ -40,6 +40,21 @@ private enum WidgetStateStore {
         defaults.set(stage, forKey: keyStage)
         defaults.set(lastUpdatedAt.timeIntervalSince1970, forKey: keyLastUpdatedAt)
     }
+
+    static func normalizedStage(_ value: String) -> String {
+        switch value {
+        case stageShooting, stageSelecting, stageStopped:
+            return value
+        default:
+            return stageStopped
+        }
+    }
+
+    static func readStartedAt() -> Date? {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return nil }
+        let seconds = defaults.object(forKey: keyStartedAt) as? Double
+        return seconds.map { Date(timeIntervalSince1970: $0) }
+    }
 }
 
 @MainActor
@@ -437,26 +452,26 @@ struct ContentView: View {
             stage = .shooting
             session.shootingStart = now
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
-            updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
+            persistWidgetState(stage: WidgetStateStore.stageShooting, startedAt: session.shootingStart)
             playStageHaptic()
         case .shooting:
             stage = .selecting
             session.selectingStart = now
             syncStore.sendSessionEvent(event: "startSelecting", timestamp: now.timeIntervalSince1970)
-            updateWidgetState(isRunning: true, startedAt: session.shootingStart, stage: WidgetStateStore.stageSelecting)
+            persistWidgetState(stage: WidgetStateStore.stageSelecting, startedAt: session.shootingStart)
             playStageHaptic()
         case .selecting:
             stage = .ended
             session.endedAt = now
             syncStore.sendSessionEvent(event: "end", timestamp: now.timeIntervalSince1970)
-            updateWidgetState(isRunning: false, startedAt: nil, stage: WidgetStateStore.stageStopped)
+            persistWidgetState(stage: WidgetStateStore.stageStopped, startedAt: nil)
             playStageHaptic()
         case .ended:
             session = Session()
             session.shootingStart = now
             stage = .shooting
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
-            updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
+            persistWidgetState(stage: WidgetStateStore.stageShooting, startedAt: session.shootingStart)
             playStageHaptic()
         }
     }
@@ -510,15 +525,24 @@ struct ContentView: View {
 #endif
     }
 
-    private func updateWidgetState(isRunning: Bool, startedAt: Date?, stage: String, lastUpdatedAt: Date = Date()) {
-        let resolvedStartedAt = isRunning ? (startedAt ?? Date()) : startedAt
+    private func persistWidgetState(stage: String, startedAt: Date?) {
+        let now = Date()
+        let normalizedStage = WidgetStateStore.normalizedStage(stage)
+        let derivedIsRunning = normalizedStage != WidgetStateStore.stageStopped
+        let existingStartedAt = WidgetStateStore.readStartedAt()
+        let derivedStartedAt: Date?
+        if derivedIsRunning {
+            derivedStartedAt = startedAt ?? existingStartedAt ?? now
+        } else {
+            derivedStartedAt = nil
+        }
         WidgetStateStore.writeState(
-            isRunning: isRunning,
-            startedAt: resolvedStartedAt,
-            stage: stage,
-            lastUpdatedAt: lastUpdatedAt
+            isRunning: derivedIsRunning,
+            startedAt: derivedStartedAt,
+            stage: normalizedStage,
+            lastUpdatedAt: now
         )
-        WidgetCenter.shared.reloadTimelines(ofKind: WidgetStateStore.widgetKind)
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     @MainActor
@@ -547,12 +571,7 @@ struct ContentView: View {
             }
         }
 
-        updateWidgetState(
-            isRunning: state.isRunning,
-            startedAt: state.startedAt,
-            stage: stageValue,
-            lastUpdatedAt: state.lastUpdatedAt
-        )
+        persistWidgetState(stage: stageValue, startedAt: state.startedAt)
         print("Applied watch state stage=\(stageValue)")
     }
 

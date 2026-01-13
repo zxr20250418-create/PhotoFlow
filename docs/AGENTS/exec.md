@@ -359,6 +359,13 @@
 
 ## TC-WIDGET-ELAPSED-TIMER-FIX
 
+## Root Cause
+- lastUpdatedAt was advancing, but widget writes allowed stage/isRunning/startedAt to diverge (call sites passed isRunning/stage directly), leaving state stuck at stopped/false.
+
+## Updated Call Sites
+- Watch user actions: start shooting, start selecting, stop, restart (all now use persistWidgetState).
+- Phone -> watch sync apply (applyIncomingState) now uses persistWidgetState.
+
 ## Manual Verification
 1) 拍摄/选片：表盘用时开始走。 (FAIL - NOT RUN)
 2) 停止：回到 00:00。 (FAIL - NOT RUN)
