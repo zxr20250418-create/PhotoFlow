@@ -42,7 +42,7 @@ private enum WidgetStateStore {
 struct PhotoFlowWidgetEntry: TimelineEntry {
     let date: Date
     let isRunning: Bool
-    let elapsedText: String
+    let startedAt: Date?
     let lastUpdated: Date
     let stage: String
 }
@@ -65,7 +65,7 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
         PhotoFlowWidgetEntry(
             date: Date(),
             isRunning: isRunning,
-            elapsedText: "12:34",
+            startedAt: isRunning ? Date() : nil,
             lastUpdated: Date(),
             stage: stage
         )
@@ -77,29 +77,20 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
             return sampleEntry(isRunning: true, stage: WidgetStateStore.stageShooting)
         }
         let state = WidgetStateStore.readState(now: now)
-        let elapsedText = formatElapsed(isRunning: state.isRunning, startedAt: state.startedAt, now: now)
         return PhotoFlowWidgetEntry(
             date: now,
             isRunning: state.isRunning,
-            elapsedText: elapsedText,
+            startedAt: state.startedAt,
             lastUpdated: state.lastUpdatedAt,
             stage: state.stage
         )
     }
 
-    private func formatElapsed(isRunning: Bool, startedAt: Date?, now: Date) -> String {
-        guard isRunning, let startedAt else { return "00:00" }
-        let totalSeconds = max(0, Int(now.timeIntervalSince(startedAt)))
-        let minutes = totalSeconds / 60
-        let seconds = totalSeconds % 60
-        return String(format: "%02d:%02d", minutes, seconds)
-    }
-
     private func nextRefreshDate(from entry: PhotoFlowWidgetEntry) -> Date {
         if entry.isRunning {
-            return entry.date.addingTimeInterval(60)
+            return entry.date.addingTimeInterval(45)
         }
-        return entry.date.addingTimeInterval(15 * 60)
+        return entry.date.addingTimeInterval(12 * 60)
     }
 }
 
@@ -139,9 +130,15 @@ struct PhotoFlowWidgetView: View {
         "更新 \(Self.timeFormatter.string(from: entry.lastUpdated))"
     }
 
-    private var widgetURL: URL? {
-        let stage = WidgetStateStore.normalizedStage(entry.stage)
-        return URL(string: "photoflow://stage/\(stage)")
+    private func elapsedTextView(font: Font) -> some View {
+        Group {
+            if entry.isRunning, let startedAt = entry.startedAt {
+                Text(startedAt, style: .timer)
+            } else {
+                Text("00:00")
+            }
+        }
+        .font(font.monospacedDigit())
     }
 
     var body: some View {
@@ -151,15 +148,17 @@ struct PhotoFlowWidgetView: View {
                 VStack(spacing: 2) {
                     Text(shortStatusText)
                         .font(.caption2)
-                    Text(entry.elapsedText)
-                        .font(.caption2.monospacedDigit())
+                    elapsedTextView(font: .caption2)
                 }
             case .accessoryRectangular:
                 VStack(alignment: .leading, spacing: 2) {
                     Text(statusText)
                         .font(.caption)
-                    Text("用时 \(entry.elapsedText)")
-                        .font(.caption2.monospacedDigit())
+                    HStack(spacing: 2) {
+                        Text("用时")
+                            .font(.caption2)
+                        elapsedTextView(font: .caption2)
+                    }
                     Text(updatedText)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -167,23 +166,20 @@ struct PhotoFlowWidgetView: View {
 #if os(watchOS)
             case .accessoryCorner:
                 VStack(spacing: 2) {
-                    Text(entry.elapsedText)
-                        .font(.caption2.monospacedDigit())
                     Text(shortStatusText)
                         .font(.caption2)
+                    elapsedTextView(font: .caption2)
                 }
 #endif
             default:
                 VStack(spacing: 2) {
                     Text(statusText)
                         .font(.caption)
-                    Text(entry.elapsedText)
-                        .font(.caption2.monospacedDigit())
+                    elapsedTextView(font: .caption2)
                 }
             }
         }
         .containerBackground(.fill.tertiary, for: .widget)
-        .widgetURL(widgetURL)
     }
 }
 
@@ -224,7 +220,7 @@ struct PhotoFlowWatchWidgetBundle: WidgetBundle {
     PhotoFlowWidgetEntry(
         date: Date(),
         isRunning: true,
-        elapsedText: "12:34",
+        startedAt: Date(),
         lastUpdated: Date(),
         stage: WidgetStateStore.stageShooting
     )
@@ -236,7 +232,7 @@ struct PhotoFlowWatchWidgetBundle: WidgetBundle {
     PhotoFlowWidgetEntry(
         date: Date(),
         isRunning: false,
-        elapsedText: "12:34",
+        startedAt: nil,
         lastUpdated: Date(),
         stage: WidgetStateStore.stageStopped
     )
@@ -249,7 +245,7 @@ struct PhotoFlowWatchWidgetBundle: WidgetBundle {
     PhotoFlowWidgetEntry(
         date: Date(),
         isRunning: true,
-        elapsedText: "12:34",
+        startedAt: Date(),
         lastUpdated: Date(),
         stage: WidgetStateStore.stageSelecting
     )

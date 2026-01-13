@@ -44,6 +44,15 @@
   - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
   - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
 
+## AppEx Preflight Check
+- Run:
+  - `rm -rf ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*`
+  - `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - `./scripts/check_embedded_widget_appex.sh`
+- Expected output:
+  - PASS: `ALL CHECKS PASSED`
+  - FAIL: `FAIL: <reason>`
+
 ## TC-DEVICE-INSTALL-FIX-WIDGET-APPEX
 
 ## Build
@@ -126,6 +135,8 @@
 - xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
   - Result: ** BUILD SUCCEEDED **
 
+## HISTORY: Legacy Deep Link Notes (for audit only)
+
 ## TC-DEEPLINK-DL1-ROUTING
 
 ## Supported URL Formats
@@ -188,3 +199,201 @@
 - No WatchKit appex in PlugIns: watch app is not embedding the WatchKit extension; check embed phase and target dependency.
 - photoflow scheme missing: URL scheme not present in watch app plist; set REQUIRE_PHOTOFLOW_URL=1 to fail when required.
 - Widget appex check failing: use scripts/check_embedded_widget_appex.sh once it exists to validate WidgetKit appex keys.
+
+## TC-SYNC-PHONE-TO-WATCH-V1
+
+## Payload Schema
+- stage (String): shooting | selecting | stopped
+- isRunning (Bool)
+- startedAt (Double, unix ts) optional
+- lastUpdatedAt (Double, unix ts)
+
+## Send / Receive Points
+- iPhone send: `PhotoFlow/PhotoFlow/ContentView.swift` -> `WatchSyncStore.sendStageSync(...)` called after stage changes and reset.
+- Watch receive: `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift` -> `session(_:didReceiveApplicationContext:)` + `session(_:didReceiveMessage:)` -> `applyStatePayload(...)`.
+- Watch apply: `ContentView.applyIncomingState(...)` updates stage/session and writes widget defaults.
+
+## Build
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- PASS:
+  - PASS: watch 关闭后再打开能同步
+  - PASS: watch 前台时 ~1s 内更新
+
+## TC-SYNC-PHONE-TO-WATCH-V2-CONSISTENCY
+
+## Ordering Rule
+- Ordering key: lastUpdatedAt (Double, unix ts) reused from V1 payload.
+- Watch stores last applied timestamp in UserDefaults key `pf_sync_lastAppliedAt`.
+- Incoming state is ignored if lastUpdatedAt <= lastApplied; payloads missing lastUpdatedAt are ignored once lastApplied exists.
+
+## Apply Latest Context
+- Watch reads `receivedApplicationContext` (fallback to `applicationContext`) after WCSession activation and on app start if already activated, then applies state payload.
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- PASS: Test A (watch app closed → iPhone changes stage 5 times → wait 10s → open watch app → last stage shown).
+- PASS: Test B (watch app foreground → iPhone change stage → watch updates within ~1s).
+- PASS: Test C (disconnect/reconnect → open watch app → last stage shown).
+
+## TC-SYNC-DIAG-DASHBOARD
+
+## How To Open
+- iPhone: tap the small Debug button at the bottom of the main screen (DEBUG builds only).
+- Watch: tap the small Debug button under the DEBUG stage buttons (DEBUG builds only).
+
+## Fields
+- lastSentPayload (iPhone): last payload sent to watch (key=value list).
+- lastReceivedPayload (watch): most recent payload received from phone.
+- lastAppliedAt (watch): last applied lastUpdatedAt timestamp (epoch + H:mm:ss).
+- sessionStatus: activation/reachable/pairing/installed flags for WCSession.
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- PASS: iPhone change stage → watch dashboard updates.
+
+## TC-COMPLICATION-TAP-OPEN-APP
+
+## Widget Tap Behavior
+- Removed widgetURL/link to use system default open behavior.
+- Supported families: accessoryCircular, accessoryRectangular, accessoryCorner.
+
+## Build
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- PASS: Add circular/corner/rectangular complications and tap each → PhotoFlow Watch App opens (default entry), no crash.
+
+## TC-CLEANUP-DEEPLINK-RESIDUALS
+
+## Removed
+- Watch app: onOpenURL + deep link parsing helpers.
+- Watch app: DEBUG stage deep link buttons.
+- Widget: no widgetURL/link usage (already removed in prior PR).
+
+## Repo Check
+- `rg "photoflow://|handleDeepLink|onOpenURL|DEBUG: stage" -n`
+  - Output:
+    - docs/AGENTS/exec.md:134:- `photoflow://stage/shooting`
+    - docs/AGENTS/exec.md:135:- `photoflow://stage/selecting`
+    - docs/AGENTS/exec.md:136:- `photoflow://stage/stopped`
+    - docs/AGENTS/exec.md:147:  - `DEBUG: stage/shooting`
+    - docs/AGENTS/exec.md:148:  - `DEBUG: stage/selecting`
+    - docs/AGENTS/exec.md:149:  - `DEBUG: stage/stopped`
+    - docs/AGENTS/exec.md:150:- Tap to simulate `onOpenURL` routing without URL scheme registration (DL-3).
+    - docs/AGENTS/exec.md:164:- shooting -> photoflow://stage/shooting
+    - docs/AGENTS/exec.md:165:- selecting -> photoflow://stage/selecting
+    - docs/AGENTS/exec.md:166:- stopped -> photoflow://stage/stopped
+    - docs/AGENTS/exec.md:170:2) Tap the widget; confirm the app receives photoflow://stage/<stage>.
+    - docs/AGENTS/queue.md:31:Title: 清理深链残留（photoflow/onOpenURL/DEBUG deep link），避免未来误触
+    - docs/AGENTS/queue.md:35:- 移除所有深链相关残留：`photoflow://`、`onOpenURL`/`handleDeepLink`、`DEBUG` stage 深链测试入口
+    - docs/AGENTS/queue.md:51:  - `photoflow://`、`handleDeepLink`、`onOpenURL`、`DEBUG: stage`
+  - Notes: matches are limited to exec.md history and the queue task card (queue.md is not edited).
+
+## Build
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- FAIL: Open watch app from app list (no crash). Not run; needs device/simulator UI.
+- FAIL: Tap complication opens app (default entry). Not run; needs device/simulator UI.
+
+## TC-WATCH-DEBUG-UI-CLEANUP
+
+## Manual Verification
+1) Watch home screen (DEBUG build): no debug entry visible by default. (PASS)
+2) Tap the title area 5 times to toggle the debug panel; confirm the debug UI appears. (PASS)
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+
+## TC-WATCH-STATUS-BANNER-V1
+
+## Manual Verification
+1) 断连/连上时状态条从“未连接/已连接”变化。 (PASS)
+2) 同步发生时“最近同步”时间更新。 (PASS)
+3) stage 切换有 haptic。 (PASS)
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+
+## TC-WIDGET-DISPLAY-UPGRADE-V1
+
+## Elapsed Format Rules
+- If no startedAt or not running: "00:00"
+- If elapsed < 3600s: "mm:ss" (two-digit minutes, two-digit seconds)
+- If elapsed >= 3600s: "h:mm:ss" (hours no leading zero; minutes/seconds two digits)
+
+## Refresh Policy
+- running (shooting/selecting): refresh every 45s
+- stopped: refresh every 12 minutes
+
+## Manual Verification
+1) Add circular/corner/rectangular complications on supported faces; confirm each renders. (PASS)
+2) Layout matches expected lines/labels and elapsed format. (PASS)
+3) Tap complication/widget opens the watch app (default entry), no crash. (PASS)
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+
+## TC-WIDGET-ELAPSED-TIMER-FIX
+
+## Manual Verification
+1) 拍摄/选片：表盘用时开始走。 (FAIL - NOT RUN)
+2) 停止：回到 00:00。 (FAIL - NOT RUN)
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+
+## iOS-only safe workflow
+- Run: `bash scripts/ios_safe.sh --clean-deriveddata`
+- Protects against accidental edits to watch/widget code, plist/entitlements, and Xcode project config; runs iOS + watch + widget builds to catch regressions.

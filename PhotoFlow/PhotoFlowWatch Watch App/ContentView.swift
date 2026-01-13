@@ -7,6 +7,9 @@
 
 import Combine
 import SwiftUI
+#if os(watchOS)
+import WatchKit
+#endif
 import WatchConnectivity
 import WidgetKit
 
@@ -41,13 +44,41 @@ private enum WidgetStateStore {
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
+    private enum SyncOrderKey {
+        static let lastAppliedAt = "pf_sync_lastAppliedAt"
+    }
+
+    struct IncomingState: Equatable {
+        let stage: String
+        let isRunning: Bool
+        let startedAt: Date?
+        let lastUpdatedAt: Date
+    }
+
     @Published var isOnDuty = false
+    @Published var incomingState: IncomingState?
+    @Published var lastSyncAt: Date?
+    @Published var sessionActivationState: WCSessionActivationState = .notActivated
+    @Published var sessionReachable = false
+#if DEBUG
+    @Published var debugLastReceivedPayload: String = "—"
+    @Published var debugLastAppliedAt: String = "—"
+    @Published var debugSessionStatus: String = "—"
+#endif
 
     override init() {
         super.init()
         guard WCSession.isSupported() else { return }
-        WCSession.default.delegate = self
-        WCSession.default.activate()
+        let session = WCSession.default
+        session.delegate = self
+        session.activate()
+        if session.activationState == .activated {
+            applyLatestContextIfAvailable(from: session)
+        }
+        updateSessionStatus(for: session)
+#if DEBUG
+        updateDebugStatus(for: session)
+#endif
     }
 
     func sendSessionEvent(event: String, timestamp: TimeInterval) {
@@ -68,7 +99,14 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
 
-    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
+    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+        guard error == nil, activationState == .activated else { return }
+        applyLatestContextIfAvailable(from: session)
+        updateSessionStatus(for: session)
+#if DEBUG
+        updateDebugStatus(for: session)
+#endif
+    }
 
 #if os(iOS)
     func sessionDidBecomeInactive(_ session: WCSession) { }
@@ -78,14 +116,151 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 #endif
 
-    func sessionReachabilityDidChange(_ session: WCSession) { }
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        updateSessionStatus(for: session)
+#if DEBUG
+        updateDebugStatus(for: session)
+#endif
+    }
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
         guard let value = applicationContext["isOnDuty"] as? Bool else { return }
         Task { @MainActor in
             isOnDuty = value
         }
+        applyStatePayload(applicationContext)
     }
+
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        applyStatePayload(message)
+    }
+
+    private func applyStatePayload(_ payload: [String: Any]) {
+        let hasStateKey = payload.keys.contains(WidgetStateStore.keyStage)
+            || payload.keys.contains(WidgetStateStore.keyIsRunning)
+            || payload.keys.contains(WidgetStateStore.keyStartedAt)
+            || payload.keys.contains(WidgetStateStore.keyLastUpdatedAt)
+        guard hasStateKey else { return }
+
+#if DEBUG
+        debugLastReceivedPayload = formatDebugPayload(payload)
+        updateDebugStatus(for: WCSession.default)
+#endif
+        let stage = normalizedStage(payload[WidgetStateStore.keyStage] as? String)
+        let isRunning = payload[WidgetStateStore.keyIsRunning] as? Bool ?? (stage != WidgetStateStore.stageStopped)
+        let startedAtSeconds = parseEpoch(payload[WidgetStateStore.keyStartedAt])
+        let lastUpdatedSeconds = parseEpoch(payload[WidgetStateStore.keyLastUpdatedAt])
+        guard shouldApplyState(lastUpdatedAtSeconds: lastUpdatedSeconds) else { return }
+        let resolvedLastUpdatedSeconds = lastUpdatedSeconds ?? Date().timeIntervalSince1970
+        let state = IncomingState(
+            stage: stage,
+            isRunning: isRunning,
+            startedAt: startedAtSeconds.map { Date(timeIntervalSince1970: $0) },
+            lastUpdatedAt: Date(timeIntervalSince1970: resolvedLastUpdatedSeconds)
+        )
+        Task { @MainActor in
+            incomingState = state
+            lastSyncAt = state.lastUpdatedAt
+        }
+        print("WCSession received state stage=\(stage) running=\(isRunning)")
+    }
+
+    private func updateSessionStatus(for session: WCSession) {
+        sessionActivationState = session.activationState
+        sessionReachable = session.isReachable
+    }
+
+#if DEBUG
+    private func updateDebugStatus(for session: WCSession) {
+        let activation: String
+        switch session.activationState {
+        case .activated:
+            activation = "activated"
+        case .inactive:
+            activation = "inactive"
+        case .notActivated:
+            activation = "notActivated"
+        @unknown default:
+            activation = "unknown"
+        }
+        let parts = [
+            "activation=\(activation)",
+            "reachable=\(session.isReachable)"
+        ]
+#if os(watchOS)
+        let installedLabel = "companionInstalled=\(session.isCompanionAppInstalled)"
+#else
+        let installedLabel = "watchAppInstalled=\(session.isWatchAppInstalled)"
+#endif
+        debugSessionStatus = (parts + [installedLabel]).joined(separator: "\n")
+    }
+
+    private func formatDebugPayload(_ payload: [String: Any]) -> String {
+        let parts = payload
+            .map { "\($0.key)=\(String(describing: $0.value))" }
+            .sorted()
+        return parts.joined(separator: "\n")
+    }
+#endif
+
+    private func applyLatestContextIfAvailable(from session: WCSession) {
+        let receivedContext = session.receivedApplicationContext
+        let context = receivedContext.isEmpty ? session.applicationContext : receivedContext
+        guard !context.isEmpty else { return }
+        if let value = context["isOnDuty"] as? Bool {
+            isOnDuty = value
+        }
+        applyStatePayload(context)
+    }
+
+    private func shouldApplyState(lastUpdatedAtSeconds: TimeInterval?) -> Bool {
+        let defaults = UserDefaults.standard
+        let lastApplied = defaults.double(forKey: SyncOrderKey.lastAppliedAt)
+        guard let lastUpdatedAtSeconds else {
+            if lastApplied > 0 {
+                print("WCSession ignored state missing lastUpdatedAt")
+                return false
+            }
+            return true
+        }
+        if lastApplied > 0, lastUpdatedAtSeconds <= lastApplied {
+            print("WCSession ignored out-of-order state lastUpdated=\(lastUpdatedAtSeconds) lastApplied=\(lastApplied)")
+            return false
+        }
+        defaults.set(lastUpdatedAtSeconds, forKey: SyncOrderKey.lastAppliedAt)
+#if DEBUG
+        debugLastAppliedAt = formatDebugTimestamp(lastUpdatedAtSeconds)
+#endif
+        return true
+    }
+
+    private func normalizedStage(_ value: String?) -> String {
+        switch value {
+        case WidgetStateStore.stageShooting, WidgetStateStore.stageSelecting, WidgetStateStore.stageStopped:
+            return value ?? WidgetStateStore.stageStopped
+        default:
+            return WidgetStateStore.stageStopped
+        }
+    }
+
+    private func parseEpoch(_ value: Any?) -> TimeInterval? {
+        if let seconds = value as? Double {
+            return seconds
+        }
+        if let seconds = value as? Int {
+            return TimeInterval(seconds)
+        }
+        return nil
+    }
+
+#if DEBUG
+    private func formatDebugTimestamp(_ seconds: TimeInterval) -> String {
+        let date = Date(timeIntervalSince1970: seconds)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "H:mm:ss"
+        return "\(Int(seconds)) (\(formatter.string(from: date)))"
+    }
+#endif
 }
 
 struct ContentView: View {
@@ -94,12 +269,6 @@ struct ContentView: View {
         case shooting
         case selecting
         case ended
-    }
-
-    private enum DeepLinkStage: String {
-        case shooting
-        case selecting
-        case stopped
     }
 
     struct Session {
@@ -130,6 +299,9 @@ struct ContentView: View {
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+#if DEBUG
+    @State private var showDebugPanel = false
+#endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
 
@@ -153,6 +325,25 @@ struct ContentView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+#if DEBUG
+            .contentShape(Rectangle())
+            .onTapGesture(count: 5) {
+                showDebugPanel.toggle()
+            }
+#endif
+
+            HStack {
+                Text("连接 \(connectionStatusText)")
+                Spacer(minLength: 8)
+                Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
 
             Button(action: handlePrimaryAction) {
                 Text(primaryButtonTitle)
@@ -161,21 +352,31 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
 
 #if DEBUG
-            VStack(spacing: 6) {
-                Button("DEBUG: stage/shooting") {
-                    guard let url = URL(string: "photoflow://stage/shooting") else { return }
-                    handleDeepLink(url)
+            if showDebugPanel {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("lastReceivedPayload")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugLastReceivedPayload)
+                        .font(.caption2)
+
+                    Text("lastAppliedAt")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugLastAppliedAt)
+                        .font(.caption2)
+
+                    Text("sessionStatus")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugSessionStatus)
+                        .font(.caption2)
                 }
-                Button("DEBUG: stage/selecting") {
-                    guard let url = URL(string: "photoflow://stage/selecting") else { return }
-                    handleDeepLink(url)
-                }
-                Button("DEBUG: stage/stopped") {
-                    guard let url = URL(string: "photoflow://stage/stopped") else { return }
-                    handleDeepLink(url)
-                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.thinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
-            .font(.footnote)
 #endif
         }
         .padding()
@@ -183,8 +384,9 @@ struct ContentView: View {
             Alert(title: Text(alert.message))
         }
         .onReceive(ticker) { now = $0 }
-        .onOpenURL { url in
-            handleDeepLink(url)
+        .onReceive(syncStore.$incomingState) { state in
+            guard let state else { return }
+            applyIncomingState(state)
         }
     }
 
@@ -199,6 +401,13 @@ struct ContentView: View {
         case .ended:
             return "已结束"
         }
+    }
+
+    private var connectionStatusText: String {
+        guard syncStore.sessionActivationState == .activated else {
+            return "未连接"
+        }
+        return syncStore.sessionReachable ? "已连接" : "未连接"
     }
 
     private var primaryButtonTitle: String {
@@ -229,22 +438,26 @@ struct ContentView: View {
             session.shootingStart = now
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
+            playStageHaptic()
         case .shooting:
             stage = .selecting
             session.selectingStart = now
             syncStore.sendSessionEvent(event: "startSelecting", timestamp: now.timeIntervalSince1970)
             updateWidgetState(isRunning: true, startedAt: session.shootingStart, stage: WidgetStateStore.stageSelecting)
+            playStageHaptic()
         case .selecting:
             stage = .ended
             session.endedAt = now
             syncStore.sendSessionEvent(event: "end", timestamp: now.timeIntervalSince1970)
             updateWidgetState(isRunning: false, startedAt: nil, stage: WidgetStateStore.stageStopped)
+            playStageHaptic()
         case .ended:
             session = Session()
             session.shootingStart = now
             stage = .shooting
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
+            playStageHaptic()
         }
     }
 
@@ -284,47 +497,65 @@ struct ContentView: View {
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
-    private func updateWidgetState(isRunning: Bool, startedAt: Date?, stage: String) {
-        WidgetStateStore.writeState(isRunning: isRunning, startedAt: startedAt, stage: stage)
+    private func formatSyncTime(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "H:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private func playStageHaptic() {
+#if os(watchOS)
+        WKInterfaceDevice.current().play(.click)
+#endif
+    }
+
+    private func updateWidgetState(isRunning: Bool, startedAt: Date?, stage: String, lastUpdatedAt: Date = Date()) {
+        let resolvedStartedAt = isRunning ? (startedAt ?? Date()) : startedAt
+        WidgetStateStore.writeState(
+            isRunning: isRunning,
+            startedAt: resolvedStartedAt,
+            stage: stage,
+            lastUpdatedAt: lastUpdatedAt
+        )
         WidgetCenter.shared.reloadTimelines(ofKind: WidgetStateStore.widgetKind)
     }
 
-    private func handleDeepLink(_ url: URL) {
-        guard url.scheme == "photoflow", url.host == "stage" else { return }
-        let components = url.pathComponents.filter { $0 != "/" }
-        guard let stageComponent = components.first,
-              let deepLinkStage = DeepLinkStage(rawValue: stageComponent) else { return }
-
-        applyDeepLinkStage(deepLinkStage, now: Date())
-    }
-
-    private func applyDeepLinkStage(_ deepLinkStage: DeepLinkStage, now: Date) {
-        switch deepLinkStage {
-        case .shooting:
+    @MainActor
+    private func applyIncomingState(_ state: WatchSyncStore.IncomingState) {
+        let stageValue = state.stage
+        switch stageValue {
+        case WidgetStateStore.stageShooting:
             stage = .shooting
-            session.endedAt = nil
+            session.shootingStart = state.startedAt ?? state.lastUpdatedAt
             session.selectingStart = nil
-            if session.shootingStart == nil {
-                session.shootingStart = now
-            }
-        case .selecting:
-            stage = .selecting
             session.endedAt = nil
-            if session.shootingStart == nil {
-                session.shootingStart = now
-            }
-            if session.selectingStart == nil {
-                session.selectingStart = now
-            }
-        case .stopped:
-            stage = .ended
-            if session.shootingStart != nil {
-                session.endedAt = now
+        case WidgetStateStore.stageSelecting:
+            stage = .selecting
+            session.shootingStart = state.startedAt ?? state.lastUpdatedAt
+            session.selectingStart = state.lastUpdatedAt
+            session.endedAt = nil
+        default:
+            if let startedAt = state.startedAt {
+                stage = .ended
+                session.shootingStart = startedAt
+                session.selectingStart = nil
+                session.endedAt = state.lastUpdatedAt
             } else {
-                session.endedAt = nil
+                stage = .idle
+                session = Session()
             }
         }
+
+        updateWidgetState(
+            isRunning: state.isRunning,
+            startedAt: state.startedAt,
+            stage: stageValue,
+            lastUpdatedAt: state.lastUpdatedAt
+        )
+        print("Applied watch state stage=\(stageValue)")
     }
+
 }
 
 #Preview {
