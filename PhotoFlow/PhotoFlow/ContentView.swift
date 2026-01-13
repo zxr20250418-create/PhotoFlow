@@ -29,12 +29,19 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     @Published var isOnDuty = false
     @Published var incomingEvent: SessionEvent?
+#if DEBUG
+    @Published var debugLastSentPayload: String = "—"
+    @Published var debugSessionStatus: String = "—"
+#endif
 
     override init() {
         super.init()
         guard WCSession.isSupported() else { return }
         WCSession.default.delegate = self
         WCSession.default.activate()
+#if DEBUG
+        updateDebugStatus(for: WCSession.default)
+#endif
     }
 
     func setOnDuty(_ value: Bool) {
@@ -48,6 +55,10 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             "isOnDuty": value,
             "ts": Int(Date().timeIntervalSince1970)
         ]
+#if DEBUG
+        debugLastSentPayload = formatDebugPayload(payload)
+        updateDebugStatus(for: WCSession.default)
+#endif
         do {
             try WCSession.default.updateApplicationContext(payload)
         } catch {
@@ -66,6 +77,10 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             payload[StageSyncKey.startedAt] = startedAt.timeIntervalSince1970
         }
         let session = WCSession.default
+#if DEBUG
+        debugLastSentPayload = formatDebugPayload(payload)
+        updateDebugStatus(for: session)
+#endif
         do {
             try session.updateApplicationContext(payload)
         } catch {
@@ -81,6 +96,46 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
+
+#if DEBUG
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        updateDebugStatus(for: session)
+    }
+
+    func sessionWatchStateDidChange(_ session: WCSession) {
+        updateDebugStatus(for: session)
+    }
+#endif
+
+#if DEBUG
+    private func updateDebugStatus(for session: WCSession) {
+        let activation: String
+        switch session.activationState {
+        case .activated:
+            activation = "activated"
+        case .inactive:
+            activation = "inactive"
+        case .notActivated:
+            activation = "notActivated"
+        @unknown default:
+            activation = "unknown"
+        }
+        let parts = [
+            "activation=\(activation)",
+            "reachable=\(session.isReachable)",
+            "paired=\(session.isPaired)",
+            "watchAppInstalled=\(session.isWatchAppInstalled)"
+        ]
+        debugSessionStatus = parts.joined(separator: "\n")
+    }
+
+    private func formatDebugPayload(_ payload: [String: Any]) -> String {
+        let parts = payload
+            .map { "\($0.key)=\(String(describing: $0.value))" }
+            .sorted()
+        return parts.joined(separator: "\n")
+    }
+#endif
 
     func sessionDidBecomeInactive(_ session: WCSession) { }
 
@@ -155,6 +210,9 @@ struct ContentView: View {
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+#if DEBUG
+    @State private var showDebugPanel = false
+#endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
 
@@ -189,6 +247,39 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(.bordered)
+
+#if DEBUG
+            Button(action: { showDebugPanel.toggle() }) {
+                Text("Debug")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
+            .opacity(0.4)
+
+            if showDebugPanel {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("lastSentPayload")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugLastSentPayload)
+                        .font(.caption2)
+                        .textSelection(.enabled)
+
+                    Text("sessionStatus")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugSessionStatus)
+                        .font(.caption2)
+                        .textSelection(.enabled)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.thinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+#endif
         }
         .padding()
         .alert(item: $activeAlert) { alert in

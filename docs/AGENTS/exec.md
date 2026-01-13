@@ -223,3 +223,26 @@
 - PASS: Test A (watch app closed → iPhone changes stage 5 times → wait 10s → open watch app → last stage shown).
 - PASS: Test B (watch app foreground → iPhone change stage → watch updates within ~1s).
 - PASS: Test C (disconnect/reconnect → open watch app → last stage shown).
+
+## TC-SYNC-DIAG-DASHBOARD
+
+## How To Open
+- iPhone: tap the small Debug button at the bottom of the main screen (DEBUG builds only).
+- Watch: tap the small Debug button under the DEBUG stage buttons (DEBUG builds only).
+
+## Fields
+- lastSentPayload (iPhone): last payload sent to watch (key=value list).
+- lastReceivedPayload (watch): most recent payload received from phone.
+- lastAppliedAt (watch): last applied lastUpdatedAt timestamp (epoch + H:mm:ss).
+- sessionStatus: activation/reachable/pairing/installed flags for WCSession.
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- FAIL: iPhone change stage → watch dashboard updates. Not run; needs paired devices.

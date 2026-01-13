@@ -54,6 +54,11 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     @Published var isOnDuty = false
     @Published var incomingState: IncomingState?
+#if DEBUG
+    @Published var debugLastReceivedPayload: String = "—"
+    @Published var debugLastAppliedAt: String = "—"
+    @Published var debugSessionStatus: String = "—"
+#endif
 
     override init() {
         super.init()
@@ -64,6 +69,9 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         if session.activationState == .activated {
             applyLatestContextIfAvailable(from: session)
         }
+#if DEBUG
+        updateDebugStatus(for: session)
+#endif
     }
 
     func sendSessionEvent(event: String, timestamp: TimeInterval) {
@@ -87,6 +95,9 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         guard error == nil, activationState == .activated else { return }
         applyLatestContextIfAvailable(from: session)
+#if DEBUG
+        updateDebugStatus(for: session)
+#endif
     }
 
 #if os(iOS)
@@ -97,7 +108,11 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 #endif
 
-    func sessionReachabilityDidChange(_ session: WCSession) { }
+    func sessionReachabilityDidChange(_ session: WCSession) {
+#if DEBUG
+        updateDebugStatus(for: session)
+#endif
+    }
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
         guard let value = applicationContext["isOnDuty"] as? Bool else { return }
@@ -118,6 +133,10 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             || payload.keys.contains(WidgetStateStore.keyLastUpdatedAt)
         guard hasStateKey else { return }
 
+#if DEBUG
+        debugLastReceivedPayload = formatDebugPayload(payload)
+        updateDebugStatus(for: WCSession.default)
+#endif
         let stage = normalizedStage(payload[WidgetStateStore.keyStage] as? String)
         let isRunning = payload[WidgetStateStore.keyIsRunning] as? Bool ?? (stage != WidgetStateStore.stageStopped)
         let startedAtSeconds = parseEpoch(payload[WidgetStateStore.keyStartedAt])
@@ -135,6 +154,39 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         }
         print("WCSession received state stage=\(stage) running=\(isRunning)")
     }
+
+#if DEBUG
+    private func updateDebugStatus(for session: WCSession) {
+        let activation: String
+        switch session.activationState {
+        case .activated:
+            activation = "activated"
+        case .inactive:
+            activation = "inactive"
+        case .notActivated:
+            activation = "notActivated"
+        @unknown default:
+            activation = "unknown"
+        }
+        let parts = [
+            "activation=\(activation)",
+            "reachable=\(session.isReachable)"
+        ]
+#if os(watchOS)
+        let installedLabel = "companionInstalled=\(session.isCompanionAppInstalled)"
+#else
+        let installedLabel = "watchAppInstalled=\(session.isWatchAppInstalled)"
+#endif
+        debugSessionStatus = (parts + [installedLabel]).joined(separator: "\n")
+    }
+
+    private func formatDebugPayload(_ payload: [String: Any]) -> String {
+        let parts = payload
+            .map { "\($0.key)=\(String(describing: $0.value))" }
+            .sorted()
+        return parts.joined(separator: "\n")
+    }
+#endif
 
     private func applyLatestContextIfAvailable(from session: WCSession) {
         let receivedContext = session.receivedApplicationContext
@@ -161,6 +213,9 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             return false
         }
         defaults.set(lastUpdatedAtSeconds, forKey: SyncOrderKey.lastAppliedAt)
+#if DEBUG
+        debugLastAppliedAt = formatDebugTimestamp(lastUpdatedAtSeconds)
+#endif
         return true
     }
 
@@ -182,6 +237,15 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         }
         return nil
     }
+
+#if DEBUG
+    private func formatDebugTimestamp(_ seconds: TimeInterval) -> String {
+        let date = Date(timeIntervalSince1970: seconds)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "H:mm:ss"
+        return "\(Int(seconds)) (\(formatter.string(from: date)))"
+    }
+#endif
 }
 
 struct ContentView: View {
@@ -226,6 +290,9 @@ struct ContentView: View {
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+#if DEBUG
+    @State private var showDebugPanel = false
+#endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
 
@@ -272,6 +339,41 @@ struct ContentView: View {
                 }
             }
             .font(.footnote)
+
+            Button(action: { showDebugPanel.toggle() }) {
+                Text("Debug")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 6)
+            .opacity(0.4)
+
+            if showDebugPanel {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("lastReceivedPayload")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugLastReceivedPayload)
+                        .font(.caption2)
+
+                    Text("lastAppliedAt")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugLastAppliedAt)
+                        .font(.caption2)
+
+                    Text("sessionStatus")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugSessionStatus)
+                        .font(.caption2)
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.thinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
 #endif
         }
         .padding()
