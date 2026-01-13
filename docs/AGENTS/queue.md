@@ -46,31 +46,46 @@ Status: PAUSED (blocked by elapsed timer bug)
 ID: TC-WIDGET-ELAPSED-TIMER-FIX
 Status: DONE (merged in PR #56)
 
+## DONE — TC-SPEC-V1-ALIGNMENT
+ID: TC-SPEC-V1-ALIGNMENT
+Status: DONE (merged in PR #61)
+
 ## PAUSED — TC-WIDGET-STATE-WRITE-FIX
 ID: TC-WIDGET-STATE-WRITE-FIX
 Status: PAUSED (spec alignment priority)
 
-## ACTIVE — TC-SPEC-V1-ALIGNMENT
-ID: TC-SPEC-V1-ALIGNMENT
-Title: 更新 SPEC：v1 纳入 watch/widget（对齐现实，删除过期约束）
+## ACTIVE — TC-IOS-HOME-TIMELINE-V1
+ID: TC-IOS-HOME-TIMELINE-V1
+Title: iOS 首页会话时间线（按时间早→晚；显示从下到上）
 AssignedTo: Executor
 
 Goal:
-- `docs/SPEC.md` 增加 v1 小节：明确 watch app + widget/complication 已纳入范围与当前约束
-- 将 “v0: watch must NOT include Complication/WidgetKit” 标注为历史阶段（v0 已结束），不再作为现行约束
+- 在 iOS 首页加入一个“会话时间线”区块，展示 stage 变化记录（拍摄/选片/停止）与时间戳。
+- 排序规则：按时间从早到晚（ascending），但视觉呈现从下到上（最新在上方）。
+- 不修改 watch/widget/config，避免牵连手表端。
 
-AllowedFiles (ONLY):
-- `docs/SPEC.md`
-- (optional) `docs/AGENTS/exec.md`（记录此次文档更新摘要）
+Scope (Allowed files ONLY):
+- 仅 iOS 目录：PhotoFlow/PhotoFlow/**（iPhone app Swift files）
+- docs/AGENTS/exec.md（追加）
 
 Forbidden:
-- 不改任何代码、脚本、配置文件
-- 不改 queue 以外的文档（除非确实需要在 `docs/RELEASE_CHECKLIST.md` 里补一句 gate）
+- 禁止修改：
+  - PhotoFlow/PhotoFlowWatch Watch App/**
+  - PhotoFlow/PhotoFlowWatchWidget/**
+  - *.plist / *.entitlements / project.pbxproj
+- 不新增 target/build settings
+- 不重构现有架构（只加一个轻量 timeline）
 
 Acceptance:
-- `docs/SPEC.md` 明确包含：
-  1) v0（历史）：当时的边界与为何这么定
-  2) v1（现行）：当前包含 watch app + widget/complication + phone↔watch sync + diagnostics
-  3) 现行默认规则：Swift-only 卡默认不允许改 `Info.plist`/`project.pbxproj`；只有“配置卡”才允许，并必须跑 preflight/embedded checks
-- PR opened and merged (docs-only)
+- 首页出现 timeline 区块（标题：例如“今日时间线/会话时间线”）
+- 记录项包含：时间（HH:mm:ss 或 HH:mm）、stage 中文（拍摄/选片/停止）、来源（手机/手表可选，若暂无则先留空）
+- 排序：数据按时间升序；UI 显示最新在上（通过 reversed/rotation 等实现均可）
+- 运行护栏：bash scripts/ios_safe.sh --clean-deriveddata PASS
+- xcodebuild（ios_safe 自带）通过
+- exec.md 记录：实现方式、排序逻辑、手动验证 PASS
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新
 - STOP
