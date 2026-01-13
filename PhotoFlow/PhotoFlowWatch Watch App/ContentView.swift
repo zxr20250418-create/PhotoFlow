@@ -256,12 +256,6 @@ struct ContentView: View {
         case ended
     }
 
-    private enum DeepLinkStage: String {
-        case shooting
-        case selecting
-        case stopped
-    }
-
     struct Session {
         var shootingStart: Date?
         var selectingStart: Date?
@@ -324,22 +318,6 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
 
 #if DEBUG
-            VStack(spacing: 6) {
-                Button("DEBUG: stage/shooting") {
-                    guard let url = URL(string: "photoflow://stage/shooting") else { return }
-                    handleDeepLink(url)
-                }
-                Button("DEBUG: stage/selecting") {
-                    guard let url = URL(string: "photoflow://stage/selecting") else { return }
-                    handleDeepLink(url)
-                }
-                Button("DEBUG: stage/stopped") {
-                    guard let url = URL(string: "photoflow://stage/stopped") else { return }
-                    handleDeepLink(url)
-                }
-            }
-            .font(.footnote)
-
             Button(action: { showDebugPanel.toggle() }) {
                 Text("Debug")
                     .font(.caption2)
@@ -384,9 +362,6 @@ struct ContentView: View {
         .onReceive(syncStore.$incomingState) { state in
             guard let state else { return }
             applyIncomingState(state)
-        }
-        .onOpenURL { url in
-            handleDeepLink(url)
         }
     }
 
@@ -531,42 +506,6 @@ struct ContentView: View {
         print("Applied watch state stage=\(stageValue)")
     }
 
-    private func handleDeepLink(_ url: URL) {
-        guard url.scheme == "photoflow", url.host == "stage" else { return }
-        let components = url.pathComponents.filter { $0 != "/" }
-        guard let stageComponent = components.first,
-              let deepLinkStage = DeepLinkStage(rawValue: stageComponent) else { return }
-
-        applyDeepLinkStage(deepLinkStage, now: Date())
-    }
-
-    private func applyDeepLinkStage(_ deepLinkStage: DeepLinkStage, now: Date) {
-        switch deepLinkStage {
-        case .shooting:
-            stage = .shooting
-            session.endedAt = nil
-            session.selectingStart = nil
-            if session.shootingStart == nil {
-                session.shootingStart = now
-            }
-        case .selecting:
-            stage = .selecting
-            session.endedAt = nil
-            if session.shootingStart == nil {
-                session.shootingStart = now
-            }
-            if session.selectingStart == nil {
-                session.selectingStart = now
-            }
-        case .stopped:
-            stage = .ended
-            if session.shootingStart != nil {
-                session.endedAt = now
-            } else {
-                session.endedAt = nil
-            }
-        }
-    }
 }
 
 #Preview {
