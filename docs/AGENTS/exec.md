@@ -356,3 +356,17 @@
   - Result: ** BUILD SUCCEEDED **
 - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
   - Result: ** BUILD SUCCEEDED **
+
+## TC-WIDGET-ELAPSED-TIMER-FIX
+
+## Manual Verification
+1) 拍摄/选片：表盘用时开始走。 (FAIL - NOT RUN)
+2) 停止：回到 00:00。 (FAIL - NOT RUN)
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **

@@ -511,9 +511,10 @@ struct ContentView: View {
     }
 
     private func updateWidgetState(isRunning: Bool, startedAt: Date?, stage: String, lastUpdatedAt: Date = Date()) {
+        let resolvedStartedAt = isRunning ? (startedAt ?? Date()) : startedAt
         WidgetStateStore.writeState(
             isRunning: isRunning,
-            startedAt: startedAt,
+            startedAt: resolvedStartedAt,
             stage: stage,
             lastUpdatedAt: lastUpdatedAt
         )
