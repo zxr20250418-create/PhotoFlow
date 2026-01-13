@@ -198,6 +198,68 @@
 - `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
   - Result: ** BUILD SUCCEEDED **
 
+## DL-3 watch crash evidence
+
+- Crash time: `2026-01-13 08:19:29 +0800` (launch crash; opening watch app immediately exits)
+- Branch/commit: `feat/deeplink-dl3-scheme` @ `b0ee86c`
+- How reproduced (CLI proxy for Xcode Run):
+  - Built + installed watch app to paired watch:
+    - `xcodebuild install -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -configuration Debug -destination 'id=00008310-001A101A3680E01E' -allowProvisioningUpdates`
+    - `xcrun devicectl device install app --device 8D2524B6-A20F-5745-9304-F3AC1DD0013A ~/Library/Developer/Xcode/DerivedData/PhotoFlow-*/Build/Products/Debug-watchos/PhotoFlowWatch\\ Watch\\ App.app`
+  - Launched:
+    - `xcrun devicectl device process launch --device 8D2524B6-A20F-5745-9304-F3AC1DD0013A com.zhengxinrong.PhotoFlow.watchkitapp`
+  - Pulled crash logs:
+    - `xcrun devicectl device copy from --device 8D2524B6-A20F-5745-9304-F3AC1DD0013A --domain-type systemCrashLogs --source . --destination /tmp/photoflow_watch_crashlogs_20260113_081922`
+- Crash report file:
+  - `/tmp/photoflow_watch_crashlogs_20260113_081922/PhotoFlowWatch Watch Extension-2026-01-13-081929.ips`
+- Terminating reason:
+  - `WATCHKIT` / `API Violation`
+  - `Condition failed:"NO". Error - Unable to start application. It is likely the type conforming to App is missing @main, or the application is missing a Storyboard with a configured entry point.`
+- Exception:
+  - `EXC_CRASH` `SIGABRT`
+- Top stack frames (unsymbolicated, from .ips):
+  - `00 libsystem_kernel.dylib +48772`
+  - `01 libsystem_kernel.dylib +210296`
+  - `02 libsystem_kernel.dylib +210192`
+  - `03 WatchKit +634048`
+  - `04 WatchKit +641080`
+  - `05 libdispatch.dylib +112604`
+  - `06 libdispatch.dylib +18880`
+  - `07 WatchKit +639096`
+  - `08 WatchKit +637204`
+  - `09 UIKitCore +17043332`
+- First 30 lines (as captured from the .ips header/body):
+  - `{"app_name":"PhotoFlowWatch Watch Extension","timestamp":"2026-01-13 08:19:29.00 +0800","app_version":"0.1.0",...,"bundleID":"com.zhengxinrong.PhotoFlow.watchkitapp.watchkitextension",...}`
+  - `{`
+  - `  "uptime" : 26000,`
+  - `  "procRole" : "Foreground",`
+  - `  "version" : 2,`
+  - `  "userID" : 501,`
+  - `  "deployVersion" : 210,`
+  - `  "modelCode" : "Watch7,18",`
+  - `  "coalitionID" : 630,`
+  - `  "osVersion" : {`
+  - `    "isEmbedded" : true,`
+  - `    "train" : "Watch OS 26.2",`
+  - `    "releaseType" : "User",`
+  - `    "build" : "23S303"`
+  - `  },`
+  - `  "captureTime" : "2026-01-13 08:19:28.8647 +0800",`
+  - `  "codeSigningMonitor" : 2,`
+  - `  "incident" : "161AED5C-F12E-458E-BE26-32B773CB5EE0",`
+  - `  "pid" : 953,`
+  - `  "cpuType" : "ARM-64",`
+  - `  "procLaunch" : "2026-01-13 08:19:28.6019 +0800",`
+  - `  "procStartAbsTime" : 626630121748,`
+  - `  "procExitAbsTime" : 626636142939,`
+  - `  "procName" : "PhotoFlowWatch Watch Extension",`
+  - `  "procPath" : "/private/var/containers/Bundle/Application/F2F8FE9D-.../PhotoFlowWatch Watch App.app/PlugIns/PhotoFlowWatch Watch Extension.appex/PhotoFlowWatch Watch Extension",`
+  - `  "bundleInfo" : {"CFBundleShortVersionString":"0.1.0","CFBundleVersion":"1","CFBundleIdentifier":"com.zhengxinrong.PhotoFlow.watchkitapp.watchkitextension"},`
+  - `  "storeInfo" : {"deviceIdentifierForVendor":"4E81B23E-07CA-49FA-83A5-3BDB3A127964","thirdParty":true},`
+  - `  "parentProc" : "launchd",`
+  - `  "parentPid" : 1,`
+  - `  "coalitionName" : "com.zhengxinrong.PhotoFlow.watchkitapp",`
+
 ## TC-DEEPLINK-DL2-WIDGETURL
 
 ## Widget URL Mapping
@@ -290,3 +352,22 @@
 - `xcrun devicectl device uninstall app --device 202 com.zhengxinrong.PhotoFlow --quiet || true`
 - `xcrun devicectl device install app --device 202 "$IOS_APP"`
   - App installed: bundleID com.zhengxinrong.PhotoFlow
+
+## DL-3 watch crash fix
+
+## Root Cause
+- WatchKit extension launched without an app entry point: crash log shows WATCHKIT API Violation "type conforming to App is missing @main, or the application is missing a Storyboard with a configured entry point".
+
+## Fix
+- Added a SwiftUI @main App entry point for the WatchKit extension, guarded by APP_EXTENSION to avoid duplicate @main in the watch app target.
+
+## Verification
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -configuration Debug -destination 'id=00008120-00064CDE34E8C01E' -allowProvisioningUpdates`
+  - Result: ** BUILD SUCCEEDED **
+- Watch device launch verification blocked:
+  - `xcrun devicectl device process launch --device 8D2524B6-A20F-5745-9304-F3AC1DD0013A com.zhengxinrong.PhotoFlow.watchkitapp --console`
+  - Error: CoreDeviceError 4000 (RemotePairingError 1001). Ensure watch is unlocked, on Wi-Fi, and reachable, then re-run.

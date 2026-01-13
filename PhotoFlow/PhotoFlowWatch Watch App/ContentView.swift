@@ -330,3 +330,16 @@ struct ContentView: View {
 #Preview {
     ContentView(syncStore: WatchSyncStore())
 }
+
+#if APP_EXTENSION
+@main
+struct PhotoFlowWatchExtensionApp: App {
+    @StateObject private var syncStore = WatchSyncStore()
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView(syncStore: syncStore)
+        }
+    }
+}
+#endif
