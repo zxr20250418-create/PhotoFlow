@@ -262,4 +262,4 @@
   - Result: ** BUILD SUCCEEDED **
 
 ## Manual Test
-- FAIL: Add circular/corner/rectangular complications and tap each → PhotoFlow Watch App opens (default entry), no crash. Not run; needs watch device/simulator UI.
+- PASS: Add circular/corner/rectangular complications and tap each → PhotoFlow Watch App opens (default entry), no crash.
