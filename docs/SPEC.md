@@ -3,7 +3,21 @@
 ## Targets
 - iOS App: PhotoFlow
 - watchOS: yes
-  - If yes: Watch App target(s) are created by Xcode’s “Watch App for iOS App” template, **v0 must NOT include Complication/WidgetKit**.
+  - If yes: Watch App target(s) are created by Xcode’s “Watch App for iOS App” template.
+
+## v0 (HISTORICAL, not current)
+- v0 watch excluded complication/widgetkit to reduce scope and target wiring risk during initial watch setup.
+- Time window: Dec 2025–Jan 2026 (initial watch target bring-up).
+
+## v1 (CURRENT)
+- Scope includes: watch app, widget/complication, phone↔watch sync (V1/V2), diagnostics/status banner, complication tap-to-open app.
+- Guardrails: iOS-only workflow uses `bash scripts/ios_safe.sh --clean-deriveddata`.
+- High-risk changes (Info.plist/pbxproj/entitlements) only via “config cards” with strict preflight outputs required.
+
+### Gates (config cards)
+- exec.md must include: `preflight_build.sh` / `ios_safe.sh` output.
+- exec.md must include: embedded widget appex check.
+- exec.md must include: embedded watch app/watchkit extension check.
 
 ## Bundle Identifiers
 - iOS: com.zhengxinrong.PhotoFlow
