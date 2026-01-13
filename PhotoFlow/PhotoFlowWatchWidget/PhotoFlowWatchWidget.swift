@@ -77,7 +77,13 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
             return sampleEntry(isRunning: true, stage: WidgetStateStore.stageShooting)
         }
         let state = WidgetStateStore.readState(now: now)
-        let elapsedText = formatElapsed(isRunning: state.isRunning, startedAt: state.startedAt, now: now)
+        let elapsedSeconds: Int
+        if state.isRunning, let startedAt = state.startedAt {
+            elapsedSeconds = max(0, Int(now.timeIntervalSince(startedAt)))
+        } else {
+            elapsedSeconds = 0
+        }
+        let elapsedText = formatElapsed(seconds: elapsedSeconds)
         return PhotoFlowWidgetEntry(
             date: now,
             isRunning: state.isRunning,
@@ -87,19 +93,24 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
         )
     }
 
-    private func formatElapsed(isRunning: Bool, startedAt: Date?, now: Date) -> String {
-        guard isRunning, let startedAt else { return "00:00" }
-        let totalSeconds = max(0, Int(now.timeIntervalSince(startedAt)))
-        let minutes = totalSeconds / 60
-        let seconds = totalSeconds % 60
-        return String(format: "%02d:%02d", minutes, seconds)
+    private func formatElapsed(seconds: Int) -> String {
+        let clampedSeconds = max(0, seconds)
+        if clampedSeconds < 3600 {
+            let minutes = clampedSeconds / 60
+            let seconds = clampedSeconds % 60
+            return String(format: "%02d:%02d", minutes, seconds)
+        }
+        let hours = clampedSeconds / 3600
+        let minutes = (clampedSeconds % 3600) / 60
+        let seconds = clampedSeconds % 60
+        return String(format: "%d:%02d:%02d", hours, minutes, seconds)
     }
 
     private func nextRefreshDate(from entry: PhotoFlowWidgetEntry) -> Date {
         if entry.isRunning {
-            return entry.date.addingTimeInterval(60)
+            return entry.date.addingTimeInterval(45)
         }
-        return entry.date.addingTimeInterval(15 * 60)
+        return entry.date.addingTimeInterval(12 * 60)
     }
 }
 
@@ -162,10 +173,10 @@ struct PhotoFlowWidgetView: View {
 #if os(watchOS)
             case .accessoryCorner:
                 VStack(spacing: 2) {
-                    Text(entry.elapsedText)
-                        .font(.caption2.monospacedDigit())
                     Text(shortStatusText)
                         .font(.caption2)
+                    Text(entry.elapsedText)
+                        .font(.caption2.monospacedDigit())
                 }
 #endif
             default:
