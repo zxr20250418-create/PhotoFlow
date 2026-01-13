@@ -38,58 +38,48 @@ Status: DONE (merged in PR #50)
 ID: TC-WATCH-STATUS-BANNER-V1
 Status: DONE (merged in PR #52)
 
-## ACTIVE — TC-WIDGET-DISPLAY-UPGRADE-V1
+## PAUSED — TC-WIDGET-DISPLAY-UPGRADE-V1
 ID: TC-WIDGET-DISPLAY-UPGRADE-V1
-Title: 小组件显示升级（更像表盘工具：circular/corner 短标签+用时；rectangular 三行；刷新频率优化）
+Status: PAUSED (blocked by elapsed timer bug)
+
+## ACTIVE — TC-WIDGET-ELAPSED-TIMER-FIX
+ID: TC-WIDGET-ELAPSED-TIMER-FIX
+Title: 表盘/小组件用时从 00:00 改为运行中自动走动（Swift-only）
 AssignedTo: Executor
 
 Goal:
-- `accessoryCircular` / `accessoryCorner`：短标签 + 用时（信息密度高、可读）
-- `accessoryRectangular`：三行（状态 / 用时 / 更新 H:mm）
-- running 状态刷新更合理（30–60s），stopped 状态刷新更慢（10–15min）
-- 点击 complication/widget：保持系统默认打开 App（不使用 `widgetURL`，不做深链）
+- running（拍摄/选片）时，complication/widget 的用时能自动走动（每秒更新）
+- stopped 时仍显示 00:00
+- 不引入任何安装/打包风险
 
 AllowedFiles (ONLY):
 - `PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift`
+- `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift`（仅在写入 startedAt/isRunning 的位置改）
 - `docs/AGENTS/exec.md`（追加）
 
 Forbidden:
 - 禁止修改 `Info.plist` / `project.pbxproj` / entitlements / targets / build settings
 - 不新增文件
-- 不改同步协议/业务逻辑（只改显示/刷新策略）
-- 不允许添加 `.widgetURL(...)` 或 `Link(destination:)`
-
-Time format MUST be fixed:
-- If no `startedAt` or not running: `00:00`
-- If elapsed < 3600s: `mm:ss` (e.g., `03:27`, `59:59`)
-- If elapsed >= 3600s: `h:mm:ss` (e.g., `1:02:09`, `12:05:33`)
-- 小时不补零；分钟秒两位补零
-
-Layout requirements:
-- circular/corner:
-  - 状态短词：拍摄 / 选片 / 停止
-  - 用时：按上述规则显示
-- rectangular:
-  1) 拍摄中 / 选片中 / 已停止
-  2) 用时 {elapsed}
-  3) 更新 H:mm（24小时制，不出现上午/下午）
-
-Refresh policy:
-- running(shooting/selecting): `TimelinePolicy.after(now + 30–60s)`（选一个具体值并写进 `docs/AGENTS/exec.md`）
-- stopped: `TimelinePolicy.after(now + 10–15min)`（同上）
+- 不改同步协议/业务逻辑（只补 startedAt 与显示逻辑）
 
 Acceptance:
-- `xcodebuild` BUILD SUCCEEDED（`CODE_SIGNING_ALLOWED=NO` 可）：
-  - `PhotoFlowWatch Watch App`（watchOS simulator）
-  - `PhotoFlowWatchWidgetExtension`（watchOS simulator）
-  - `PhotoFlow`（iphoneos，`CODE_SIGNING_ALLOWED=NO`）
-- 手动验证（写入 `docs/AGENTS/exec.md`）：
-  - 在支持对应槽位的表盘上能添加 circular/corner/rectangular
-  - 显示符合布局要求
-  - 点击任意 complication/widget：能默认打开 App，不闪退
+1) Widget 显示逻辑：
+   - 如果 running 且 startedAt 存在：用 `Text(startedAtDate, style: .timer)` 显示用时（自动每秒更新）
+   - 其它情况：显示 `00:00`
+2) Watch 写入逻辑：
+   - 进入 shooting/selecting 时：确保 `isRunning=true`；`startedAt` 为空则写 `Date()`
+   - stopped 时：`isRunning=false`（`startedAt` 是否清空按当前逻辑即可）
+   - 保持 `reloadTimelines` 调用不变
+3) `xcodebuild` BUILD SUCCEEDED（`CODE_SIGNING_ALLOWED=NO` 可）：
+   - `PhotoFlowWatch Watch App`（watchOS simulator）
+   - `PhotoFlowWatchWidgetExtension`（watchOS simulator）
+   - `PhotoFlow`（iphoneos）
+4) 手动验证（写进 `docs/AGENTS/exec.md`）：
+   - 切到拍摄/选片后，表盘用时开始走
+   - 切到停止后，用时回到 `00:00`
 
 StopCondition:
 - PR opened to main（不合并）
 - CI green
-- `docs/AGENTS/exec.md` 更新（含用时规则/刷新策略/手动验证结果）
+- `docs/AGENTS/exec.md` 更新
 - STOP
