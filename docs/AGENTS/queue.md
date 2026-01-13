@@ -1,39 +1,35 @@
-## ACTIVE — TC-PREFLIGHT-EMBEDDED-WATCHAPP
+## PAUSED — TC-PREFLIGHT-EMBEDDED-WATCHAPP
 ID: TC-PREFLIGHT-EMBEDDED-WATCHAPP
-Title: Add embedded Watch App + Widget appex preflight checks (prevent install regressions)
+Status: PAUSED (postponed; return after stability restored)
+
+## ABANDONED — TC-DEEPLINK-DL3-SCHEME
+ID: TC-DEEPLINK-DL3-SCHEME
+Status: ABANDONED (rollback; PR #33 closed)
+
+## ACTIVE — TC-WIDGET-TAP-OPEN-APP
+ID: TC-WIDGET-TAP-OPEN-APP
+Title: Widget tap opens watch app (no deep link)
 AssignedTo: Executor
 
 Goal:
-- Any PR touching `Info.plist` / `project.pbxproj` / targets/embedding must pass preflight locally before merge.
-- Preflight must catch:
-  1) Watch app plist errors (e.g. `WKApplication`/`WKWatchKitApp` conflicts, `UIDeviceFamily` missing `4`, missing `WKCompanionAppBundleIdentifier`)
-  2) WatchKit extension not embedded (ValidateEmbeddedBinary-class failures)
-  3) WidgetKit appex metadata invalid (existing script)
+- Remove `photoflow://...` deep link usage from the watch widget/complication so tapping opens the watch app without requiring URL scheme registration.
+- Ensure watch app launches from app list without crashing.
 
-AllowedFiles:
-- scripts/check_embedded_watch_app.sh (new)
-- scripts/preflight_device_install.sh (new, optional wrapper)
-- docs/AGENTS/exec.md (append usage)
-- docs/AGENTS/queue.md (this card)
-- .gitignore (only if needed)
+AllowedFiles (ONLY):
+- `PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift`
+- (optional, cleanup only) `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift` (remove deep-link DEBUG UI only; do not change business logic)
+- `docs/AGENTS/exec.md`
 
 Forbidden:
-- Do NOT modify any Swift.
-- Do NOT modify `project.pbxproj` / any `Info.plist` in this task.
+- Do NOT modify `Info.plist`, `project.pbxproj`, entitlements, targets, or build settings.
 
 Acceptance:
-1) After building Debug-iphoneos `PhotoFlow` (CODE_SIGNING_ALLOWED=NO ok), preflight verifies:
-   A) Embedded watch app `Info.plist`:
-      - `WKWatchKitApp == true`
-      - `WKApplication` ABSENT (must not exist)
-      - `WKCompanionAppBundleIdentifier` non-empty
-      - `UIDeviceFamily` includes `4`
-      - `CFBundleURLTypes` contains scheme `photoflow` (if DL-3 enabled)
-   B) Embedded watch app `PlugIns` contains WatchKit extension `.appex` (NOT just widget `.appex`)
-      - Its `Info.plist` has `NSExtensionPointIdentifier == com.apple.watchkit`
-   C) Embedded widget `.appex` passes `scripts/check_embedded_widget_appex.sh` (existing)
-2) `docs/AGENTS/exec.md` documents how to run preflight + PASS/FAIL meaning.
-3) Open PR to main (no merge) and STOP.
+- Widget/complication no longer sets `widgetURL` to `photoflow://...` (remove the deep link).
+- Watch app launches from the app list without crashing; tapping widget/complication does not crash.
+- Builds succeed (`CODE_SIGNING_ALLOWED=NO` ok):
+  - `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
 
-PolicyUpdate:
-- Any future PR that touches `Info.plist` / `project.pbxproj` MUST paste preflight output into `docs/AGENTS/exec.md` before Coordinator merges.
+StopCondition:
+- PR opened to `main` (DO NOT MERGE), CI green, `docs/AGENTS/exec.md` updated with summary + verification commands; STOP.
