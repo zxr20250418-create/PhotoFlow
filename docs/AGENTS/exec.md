@@ -370,3 +370,7 @@
   - Result: ** BUILD SUCCEEDED **
 - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
   - Result: ** BUILD SUCCEEDED **
+
+## iOS-only safe workflow
+- Run: `bash scripts/ios_safe.sh --clean-deriveddata`
+- Protects against accidental edits to watch/widget code, plist/entitlements, and Xcode project config; runs iOS + watch + widget builds to catch regressions.
