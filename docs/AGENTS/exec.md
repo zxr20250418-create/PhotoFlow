@@ -397,3 +397,13 @@
 ## iOS-only safe workflow
 - Run: `bash scripts/ios_safe.sh --clean-deriveddata`
 - Protects against accidental edits to watch/widget code, plist/entitlements, and Xcode project config; runs iOS + watch + widget builds to catch regressions.
+
+## TC-IOS-MAIN-CONSOLE-V1
+
+## Manual Verification
+1) 拍摄/选片/停止按钮可更新主界面阶段/用时并同步到手表。 (PASS)
+2) 显示 watch 连接状态与最近同步时间。 (PASS)
+
+## Build
+- `bash scripts/ios_safe.sh --clean-deriveddata`
+  - Result: ** PASS **

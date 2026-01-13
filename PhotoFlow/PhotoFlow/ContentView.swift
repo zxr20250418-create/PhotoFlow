@@ -29,6 +29,9 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     @Published var isOnDuty = false
     @Published var incomingEvent: SessionEvent?
+    @Published var sessionActivationState: WCSessionActivationState = .notActivated
+    @Published var sessionReachable = false
+    @Published var lastSyncAt: Date?
 #if DEBUG
     @Published var debugLastSentPayload: String = "—"
     @Published var debugSessionStatus: String = "—"
@@ -37,10 +40,12 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     override init() {
         super.init()
         guard WCSession.isSupported() else { return }
-        WCSession.default.delegate = self
-        WCSession.default.activate()
+        let session = WCSession.default
+        session.delegate = self
+        session.activate()
+        updateSessionStatus(for: session)
 #if DEBUG
-        updateDebugStatus(for: WCSession.default)
+        updateDebugStatus(for: session)
 #endif
     }
 
@@ -77,6 +82,8 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             payload[StageSyncKey.startedAt] = startedAt.timeIntervalSince1970
         }
         let session = WCSession.default
+        lastSyncAt = lastUpdatedAt
+        updateSessionStatus(for: session)
 #if DEBUG
         debugLastSentPayload = formatDebugPayload(payload)
         updateDebugStatus(for: session)
@@ -95,17 +102,23 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         print("WCSession sent state payload=\(payload) reachable=\(usedReachable)")
     }
 
-    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
+    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+        updateSessionStatus(for: session)
+    }
 
-#if DEBUG
     func sessionReachabilityDidChange(_ session: WCSession) {
+        updateSessionStatus(for: session)
+#if DEBUG
         updateDebugStatus(for: session)
+#endif
     }
 
     func sessionWatchStateDidChange(_ session: WCSession) {
+        updateSessionStatus(for: session)
+#if DEBUG
         updateDebugStatus(for: session)
-    }
 #endif
+    }
 
 #if DEBUG
     private func updateDebugStatus(for session: WCSession) {
@@ -136,6 +149,11 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         return parts.joined(separator: "\n")
     }
 #endif
+
+    private func updateSessionStatus(for session: WCSession) {
+        sessionActivationState = session.activationState
+        sessionReachable = session.isReachable
+    }
 
     func sessionDidBecomeInactive(_ session: WCSession) { }
 
@@ -222,22 +240,50 @@ struct ContentView: View {
 
     var body: some View {
         let durations = computeDurations(now: now)
+        let elapsedText = isStageRunning ? format(durations.total) : "00:00"
 
         VStack(spacing: 16) {
             VStack(spacing: 8) {
-                Text(syncStore.isOnDuty ? stageLabel : "未上班")
+                Text(stageDisplayText)
                     .font(.title2)
                     .fontWeight(.semibold)
-                Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
+                Text("用时 \(elapsedText)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                if !syncStore.isOnDuty {
+                    Text("未上班")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
 
-            Button(action: handlePrimaryAction) {
-                Text(primaryButtonTitle)
-                    .frame(maxWidth: .infinity)
+            HStack(spacing: 8) {
+                Text("连接 \(connectionStatusText)")
+                Spacer(minLength: 8)
+                Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(spacing: 12) {
+                Button("拍摄") {
+                    handleStageSelection(.shooting)
+                }
+                Button("选片") {
+                    handleStageSelection(.selecting)
+                }
+                Button("停止") {
+                    handleStageSelection(.ended)
+                }
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .frame(maxWidth: .infinity)
 
             Button(syncStore.isOnDuty ? "下班" : "上班") {
                 let nextOnDuty = !syncStore.isOnDuty
@@ -305,6 +351,28 @@ struct ContentView: View {
         }
     }
 
+    private var stageDisplayText: String {
+        switch stage {
+        case .shooting:
+            return "拍摄"
+        case .selecting:
+            return "选片"
+        case .idle, .ended:
+            return "停止"
+        }
+    }
+
+    private var isStageRunning: Bool {
+        stage == .shooting || stage == .selecting
+    }
+
+    private var connectionStatusText: String {
+        guard syncStore.sessionActivationState == .activated else {
+            return "未连接"
+        }
+        return syncStore.sessionReachable ? "已连接" : "未连接"
+    }
+
     private var primaryButtonTitle: String {
         if !syncStore.isOnDuty {
             return "开始拍摄"
@@ -342,6 +410,30 @@ struct ContentView: View {
             session.shootingStart = now
             stage = .shooting
         }
+        syncStageState(now: now)
+    }
+
+    private func handleStageSelection(_ targetStage: Stage) {
+        guard syncStore.isOnDuty else {
+            activeAlert = .notOnDuty
+            return
+        }
+        let now = Date()
+        switch targetStage {
+        case .shooting:
+            session.shootingStart = session.shootingStart ?? now
+            session.selectingStart = nil
+            session.endedAt = nil
+        case .selecting:
+            session.shootingStart = session.shootingStart ?? now
+            session.selectingStart = session.selectingStart ?? now
+            session.endedAt = nil
+        case .ended:
+            session.endedAt = now
+        case .idle:
+            break
+        }
+        stage = targetStage
         syncStageState(now: now)
     }
 
@@ -406,6 +498,13 @@ struct ContentView: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func formatSyncTime(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "H:mm:ss"
+        return formatter.string(from: date)
     }
 
     private func syncStageState(now: Date) {
