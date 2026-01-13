@@ -30,40 +30,42 @@ Status: DONE (merged in PR #46)
 ID: TC-CLEANUP-DEEPLINK-RESIDUALS
 Status: DONE (merged in PR #48)
 
-## ACTIVE — TC-WATCH-DEBUG-UI-CLEANUP
+## DONE — TC-WATCH-DEBUG-UI-CLEANUP
 ID: TC-WATCH-DEBUG-UI-CLEANUP
-Title: 清理/隐藏 watch 端 Debug UI（保留隐藏入口）
+Status: DONE (merged in PR #50)
+
+## ACTIVE — TC-WATCH-STATUS-BANNER-V1
+ID: TC-WATCH-STATUS-BANNER-V1
+Title: Watch 主界面连接状态 + 最近同步时间（非 Debug）+ 轻微触感反馈
 AssignedTo: Executor
 
 Goal:
-- watch 端主界面不再出现任何明显的 Debug 按钮/入口（包括 Sync Diagnostics / DEBUG 文案入口）
-- Debug 功能仍可访问，但必须是“隐藏入口”（例如：长按、连点、滚到最底部一个很小的 Debug 行）
-- Release/正常使用路径完全不出现 Debug UI
+- watch 主界面默认显示一条小状态信息：
+  - 连接：已连接/未连接（基于 WCSession activationState/isReachable）
+  - 最近同步：HH:mm:ss（基于 lastReceived/lastApplied 时间戳）
+- 在 watch 端切换 stage（拍摄/选片/停止）时给轻微 haptic 反馈
+- 不影响现有同步逻辑与小组件显示
 
-Scope (Allowed files ONLY):
+AllowedFiles (ONLY):
 - `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift`
-- `docs/AGENTS/exec.md`（追加记录）
+- （如确实需要）watch 侧 WCSession 管理文件（仅用于读连接状态/时间戳，不改协议）
+- `docs/AGENTS/exec.md`
 
 Forbidden:
-- 禁止修改 `Info.plist` / `project.pbxproj` / entitlements / targets / build settings
+- 不改 `Info.plist` / `project.pbxproj` / entitlements / targets / build settings
 - 不新增文件
-- 不改同步协议/业务逻辑，只改 UI 入口展示方式
-
-Implementation requirements:
-1) 所有 Debug UI 必须置于 `#if DEBUG` 下，且默认隐藏：
-   - 例如：仅在“页面最底部”显示一个小的 Debug 入口
-   - 或者需要 5 次连点标题才显示 Debug 入口
-2) 保留诊断功能，但入口必须不可误触（明确记录入口动作）
-3) 入口隐藏方式必须写入 `docs/AGENTS/exec.md`（让未来你自己能找到）
+- 不改同步协议字段（只读现有数据）
 
 Acceptance:
-- watch 主界面默认不显示 Debug 按钮
-- 在 Debug 构建中按隐藏入口可以打开诊断面板/信息
+- watch 主界面默认可见状态条（非 Debug）
+- 断连时显示“未连接”，连上后变“已连接”
+- 最近同步时间会随接收/应用更新而刷新
+- stage 切换触发轻微 haptic
 - `xcodebuild` BUILD SUCCEEDED（`CODE_SIGNING_ALLOWED=NO` 可）：
   - `PhotoFlowWatch Watch App`（watchOS simulator）
   - `PhotoFlowWatchWidgetExtension`（watchOS simulator）
   - `PhotoFlow`（iphoneos，`CODE_SIGNING_ALLOWED=NO`）
-- `docs/AGENTS/exec.md` 写明：隐藏入口步骤 + 验证结果
+- `docs/AGENTS/exec.md` 记录字段来源与验证步骤/结果
 
 StopCondition:
 - PR opened to main（不合并）
