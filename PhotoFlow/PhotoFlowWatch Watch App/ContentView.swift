@@ -310,6 +310,12 @@ struct ContentView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+#if DEBUG
+            .contentShape(Rectangle())
+            .onTapGesture(count: 5) {
+                showDebugPanel.toggle()
+            }
+#endif
 
             Button(action: handlePrimaryAction) {
                 Text(primaryButtonTitle)
@@ -318,15 +324,6 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
 
 #if DEBUG
-            Button(action: { showDebugPanel.toggle() }) {
-                Text("Debug")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 6)
-            .opacity(0.4)
-
             if showDebugPanel {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("lastReceivedPayload")
