@@ -22,45 +22,43 @@ Status: DONE (merged in PR #42)
 ID: TC-SYNC-DIAG-DASHBOARD
 Status: DONE (merged in PR #44)
 
-## ACTIVE — TC-COMPLICATION-TAP-OPEN-APP
+## DONE — TC-COMPLICATION-TAP-OPEN-APP
 ID: TC-COMPLICATION-TAP-OPEN-APP
-Title: 表盘 Complication 点开默认打开 App（支持 circular/corner/rectangular）
+Status: DONE (merged in PR #46)
+
+## ACTIVE — TC-CLEANUP-DEEPLINK-RESIDUALS
+ID: TC-CLEANUP-DEEPLINK-RESIDUALS
+Title: 清理深链残留（photoflow/onOpenURL/DEBUG deep link），避免未来误触
 AssignedTo: Executor
 
 Goal:
-- 支持三种 complication family：`accessoryCircular` / `accessoryCorner` / `accessoryRectangular`
-- 点击表盘 complication 后，系统默认打开 PhotoFlow Watch App（不要求跳到指定页面）
-- 不引入任何深链/URL scheme 依赖（不碰 DL-3）
+- 移除所有深链相关残留：`photoflow://`、`onOpenURL`/`handleDeepLink`、`DEBUG` stage 深链测试入口
+- 保持当前目标：点表盘 complication 仍能默认打开 App（PR #46 已合并）
+- 不触碰任何打包/安装高风险配置
 
 Scope (Allowed files ONLY):
-- `PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift`
+- `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift`（或 watch app root 入口文件）
+- `PhotoFlow/PhotoFlowWatchWidget/PhotoFlowWatchWidget.swift`（仅做引用清理，若有残留）
 - `docs/AGENTS/exec.md`（追加记录）
 
 Forbidden:
 - 禁止修改 `Info.plist` / `project.pbxproj` / entitlements / targets / build settings
 - 不新增文件
-- 不改业务同步逻辑（只改 widget 显示与点击行为）
-
-Implementation requirements:
-1) 绝对禁止为 complication 设置 `widgetURL`：
-   - 不允许 `.widgetURL(...)`
-   - 不允许 `Link(destination:)` 包裹视图
-   目的：让点击行为回到系统默认“打开宿主 App”。
-2) 三种 family 均保持可用：
-   - `supportedFamilies` 必须包含：circular + corner + rectangular
-   - 三种布局可不同，但都必须能正常预览/编译/显示
+- 不重构业务状态机/同步逻辑（只做深链相关代码移除）
 
 Acceptance:
+- 仓库中不再出现关键字：
+  - `photoflow://`、`handleDeepLink`、`onOpenURL`、`DEBUG: stage`
 - `xcodebuild` BUILD SUCCEEDED（`CODE_SIGNING_ALLOWED=NO` 可）：
   - `PhotoFlowWatch Watch App`（watchOS simulator）
   - `PhotoFlowWatchWidgetExtension`（watchOS simulator）
   - `PhotoFlow`（iphoneos，`CODE_SIGNING_ALLOWED=NO`）
 - 手动验证（写入 `docs/AGENTS/exec.md`）：
-  - 在 Watch 表盘添加三种 complication
-  - 点击任意一种 complication：能打开 PhotoFlow Watch App（默认入口），不闪退、不弹错误
+  - watch app 从列表打开不闪退
+  - 点表盘 complication 仍能打开 App（默认入口）
 
 StopCondition:
-- PR opened to `main`（不合并）
+- PR opened to main（不合并）
 - CI green
-- `docs/AGENTS/exec.md` 更新（包含验证步骤/结果）
+- `docs/AGENTS/exec.md` 更新（列出删掉了哪些 deep link 入口与关键字检查命令）
 - STOP
