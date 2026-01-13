@@ -46,34 +46,31 @@ Status: PAUSED (blocked by elapsed timer bug)
 ID: TC-WIDGET-ELAPSED-TIMER-FIX
 Status: DONE (merged in PR #56)
 
-## ACTIVE — TC-WIDGET-STATE-WRITE-FIX
+## PAUSED — TC-WIDGET-STATE-WRITE-FIX
 ID: TC-WIDGET-STATE-WRITE-FIX
-Title: Widget state write fix (Swift-only)
+Status: PAUSED (spec alignment priority)
+
+## ACTIVE — TC-SPEC-V1-ALIGNMENT
+ID: TC-SPEC-V1-ALIGNMENT
+Title: 更新 SPEC：v1 纳入 watch/widget（对齐现实，删除过期约束）
 AssignedTo: Executor
 
 Goal:
-- 切到 shooting/selecting 后，complication/widget 显示对应中文状态并且 timer 走动
-- stopped 显示 已停止 `00:00`
-- “更新”时间随切换更新
+- `docs/SPEC.md` 增加 v1 小节：明确 watch app + widget/complication 已纳入范围与当前约束
+- 将 “v0: watch must NOT include Complication/WidgetKit” 标注为历史阶段（v0 已结束），不再作为现行约束
 
 AllowedFiles (ONLY):
-- `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift`
-- `docs/AGENTS/exec.md`
+- `docs/SPEC.md`
+- (optional) `docs/AGENTS/exec.md`（记录此次文档更新摘要）
 
 Forbidden:
-- 不改 `Info.plist` / `project.pbxproj` / entitlements / targets / build settings
-- 不新增文件
+- 不改任何代码、脚本、配置文件
+- 不改 queue 以外的文档（除非确实需要在 `docs/RELEASE_CHECKLIST.md` 里补一句 gate）
 
 Acceptance:
-- 手动：切到拍摄/选片 -> 表盘不再显示已停止，且用时会走；切回停止 -> 已停止 `00:00`
-- `xcodebuild` BUILD SUCCEEDED（`CODE_SIGNING_ALLOWED=NO` 可）：
-  - `PhotoFlowWatch Watch App`（watchOS simulator）
-  - `PhotoFlowWatchWidgetExtension`（watchOS simulator）
-  - `PhotoFlow`（iphoneos，`CODE_SIGNING_ALLOWED=NO`）
-- `docs/AGENTS/exec.md` 写明根因与修复点
-
-StopCondition:
-- PR opened to main（不合并）
-- CI green
-- `docs/AGENTS/exec.md` 更新
+- `docs/SPEC.md` 明确包含：
+  1) v0（历史）：当时的边界与为何这么定
+  2) v1（现行）：当前包含 watch app + widget/complication + phone↔watch sync + diagnostics
+  3) 现行默认规则：Swift-only 卡默认不允许改 `Info.plist`/`project.pbxproj`；只有“配置卡”才允许，并必须跑 preflight/embedded checks
+- PR opened and merged (docs-only)
 - STOP
