@@ -332,3 +332,27 @@
   - Result: ** BUILD SUCCEEDED **
 - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
   - Result: ** BUILD SUCCEEDED **
+
+## TC-WIDGET-DISPLAY-UPGRADE-V1
+
+## Elapsed Format Rules
+- If no startedAt or not running: "00:00"
+- If elapsed < 3600s: "mm:ss" (two-digit minutes, two-digit seconds)
+- If elapsed >= 3600s: "h:mm:ss" (hours no leading zero; minutes/seconds two digits)
+
+## Refresh Policy
+- running (shooting/selecting): refresh every 45s
+- stopped: refresh every 12 minutes
+
+## Manual Verification
+1) Add circular/corner/rectangular complications on supported faces; confirm each renders. (PASS)
+2) Layout matches expected lines/labels and elapsed format. (PASS)
+3) Tap complication/widget opens the watch app (default entry), no crash. (PASS)
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
