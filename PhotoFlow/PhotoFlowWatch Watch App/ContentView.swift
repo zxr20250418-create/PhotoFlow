@@ -7,6 +7,9 @@
 
 import Combine
 import SwiftUI
+#if os(watchOS)
+import WatchKit
+#endif
 import WatchConnectivity
 import WidgetKit
 
@@ -54,6 +57,9 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     @Published var isOnDuty = false
     @Published var incomingState: IncomingState?
+    @Published var lastSyncAt: Date?
+    @Published var sessionActivationState: WCSessionActivationState = .notActivated
+    @Published var sessionReachable = false
 #if DEBUG
     @Published var debugLastReceivedPayload: String = "—"
     @Published var debugLastAppliedAt: String = "—"
@@ -69,6 +75,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         if session.activationState == .activated {
             applyLatestContextIfAvailable(from: session)
         }
+        updateSessionStatus(for: session)
 #if DEBUG
         updateDebugStatus(for: session)
 #endif
@@ -95,6 +102,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         guard error == nil, activationState == .activated else { return }
         applyLatestContextIfAvailable(from: session)
+        updateSessionStatus(for: session)
 #if DEBUG
         updateDebugStatus(for: session)
 #endif
@@ -109,6 +117,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 #endif
 
     func sessionReachabilityDidChange(_ session: WCSession) {
+        updateSessionStatus(for: session)
 #if DEBUG
         updateDebugStatus(for: session)
 #endif
@@ -151,8 +160,14 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         )
         Task { @MainActor in
             incomingState = state
+            lastSyncAt = state.lastUpdatedAt
         }
         print("WCSession received state stage=\(stage) running=\(isRunning)")
+    }
+
+    private func updateSessionStatus(for session: WCSession) {
+        sessionActivationState = session.activationState
+        sessionReachable = session.isReachable
     }
 
 #if DEBUG
@@ -317,6 +332,19 @@ struct ContentView: View {
             }
 #endif
 
+            HStack {
+                Text("连接 \(connectionStatusText)")
+                Spacer(minLength: 8)
+                Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
             Button(action: handlePrimaryAction) {
                 Text(primaryButtonTitle)
                     .frame(maxWidth: .infinity)
@@ -375,6 +403,13 @@ struct ContentView: View {
         }
     }
 
+    private var connectionStatusText: String {
+        guard syncStore.sessionActivationState == .activated else {
+            return "未连接"
+        }
+        return syncStore.sessionReachable ? "已连接" : "未连接"
+    }
+
     private var primaryButtonTitle: String {
         if !syncStore.isOnDuty {
             return "开始拍摄"
@@ -403,22 +438,26 @@ struct ContentView: View {
             session.shootingStart = now
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
+            playStageHaptic()
         case .shooting:
             stage = .selecting
             session.selectingStart = now
             syncStore.sendSessionEvent(event: "startSelecting", timestamp: now.timeIntervalSince1970)
             updateWidgetState(isRunning: true, startedAt: session.shootingStart, stage: WidgetStateStore.stageSelecting)
+            playStageHaptic()
         case .selecting:
             stage = .ended
             session.endedAt = now
             syncStore.sendSessionEvent(event: "end", timestamp: now.timeIntervalSince1970)
             updateWidgetState(isRunning: false, startedAt: nil, stage: WidgetStateStore.stageStopped)
+            playStageHaptic()
         case .ended:
             session = Session()
             session.shootingStart = now
             stage = .shooting
             syncStore.sendSessionEvent(event: "startShooting", timestamp: now.timeIntervalSince1970)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
+            playStageHaptic()
         }
     }
 
@@ -456,6 +495,19 @@ struct ContentView: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func formatSyncTime(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "H:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private func playStageHaptic() {
+#if os(watchOS)
+        WKInterfaceDevice.current().play(.click)
+#endif
     }
 
     private func updateWidgetState(isRunning: Bool, startedAt: Date?, stage: String, lastUpdatedAt: Date = Date()) {
