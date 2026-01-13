@@ -397,3 +397,19 @@
 ## iOS-only safe workflow
 - Run: `bash scripts/ios_safe.sh --clean-deriveddata`
 - Protects against accidental edits to watch/widget code, plist/entitlements, and Xcode project config; runs iOS + watch + widget builds to catch regressions.
+
+## TC-IOS-HOME-TIMELINE-V1
+
+## Timeline Data
+- In-memory array in ContentView, appended on stage changes from iPhone taps and incoming session events.
+
+## Sort Rule
+- Stored in ascending timestamp order, UI renders `reversed()` so newest appears on top.
+
+## Manual Verification
+1) iPhone triggers 拍摄→选片→停止; timeline updates immediately. (FAIL - NOT RUN)
+2) Timeline shows newest at the top. (FAIL - NOT RUN)
+
+## Build
+- `bash scripts/ios_safe.sh --clean-deriveddata`
+  - Result: ** PASS **

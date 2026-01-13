@@ -183,6 +183,12 @@ struct ContentView: View {
         var endedAt: Date?
     }
 
+    struct TimelineEvent: Identifiable {
+        let id = UUID()
+        let timestamp: Date
+        let stage: Stage
+    }
+
     enum ActiveAlert: Identifiable {
         case notOnDuty
         case cannotEndWhileShooting
@@ -210,6 +216,7 @@ struct ContentView: View {
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+    @State private var timelineEvents: [TimelineEvent] = []
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -238,6 +245,31 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("会话时间线")
+                    .font(.headline)
+                if timelineEvents.isEmpty {
+                    Text("暂无记录")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(timelineEvents.reversed()) { event in
+                        HStack {
+                            Text(formatTimelineTime(event.timestamp))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(stageTimelineText(event.stage))
+                                .font(.caption)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
 
             Button(syncStore.isOnDuty ? "下班" : "上班") {
                 let nextOnDuty = !syncStore.isOnDuty
@@ -305,6 +337,17 @@ struct ContentView: View {
         }
     }
 
+    private func stageTimelineText(_ stage: Stage) -> String {
+        switch stage {
+        case .shooting:
+            return "拍摄"
+        case .selecting:
+            return "选片"
+        case .idle, .ended:
+            return "停止"
+        }
+    }
+
     private var primaryButtonTitle: String {
         if !syncStore.isOnDuty {
             return "开始拍摄"
@@ -342,6 +385,7 @@ struct ContentView: View {
             session.shootingStart = now
             stage = .shooting
         }
+        appendTimelineEvent(stage: stage, at: now)
         syncStageState(now: now)
     }
 
@@ -359,12 +403,15 @@ struct ContentView: View {
             session = Session()
             session.shootingStart = timestamp
             stage = .shooting
+            appendTimelineEvent(stage: .shooting, at: timestamp)
         case "startSelecting":
             session.selectingStart = timestamp
             stage = .selecting
+            appendTimelineEvent(stage: .selecting, at: timestamp)
         case "end":
             session.endedAt = timestamp
             stage = .ended
+            appendTimelineEvent(stage: .ended, at: timestamp)
         default:
             break
         }
@@ -406,6 +453,17 @@ struct ContentView: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func formatTimelineTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private func appendTimelineEvent(stage: Stage, at timestamp: Date) {
+        timelineEvents.append(TimelineEvent(timestamp: timestamp, stage: stage))
+        timelineEvents.sort { $0.timestamp < $1.timestamp }
     }
 
     private func syncStageState(now: Date) {
