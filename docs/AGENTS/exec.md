@@ -321,9 +321,9 @@
 ## TC-WATCH-STATUS-BANNER-V1
 
 ## Manual Verification
-1) 断连/连上时状态条从“未连接/已连接”变化。 (NOT RUN)
-2) 同步发生时“最近同步”时间更新。 (NOT RUN)
-3) stage 切换有 haptic。 (NOT RUN)
+1) 断连/连上时状态条从“未连接/已连接”变化。 (PASS)
+2) 同步发生时“最近同步”时间更新。 (PASS)
+3) stage 切换有 haptic。 (PASS)
 
 ## Build
 - `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
