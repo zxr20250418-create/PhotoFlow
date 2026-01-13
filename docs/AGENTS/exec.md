@@ -174,3 +174,29 @@
   - Result: ** BUILD SUCCEEDED **
 - xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
   - Result: ** BUILD SUCCEEDED **
+
+## TC-SYNC-PHONE-TO-WATCH-V1
+
+## Payload Schema
+- stage (String): shooting | selecting | stopped
+- isRunning (Bool)
+- startedAt (Double, unix ts) optional
+- lastUpdatedAt (Double, unix ts)
+
+## Send / Receive Points
+- iPhone send: `PhotoFlow/PhotoFlow/ContentView.swift` -> `WatchSyncStore.sendStageSync(...)` called after stage changes and reset.
+- Watch receive: `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift` -> `session(_:didReceiveApplicationContext:)` + `session(_:didReceiveMessage:)` -> `applyStatePayload(...)`.
+- Watch apply: `ContentView.applyIncomingState(...)` updates stage/session and writes widget defaults.
+
+## Build
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- Pending manual verification:
+  - With watch app closed: change stage on iPhone, then open watch app -> state should be correct.
+  - With watch app open: change stage on iPhone -> watch UI updates within ~1s.
