@@ -246,3 +246,20 @@
 
 ## Manual Test
 - PASS: iPhone change stage → watch dashboard updates.
+
+## TC-COMPLICATION-TAP-OPEN-APP
+
+## Widget Tap Behavior
+- Removed widgetURL/link to use system default open behavior.
+- Supported families: accessoryCircular, accessoryRectangular, accessoryCorner.
+
+## Build
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild build -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- PASS: Add circular/corner/rectangular complications and tap each → PhotoFlow Watch App opens (default entry), no crash.
