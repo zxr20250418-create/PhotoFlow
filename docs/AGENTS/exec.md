@@ -245,4 +245,4 @@
   - Result: ** BUILD SUCCEEDED **
 
 ## Manual Test
-- FAIL: iPhone change stage → watch dashboard updates. Not run; needs paired devices.
+- PASS: iPhone change stage → watch dashboard updates.
