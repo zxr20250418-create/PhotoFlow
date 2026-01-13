@@ -220,6 +220,6 @@
   - Result: ** BUILD SUCCEEDED **
 
 ## Manual Test
-- FAIL: Test A (watch app closed → iPhone changes stage 5 times → wait 10s → open watch app → last stage shown). Not run; needs paired device.
-- FAIL: Test B (watch app foreground → iPhone change stage → watch updates within ~1s). Not run; needs paired device.
-- FAIL: Test C (disconnect/reconnect → open watch app → last stage shown). Not run; needs paired device.
+- PASS: Test A (watch app closed → iPhone changes stage 5 times → wait 10s → open watch app → last stage shown).
+- PASS: Test B (watch app foreground → iPhone change stage → watch updates within ~1s).
+- PASS: Test C (disconnect/reconnect → open watch app → last stage shown).
