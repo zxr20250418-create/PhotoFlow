@@ -11,6 +11,16 @@ import WatchConnectivity
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
+    fileprivate enum StageSyncKey {
+        static let stage = "pf_widget_stage"
+        static let isRunning = "pf_widget_isRunning"
+        static let startedAt = "pf_widget_startedAt"
+        static let lastUpdatedAt = "pf_widget_lastUpdatedAt"
+        static let stageShooting = "shooting"
+        static let stageSelecting = "selecting"
+        static let stageStopped = "stopped"
+    }
+
     struct SessionEvent: Identifiable {
         let id = UUID()
         let event: String
@@ -19,12 +29,19 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     @Published var isOnDuty = false
     @Published var incomingEvent: SessionEvent?
+#if DEBUG
+    @Published var debugLastSentPayload: String = "—"
+    @Published var debugSessionStatus: String = "—"
+#endif
 
     override init() {
         super.init()
         guard WCSession.isSupported() else { return }
         WCSession.default.delegate = self
         WCSession.default.activate()
+#if DEBUG
+        updateDebugStatus(for: WCSession.default)
+#endif
     }
 
     func setOnDuty(_ value: Bool) {
@@ -38,6 +55,10 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             "isOnDuty": value,
             "ts": Int(Date().timeIntervalSince1970)
         ]
+#if DEBUG
+        debugLastSentPayload = formatDebugPayload(payload)
+        updateDebugStatus(for: WCSession.default)
+#endif
         do {
             try WCSession.default.updateApplicationContext(payload)
         } catch {
@@ -45,7 +66,76 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
 
+    func sendStageSync(stage: String, isRunning: Bool, startedAt: Date?, lastUpdatedAt: Date) {
+        guard WCSession.isSupported() else { return }
+        var payload: [String: Any] = [
+            StageSyncKey.stage: stage,
+            StageSyncKey.isRunning: isRunning,
+            StageSyncKey.lastUpdatedAt: lastUpdatedAt.timeIntervalSince1970
+        ]
+        if let startedAt {
+            payload[StageSyncKey.startedAt] = startedAt.timeIntervalSince1970
+        }
+        let session = WCSession.default
+#if DEBUG
+        debugLastSentPayload = formatDebugPayload(payload)
+        updateDebugStatus(for: session)
+#endif
+        do {
+            try session.updateApplicationContext(payload)
+        } catch {
+            print("WCSession updateApplicationContext failed: \(error.localizedDescription)")
+        }
+        let usedReachable = session.isReachable
+        if usedReachable {
+            session.sendMessage(payload, replyHandler: nil) { error in
+                print("WCSession sendMessage failed: \(error.localizedDescription)")
+            }
+        }
+        print("WCSession sent state payload=\(payload) reachable=\(usedReachable)")
+    }
+
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
+
+#if DEBUG
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        updateDebugStatus(for: session)
+    }
+
+    func sessionWatchStateDidChange(_ session: WCSession) {
+        updateDebugStatus(for: session)
+    }
+#endif
+
+#if DEBUG
+    private func updateDebugStatus(for session: WCSession) {
+        let activation: String
+        switch session.activationState {
+        case .activated:
+            activation = "activated"
+        case .inactive:
+            activation = "inactive"
+        case .notActivated:
+            activation = "notActivated"
+        @unknown default:
+            activation = "unknown"
+        }
+        let parts = [
+            "activation=\(activation)",
+            "reachable=\(session.isReachable)",
+            "paired=\(session.isPaired)",
+            "watchAppInstalled=\(session.isWatchAppInstalled)"
+        ]
+        debugSessionStatus = parts.joined(separator: "\n")
+    }
+
+    private func formatDebugPayload(_ payload: [String: Any]) -> String {
+        let parts = payload
+            .map { "\($0.key)=\(String(describing: $0.value))" }
+            .sorted()
+        return parts.joined(separator: "\n")
+    }
+#endif
 
     func sessionDidBecomeInactive(_ session: WCSession) { }
 
@@ -120,6 +210,9 @@ struct ContentView: View {
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+#if DEBUG
+    @State private var showDebugPanel = false
+#endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
 
@@ -154,6 +247,39 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(.bordered)
+
+#if DEBUG
+            Button(action: { showDebugPanel.toggle() }) {
+                Text("Debug")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
+            .opacity(0.4)
+
+            if showDebugPanel {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("lastSentPayload")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugLastSentPayload)
+                        .font(.caption2)
+                        .textSelection(.enabled)
+
+                    Text("sessionStatus")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugSessionStatus)
+                        .font(.caption2)
+                        .textSelection(.enabled)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.thinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+#endif
         }
         .padding()
         .alert(item: $activeAlert) { alert in
@@ -216,11 +342,13 @@ struct ContentView: View {
             session.shootingStart = now
             stage = .shooting
         }
+        syncStageState(now: now)
     }
 
     private func resetSession() {
         stage = .idle
         session = Session()
+        syncStageState(now: Date())
     }
 
     private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
@@ -278,6 +406,26 @@ struct ContentView: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func syncStageState(now: Date) {
+        let stageValue: String
+        switch stage {
+        case .shooting:
+            stageValue = WatchSyncStore.StageSyncKey.stageShooting
+        case .selecting:
+            stageValue = WatchSyncStore.StageSyncKey.stageSelecting
+        case .idle, .ended:
+            stageValue = WatchSyncStore.StageSyncKey.stageStopped
+        }
+        let isRunning = stageValue != WatchSyncStore.StageSyncKey.stageStopped
+        let startedAt = isRunning ? session.shootingStart : nil
+        syncStore.sendStageSync(
+            stage: stageValue,
+            isRunning: isRunning,
+            startedAt: startedAt,
+            lastUpdatedAt: now
+        )
     }
 }
 

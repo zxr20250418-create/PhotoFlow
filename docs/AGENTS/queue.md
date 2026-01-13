@@ -1,12 +1,79 @@
-# Task Queue
-#
-# NOTE: This file is the only coordination channel. Keep exactly one active task card.
+## PAUSED — TC-PREFLIGHT-EMBEDDED-WATCHAPP
+ID: TC-PREFLIGHT-EMBEDDED-WATCHAPP
+Status: PAUSED (postponed; return after stability restored)
 
-## TC-RG-HARDGATE — Enforce RG-V1 as ship_2stage hard gate
+## ABANDONED — TC-DEEPLINK-DL3-SCHEME
+ID: TC-DEEPLINK-DL3-SCHEME
+Status: ABANDONED (rollback; PR #33 closed)
 
-AssignedTo: Exec
-Goal: 把 `RG-V1` 变成 `scripts/ship_2stage.sh` 的硬门禁（默认必须通过 AUTO+手工两道验收），并提供显式逃生开关 `BYPASS_RG=true`。
-Scope: 仅允许修改 `scripts/auto_gate.sh`、`scripts/ship_2stage.sh`、`scripts/evidence_pack.sh`（可新增 `docs/AGENTS/verify_auto.md` 作为产物文件）；可运行 `scripts/ship_2stage.sh` 做一次 `pipeline-smoke` 验证；允许走完整一键合并并落 evidence 流程。
-Forbidden: 禁止改任何业务代码（`*.swift`、`*.pbxproj`）；禁止改 `docs/SPEC.md`、`docs/DECISIONS.md`、`docs/PLAN_*.md`；禁止引入持久化/数据库迁移。
-Acceptance: (1) `scripts/auto_gate.sh` 默认输出从 `docs/AGENTS/verify.md` 改为 `docs/AGENTS/verify_auto.md`，且支持用 env 覆盖输出路径；(2) `scripts/ship_2stage.sh` 先运行 `auto_gate.sh` 并检查 `verify_auto.md` 含 `AUTO_GATE=PASS` 否则退出；再检查 `docs/AGENTS/verify.md` 含一行 `RG-V1: PASS` 否则退出并提示先手工验收填 PASS；提供 `BYPASS_RG=true`（默认 false）才可跳过 RG 检查；(3) `scripts/evidence_pack.sh` 将 `docs/AGENTS/verify_auto.md` 与 `docs/AGENTS/verify.md` 各自前 200 行写入 evidence；(4) 使用 `scripts/ship_2stage.sh` 跑一次 `pipeline-smoke`（docs-only 改动即可）验证通过；(5) 使用 `scripts/ship_2stage.sh` 完成一键合并并落 evidence。
-StopCondition: 提交 1 次 commit（message 必须为 `chore: enforce RG-V1 as ship gate`）；最终在 `docs/AGENTS/exec.md` 汇报并输出：PR 链接 + evidence 路径 + `main` HEAD，然后停止。
+## PAUSED — TC-WIDGET-TAP-OPEN-APP
+ID: TC-WIDGET-TAP-OPEN-APP
+Status: PAUSED (superseded by sync priority)
+
+## DONE — TC-SYNC-PHONE-TO-WATCH-V1
+ID: TC-SYNC-PHONE-TO-WATCH-V1
+Status: DONE (merged)
+
+## DONE — TC-SYNC-PHONE-TO-WATCH-V2-CONSISTENCY
+ID: TC-SYNC-PHONE-TO-WATCH-V2-CONSISTENCY
+Status: DONE (merged in PR #42)
+
+## DONE — TC-SYNC-DIAG-DASHBOARD
+ID: TC-SYNC-DIAG-DASHBOARD
+Status: DONE (merged in PR #44)
+
+## DONE — TC-COMPLICATION-TAP-OPEN-APP
+ID: TC-COMPLICATION-TAP-OPEN-APP
+Status: DONE (merged in PR #46)
+
+## DONE — TC-CLEANUP-DEEPLINK-RESIDUALS
+ID: TC-CLEANUP-DEEPLINK-RESIDUALS
+Status: DONE (merged in PR #48)
+
+## DONE — TC-WATCH-DEBUG-UI-CLEANUP
+ID: TC-WATCH-DEBUG-UI-CLEANUP
+Status: DONE (merged in PR #50)
+
+## DONE — TC-WATCH-STATUS-BANNER-V1
+ID: TC-WATCH-STATUS-BANNER-V1
+Status: DONE (merged in PR #52)
+
+## PAUSED — TC-WIDGET-DISPLAY-UPGRADE-V1
+ID: TC-WIDGET-DISPLAY-UPGRADE-V1
+Status: PAUSED (blocked by elapsed timer bug)
+
+## DONE — TC-WIDGET-ELAPSED-TIMER-FIX
+ID: TC-WIDGET-ELAPSED-TIMER-FIX
+Status: DONE (merged in PR #56)
+
+## ACTIVE — TC-WIDGET-STATE-WRITE-FIX
+ID: TC-WIDGET-STATE-WRITE-FIX
+Title: Widget state write fix (Swift-only)
+AssignedTo: Executor
+
+Goal:
+- 切到 shooting/selecting 后，complication/widget 显示对应中文状态并且 timer 走动
+- stopped 显示 已停止 `00:00`
+- “更新”时间随切换更新
+
+AllowedFiles (ONLY):
+- `PhotoFlow/PhotoFlowWatch Watch App/ContentView.swift`
+- `docs/AGENTS/exec.md`
+
+Forbidden:
+- 不改 `Info.plist` / `project.pbxproj` / entitlements / targets / build settings
+- 不新增文件
+
+Acceptance:
+- 手动：切到拍摄/选片 -> 表盘不再显示已停止，且用时会走；切回停止 -> 已停止 `00:00`
+- `xcodebuild` BUILD SUCCEEDED（`CODE_SIGNING_ALLOWED=NO` 可）：
+  - `PhotoFlowWatch Watch App`（watchOS simulator）
+  - `PhotoFlowWatchWidgetExtension`（watchOS simulator）
+  - `PhotoFlow`（iphoneos，`CODE_SIGNING_ALLOWED=NO`）
+- `docs/AGENTS/exec.md` 写明根因与修复点
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- `docs/AGENTS/exec.md` 更新
+- STOP
