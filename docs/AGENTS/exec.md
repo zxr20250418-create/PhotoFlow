@@ -200,3 +200,26 @@
 - PASS:
   - PASS: watch 关闭后再打开能同步
   - PASS: watch 前台时 ~1s 内更新
+
+## TC-SYNC-PHONE-TO-WATCH-V2-CONSISTENCY
+
+## Ordering Rule
+- Ordering key: lastUpdatedAt (Double, unix ts) reused from V1 payload.
+- Watch stores last applied timestamp in UserDefaults key `pf_sync_lastAppliedAt`.
+- Incoming state is ignored if lastUpdatedAt <= lastApplied; payloads missing lastUpdatedAt are ignored once lastApplied exists.
+
+## Apply Latest Context
+- Watch reads `receivedApplicationContext` (fallback to `applicationContext`) after WCSession activation and on app start if already activated, then applies state payload.
+
+## Build
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatch Watch App" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlowWatchWidgetExtension" -destination 'generic/platform=watchOS Simulator' CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+- `xcodebuild -project PhotoFlow/PhotoFlow.xcodeproj -scheme "PhotoFlow" -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build`
+  - Result: ** BUILD SUCCEEDED **
+
+## Manual Test
+- PASS: Test A (watch app closed → iPhone changes stage 5 times → wait 10s → open watch app → last stage shown).
+- PASS: Test B (watch app foreground → iPhone change stage → watch updates within ~1s).
+- PASS: Test C (disconnect/reconnect → open watch app → last stage shown).
