@@ -132,13 +132,17 @@ Status: DONE (merged in PR #79)
 ID: TC-IOS-STATS-BIZSUM-V1
 Status: DONE (merged in PR #81)
 
-## ACTIVE — TC-IOS-HOME-TODAY-BANNER-V1
+## DONE — TC-IOS-HOME-TODAY-BANNER-V1
 ID: TC-IOS-HOME-TODAY-BANNER-V1
-Title: Home 今日小看板（突出今日收入）
+Status: DONE (merged in PR #83)
+
+## ACTIVE — TC-IOS-STATS-EFFICIENCY-V1
+ID: TC-IOS-STATS-EFFICIENCY-V1
+Title: Stats 效率指标（RPH + 平均选片率）
 AssignedTo: Executor
 
 Goal:
-- Home 顶部新增紧凑“今日小看板”，突出今日收入，其它信息弱化为辅助。
+- 在 Stats BizSum 区域新增 RPH 与平均选片率指标，随范围切换同步变化。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -149,21 +153,23 @@ Guardrails:
 - PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 Definitions:
-- 仅“今日”范围，按 shootingStart 归属今日（沿用现有 ISO 规则）。
-- 汇总来源复用 BizSum 的同一套数据（sessionSummaries + sessionId meta）。
+- 收入：BizSum 同口径（amount 求和；缺失忽略）。
+- 总时长：Stats 现有汇总中的总时长（total duration）。
+- RPH：收入合计 / (总时长小时数)；总时长=0 或收入缺失 → `--`。
+- 每单选片率：对每个 session，若 shotCount>0 且 selectedCount 有值，则 rate = selectedCount/shotCount。
+- 平均选片率：mean(rate) over valid sessions；有效样本数=0 → `--`。
 
 Acceptance:
-- Home 顶部出现 Banner（紧凑，2 行 + 可选第 3 行）。
-- 第一行（主视觉）：文案“今日收入”，数值 `¥XXXX` 大号加粗；若无 amount 显示 `--`。
-- 第二行（次要信息，浅色小字）：`今日单数 N单 · 今日总时长 X`。
-- 第三行（可选，secondary）：`拍 Y · 选 Z · 拍摄张数 S · 选片张数 K · 选片率 R`（不抢主视觉）。
-- 点击 Banner 跳转到 Stats（默认今日）。
-- 缺失值：收入无记录显示 `--`，其它字段可 `--` 或省略（实现任选其一）。
+- BizSum 区域新增两行：
+  - RPH：`¥X/小时` 或 `¥X/h`（不可算显示 `--`）。
+  - 平均选片率：`XX%`（不可算显示 `--`）。
+- 两项指标随 今日/本周/本月 切换同步变化。
+- 不改变 session 边界语义，不引入 raw log，不改 Home 排序/编号语义。
 
 Manual Verification:
-- A：有金额数据时，收入正确且最显眼。
-- B：金额缺失时显示 `--`，其它行不影响展示。
-- C：新增/结束一单并填写金额后，收入更新。
+- A：N=0 时两项显示 `--`。
+- B：N>0 且总时长>0 时，RPH 为正且合理；平均选片率在 0%–100%。
+- C：切换 今日/本周/本月，两项指标同步变化（数据足够时）。
 - D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
