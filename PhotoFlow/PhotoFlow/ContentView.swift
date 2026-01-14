@@ -306,16 +306,12 @@ struct ContentView: View {
     }
 
     private var bottomBar: some View {
-        let durations = computeDurations(now: now)
         return HStack(alignment: .bottom, spacing: 16) {
             bottomTabButton(title: "Home", systemImage: "house", tab: .home)
             Spacer(minLength: 0)
             VStack(spacing: 4) {
                 Text(syncStore.isOnDuty ? stageLabel : "未上班")
                     .font(.headline)
-                Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
                 nextActionButton
             }
             Spacer(minLength: 0)
@@ -363,9 +359,17 @@ struct ContentView: View {
     }
 
     private var nextActionButton: some View {
-        Button(action: performNextAction) {
-            Text(nextActionTitle)
-                .frame(minWidth: 72)
+        let durations = computeDurations(now: now)
+        return Button(action: performNextAction) {
+            VStack(spacing: 2) {
+                Text(nextActionTitle)
+                    .font(.headline)
+                Text("总 \(format(durations.total)) · 阶段 \(format(durations.currentStage))")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 96)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
