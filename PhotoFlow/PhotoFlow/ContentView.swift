@@ -597,6 +597,26 @@ struct ContentView: View {
         let selectRateText = (bizTotals.hasShot && bizTotals.hasSelected && bizTotals.shot > 0)
             ? "\(Int((Double(bizTotals.selected) / Double(bizTotals.shot) * 100).rounded()))%"
             : "--"
+        let rphText: String = {
+            guard bizTotals.hasAmount, totals.total > 0 else { return "--" }
+            let hours = totals.total / 3600
+            let revenue = Double(bizTotals.amountCents) / 100
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        let avgSelectRateText: String = {
+            var sum: Double = 0
+            var validCount = 0
+            for summary in filteredSessions {
+                let meta = metaStore.meta(for: summary.id)
+                guard let shot = meta.shotCount, shot > 0,
+                      let selected = meta.selectedCount else { continue }
+                sum += Double(selected) / Double(shot)
+                validCount += 1
+            }
+            guard validCount > 0 else { return "--" }
+            let avg = sum / Double(validCount)
+            return "\(Int((avg * 100).rounded()))%"
+        }()
         return VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
                 ForEach(StatsRange.allCases, id: \.self) { range in
@@ -619,6 +639,8 @@ struct ContentView: View {
             Text("拍摄张数合计 \(shotText)")
             Text("选片张数合计 \(selectedText)")
             Text("选片率 \(selectRateText)")
+            Text("RPH \(rphText)")
+            Text("平均选片率 \(avgSelectRateText)")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
