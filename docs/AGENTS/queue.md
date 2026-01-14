@@ -120,13 +120,17 @@ Status: DONE (merged in PR #73)
 ID: TC-IOS-STATS-RANGE-V1
 Status: DONE (merged in PR #75)
 
-## ACTIVE — TC-IOS-STATS-METRICS-V1
+## DONE — TC-IOS-STATS-METRICS-V1
 ID: TC-IOS-STATS-METRICS-V1
-Title: Stats 经营指标补充（平均时长 + 选片占比）
+Status: DONE (merged in PR #77)
+
+## ACTIVE — TC-IOS-HOME-SESSION-KEYMETRICS-V1
+ID: TC-IOS-HOME-SESSION-KEYMETRICS-V1
+Title: Home 会话卡片关键指标扩展（金额/收款/人数/选片）
 AssignedTo: Executor
 
 Goal:
-- 在 Stats 现有范围切换与四行汇总下新增两行指标：平均每单总时长、选片占比。
+- 在 Home 的每单会话卡片新增关键经营指标摘要，并提供编辑入口与本地持久化。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -134,19 +138,20 @@ Scope (Allowed files ONLY):
 
 Guardrails:
 - 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
-- PR 前必须跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 Acceptance:
-- 在 Stats 现有四行下方新增两行：
-  - 平均每单总时长：N>0 显示 `总时长 / N`；N=0 显示 `--`
-  - 选片占比：总时长>0 显示 `选片 / 总` 百分比；总时长=0 显示 `--`
-- 两项指标随范围切换（今日/本周/本月）同步变化。
-- 不改变 session 边界语义，不引入 raw log，不改 Home 排序/编号语义。
+- 在会话卡片标题/时长摘要下新增一行 secondary 摘要（缺失字段不显示）：
+  - 示例：`¥299 · 2人 · 12张 · 已收`
+- 编辑入口：会话卡片右上角“编辑/铅笔”或点击卡片弹出编辑 sheet（任选其一）。
+- 编辑 sheet 含 4 个字段（金额/收款/人数/选片张数），可留空；保存后摘要更新。
+- 持久化：以 sessionId 为 key 本地持久化上述字段，App 重启后仍存在。
+- 不改变现有会话聚合、三段时长、排序与“底部=第1单”编号语义。
 
 Manual Verification:
-- A：N=0 时平均与占比为 `--`。
-- B：N>0 时平均为正且合理；占比在 0%–100%。
-- C：切换范围后两项指标随之变化（数据足够时）。
+- A：填写指标后摘要正确显示（缺失字段不显示）。
+- B：重启 App 后指标仍存在（持久化有效）。
+- C：编辑指标不影响三段时长与关键节点显示。
 - D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
