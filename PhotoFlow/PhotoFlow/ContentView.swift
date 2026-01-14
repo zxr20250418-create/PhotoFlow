@@ -255,16 +255,18 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(sessionSummaries.reversed()) { summary in
+                    ForEach(Array(sessionSummaries.reversed().enumerated()), id: \.element.id) { index, summary in
                         VStack(alignment: .leading, spacing: 4) {
-                            if let startTime = sessionStartTime(for: summary) {
-                                Text("会话 \(formatTimelineTime(startTime))")
+                            let displayIndex = index + 1
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(sessionTitle(for: displayIndex))
                                     .font(.subheadline)
                                     .fontWeight(.semibold)
-                            } else {
-                                Text("会话")
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
+                                if let startTime = sessionStartTime(for: summary) {
+                                    Text(formatTimelineTime(startTime))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                             ForEach(timelineRows(for: summary), id: \.label) { row in
                                 HStack {
@@ -556,6 +558,28 @@ struct ContentView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         return formatter.string(from: date)
+    }
+
+    private func sessionTitle(for displayIndex: Int) -> String {
+        "第\(chineseNumber(displayIndex))单"
+    }
+
+    private func chineseNumber(_ value: Int) -> String {
+        let digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+        guard value > 0 else { return "零" }
+        if value < 10 {
+            return digits[value]
+        }
+        if value < 20 {
+            return value == 10 ? "十" : "十" + digits[value % 10]
+        }
+        if value < 100 {
+            let tens = value / 10
+            let ones = value % 10
+            let tensText = digits[tens] + "十"
+            return ones == 0 ? tensText : tensText + digits[ones]
+        }
+        return String(value)
     }
 
     private func makeSessionId(startedAt: Date) -> String {
