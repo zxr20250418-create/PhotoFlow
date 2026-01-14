@@ -140,13 +140,17 @@ Status: DONE (merged in PR #83)
 ID: TC-IOS-STATS-EFFICIENCY-V1
 Status: DONE (merged in PR #85)
 
-## ACTIVE — TC-IOS-HOME-SESSION-CARD-SCAN-V1
+## DONE — TC-IOS-HOME-SESSION-CARD-SCAN-V1
 ID: TC-IOS-HOME-SESSION-CARD-SCAN-V1
-Title: Home 会话卡片摘要增强（更好扫）
+Status: DONE (merged in PR #87)
+
+## ACTIVE — TC-IOS-STATS-AVGSELRATE-EXCLUDE-ALLTAKE-V1
+ID: TC-IOS-STATS-AVGSELRATE-EXCLUDE-ALLTAKE-V1
+Title: Stats 平均选片率剔除全要单 + 全要占比
 AssignedTo: Executor
 
 Goal:
-- 强化 Home 会话卡片扫描性：时间挪到标题、金额置顶并显示 RPH、移除事件明细列表。
+- 平均选片率剔除“全要/打包单”，并显示全要占比（与范围切换同步）。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -156,17 +160,22 @@ Guardrails:
 - 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
 - PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
+Definitions:
+- 全要单：shotCount>0 且 selectedCount==shotCount。
+- 平均选片率样本：shotCount>0 且 selectedCount!=nil 且 selectedCount<shotCount。
+- avgPickRate = mean(selectedCount/shotCount) over 样本；样本数=0 → `--`。
+- 全要占比：allTakeCount / (allTakeCount + avgSampleCount)；分母=0 → `--`。
+- 范围过滤：复用 Stats 现有 今日/本周/本月 口径（按 shootingStart 归属范围，ISO 周一规则）。
+
 Acceptance:
-- Header 行左侧：`第N单 HH:mm`（时间只显示到分，不显示秒）。
-- Header 行右侧：`¥金额  RPH ¥xxx/小时`（金额主，RPH 次要；不可算显示 `--`）。
-- 原摘要行去掉金额，仅保留张数/选片率：`拍5张 · 选1张 · 选片率20%`。
-- 移除事件明细列表（拍摄开始/选片开始/结束）默认展示。
-- 备注预览保留（若有）。
+- “平均选片率”一行改为：`平均选片率 XX%（全要 YY%）`，不可算显示 `--`。
+- 两个百分比均为 0%–100% 且随范围切换同步变化。
+- 不引入 raw log；不改 session 边界语义与 Home 排序/编号语义。
 
 Manual Verification:
-- A：Header 行满足“第N单 HH:mm / 右侧 ¥金额 + RPH”。
-- B：金额不再出现在中部摘要行；仅剩张数与选片率。
-- C：事件明细不再显示在 Home 卡片内。
+- A：样本数=0 → 平均选片率显示 `--`。
+- B：存在全要单时：全要占比 >0，平均选片率不被 100% 拉高。
+- C：切换 今日/本周/本月 → 两个值同步变化（数据足够时）。
 - D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
