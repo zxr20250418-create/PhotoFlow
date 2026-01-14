@@ -392,14 +392,26 @@ struct ContentView: View {
                         let order = total - displayIndex
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .firstTextBaseline) {
-                                Text("第\(order)单")
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
+                                HStack(spacing: 6) {
+                                    Text("第\(order)单")
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                    if let startTime = summary.shootingStart ?? sessionStartTime(for: summary) {
+                                        Text(formatSessionTime(startTime))
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                            .monospacedDigit()
+                                    }
+                                }
                                 Spacer(minLength: 8)
-                                if let startTime = summary.shootingStart ?? sessionStartTime(for: summary) {
-                                    Text(formatTimelineTime(startTime))
-                                        .font(.footnote)
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(amountText(for: summary))
+                                        .font(.headline)
+                                        .monospacedDigit()
+                                    Text(rphText(for: summary))
+                                        .font(.caption2)
                                         .foregroundStyle(.secondary)
+                                        .monospacedDigit()
                                 }
                                 Button(action: { startEditingMeta(for: summary.id) }) {
                                     Image(systemName: "pencil")
@@ -424,16 +436,6 @@ struct ContentView: View {
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
-                            }
-                            ForEach(timelineRows(for: summary), id: \.label) { row in
-                                HStack {
-                                    Text(formatTimelineTime(row.time))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Text(row.label)
-                                        .font(.caption)
-                                    Spacer(minLength: 0)
-                                }
                             }
                         }
                         .padding(8)
@@ -935,24 +937,14 @@ struct ContentView: View {
         sessionStartTime(for: summary) ?? Date.distantPast
     }
 
-    private func timelineRows(for summary: SessionSummary) -> [(label: String, time: Date)] {
-        var rows: [(label: String, time: Date)] = []
-        if let shootingStart = summary.shootingStart {
-            rows.append((label: "拍摄开始", time: shootingStart))
-        }
-        if let selectingStart = summary.selectingStart {
-            rows.append((label: "选片开始", time: selectingStart))
-        }
-        if let endedAt = summary.endedAt {
-            rows.append((label: "结束", time: endedAt))
-        }
-        return rows.sorted { $0.time < $1.time }
-    }
-
-    private func formatTimelineTime(_ date: Date) -> String {
+    private static let sessionTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: date)
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private func formatSessionTime(_ date: Date) -> String {
+        ContentView.sessionTimeFormatter.string(from: date)
     }
 
     private func sessionDurationSummary(for summary: SessionSummary) -> String {
@@ -994,17 +986,33 @@ struct ContentView: View {
 
     private func metaSummary(for sessionId: String) -> String? {
         let meta = metaStore.meta(for: sessionId)
-        var parts: [String] = []
-        if let amountCents = meta.amountCents {
-            parts.append(formatAmount(cents: amountCents))
+        let hasShot = meta.shotCount != nil
+        let hasSelected = meta.selectedCount != nil
+        guard hasShot || hasSelected else { return nil }
+        let shotText = meta.shotCount.map { "拍\($0)张" } ?? "拍--张"
+        let selectedText = meta.selectedCount.map { "选\($0)张" } ?? "选--张"
+        let rateText: String
+        if let shot = meta.shotCount, shot > 0, let selected = meta.selectedCount {
+            rateText = "\(Int((Double(selected) / Double(shot) * 100).rounded()))%"
+        } else {
+            rateText = "--"
         }
-        if let shot = meta.shotCount {
-            parts.append("拍\(shot)张")
-        }
-        if let selected = meta.selectedCount {
-            parts.append("选\(selected)张")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        return [shotText, selectedText, "选片率\(rateText)"].joined(separator: " · ")
+    }
+
+    private func amountText(for summary: SessionSummary) -> String {
+        let meta = metaStore.meta(for: summary.id)
+        return meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
+    }
+
+    private func rphText(for summary: SessionSummary) -> String {
+        let meta = metaStore.meta(for: summary.id)
+        guard let amountCents = meta.amountCents else { return "RPH --" }
+        let totalSeconds = sessionDurations(for: summary).total
+        guard totalSeconds > 0 else { return "RPH --" }
+        let revenue = Double(amountCents) / 100
+        let hours = totalSeconds / 3600
+        return String(format: "RPH ¥%.0f/小时", revenue / hours)
     }
 
     private func metaNotePreview(for sessionId: String) -> String? {
