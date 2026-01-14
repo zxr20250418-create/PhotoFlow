@@ -376,6 +376,8 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
 
+            todayBanner
+
             VStack(alignment: .leading, spacing: 8) {
                 Text("会话时间线")
                     .font(.headline)
@@ -477,6 +479,69 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+
+    private var todayBanner: some View {
+        let isoCal = Calendar(identifier: .iso8601)
+        let todaySessions = sessionSummaries.filter { summary in
+            guard let shootingStart = summary.shootingStart else { return false }
+            return isoCal.isDateInToday(shootingStart)
+        }
+        let totals = todaySessions.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, summary in
+            let durations = sessionDurations(for: summary)
+            result.total += durations.total
+            result.shooting += durations.shooting
+            if let selecting = durations.selecting {
+                result.selecting += selecting
+            }
+        }
+        let metaTotals = todaySessions.reduce(into: (amountCents: 0, hasAmount: false, shot: 0, hasShot: false, selected: 0, hasSelected: false)) { result, summary in
+            let meta = metaStore.meta(for: summary.id)
+            if let amount = meta.amountCents {
+                result.amountCents += amount
+                result.hasAmount = true
+            }
+            if let shot = meta.shotCount {
+                result.shot += shot
+                result.hasShot = true
+            }
+            if let selected = meta.selectedCount {
+                result.selected += selected
+                result.hasSelected = true
+            }
+        }
+        let count = todaySessions.count
+        let amountText = metaTotals.hasAmount ? formatAmount(cents: metaTotals.amountCents) : "--"
+        let rateText = (metaTotals.hasShot && metaTotals.hasSelected && metaTotals.shot > 0)
+            ? "\(Int((Double(metaTotals.selected) / Double(metaTotals.shot) * 100).rounded()))%"
+            : "--"
+        return Button(action: { selectedTab = .stats }) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("今日收入")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Text(amountText)
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .monospacedDigit()
+                }
+                Text("\(count)单 · 总 \(format(totals.total))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Text("拍 \(format(totals.shooting)) · 选 \(format(totals.selecting)) · 拍 \(metaTotals.hasShot ? "\(metaTotals.shot)张" : "--") · 选 \(metaTotals.hasSelected ? "\(metaTotals.selected)张" : "--") · 选片率 \(rateText)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
     }
 
     private var statsView: some View {
