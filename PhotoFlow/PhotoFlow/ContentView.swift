@@ -508,6 +508,30 @@ struct ContentView: View {
         let prefix = statsRange.title
         let avgText = avgTotal.map { format($0) } ?? "--"
         let shareText = selectShare.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
+        let bizTotals = filteredSessions.reduce(into: (amountCents: 0, hasAmount: false, shot: 0, hasShot: false, selected: 0, hasSelected: false)) { result, summary in
+            let meta = metaStore.meta(for: summary.id)
+            if let amount = meta.amountCents {
+                result.amountCents += amount
+                result.hasAmount = true
+            }
+            if let shot = meta.shotCount {
+                result.shot += shot
+                result.hasShot = true
+            }
+            if let selected = meta.selectedCount {
+                result.selected += selected
+                result.hasSelected = true
+            }
+        }
+        let revenueText = bizTotals.hasAmount ? formatAmount(cents: bizTotals.amountCents) : "--"
+        let avgRevenueText = (bizTotals.hasAmount && count > 0)
+            ? formatAmount(cents: Int((Double(bizTotals.amountCents) / Double(count)).rounded()))
+            : "--"
+        let shotText = bizTotals.hasShot ? "\(bizTotals.shot)" : "--"
+        let selectedText = bizTotals.hasSelected ? "\(bizTotals.selected)" : "--"
+        let selectRateText = (bizTotals.hasShot && bizTotals.hasSelected && bizTotals.shot > 0)
+            ? "\(Int((Double(bizTotals.selected) / Double(bizTotals.shot) * 100).rounded()))%"
+            : "--"
         return VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
                 ForEach(StatsRange.allCases, id: \.self) { range in
@@ -522,6 +546,14 @@ struct ContentView: View {
             Text("\(prefix)选片时长 \(format(totals.selecting))")
             Text("\(prefix)平均每单总时长 \(avgText)")
             Text("\(prefix)选片占比 \(shareText)")
+            Divider()
+            Text("经营汇总")
+                .font(.headline)
+            Text("收入合计 \(revenueText)")
+            Text("平均客单价 \(avgRevenueText)")
+            Text("拍摄张数合计 \(shotText)")
+            Text("选片张数合计 \(selectedText)")
+            Text("选片率 \(selectRateText)")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
