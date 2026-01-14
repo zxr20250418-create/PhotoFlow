@@ -218,12 +218,30 @@ struct ContentView: View {
         }
     }
 
+    private enum StatsRange: String, CaseIterable {
+        case today
+        case week
+        case month
+
+        var title: String {
+            switch self {
+            case .today:
+                return "今日"
+            case .week:
+                return "本周"
+            case .month:
+                return "本月"
+            }
+        }
+    }
+
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
+    @State private var statsRange: StatsRange = .today
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -352,11 +370,21 @@ struct ContentView: View {
     }
 
     private var statsView: some View {
-        let todaysSessions = sessionSummaries.filter { summary in
+        let isoCal = Calendar(identifier: .iso8601)
+        let filteredSessions = sessionSummaries.filter { summary in
             guard let shootingStart = summary.shootingStart else { return false }
-            return Calendar.current.isDateInToday(shootingStart)
+            switch statsRange {
+            case .today:
+                return isoCal.isDateInToday(shootingStart)
+            case .week:
+                guard let interval = isoCal.dateInterval(of: .weekOfYear, for: now) else { return false }
+                return interval.contains(shootingStart)
+            case .month:
+                guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
+                return interval.contains(shootingStart)
+            }
         }
-        let totals = todaysSessions.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, summary in
+        let totals = filteredSessions.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, summary in
             let durations = sessionDurations(for: summary)
             result.total += durations.total
             result.shooting += durations.shooting
@@ -364,11 +392,19 @@ struct ContentView: View {
                 result.selecting += selecting
             }
         }
+        let prefix = statsRange.title
         return VStack(alignment: .leading, spacing: 8) {
-            Text("今日单数 \(todaysSessions.count)")
-            Text("今日总时长 \(format(totals.total))")
-            Text("今日拍摄时长 \(format(totals.shooting))")
-            Text("今日选片时长 \(format(totals.selecting))")
+            Picker("", selection: $statsRange) {
+                ForEach(StatsRange.allCases, id: \.self) { range in
+                    Text(range.title).tag(range)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text("\(prefix)单数 \(filteredSessions.count)")
+            Text("\(prefix)总时长 \(format(totals.total))")
+            Text("\(prefix)拍摄时长 \(format(totals.shooting))")
+            Text("\(prefix)选片时长 \(format(totals.selecting))")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
