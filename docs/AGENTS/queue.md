@@ -108,13 +108,17 @@ StopCondition:
 - exec.md 更新
 - STOP
 
-## ACTIVE — TC-IOS-HOME-SESSION-DURATIONS-V1
+## DONE — TC-IOS-HOME-SESSION-DURATIONS-V1
 ID: TC-IOS-HOME-SESSION-DURATIONS-V1
-Title: Home 会话卡片显示三段时长（总/拍/选）
+Status: DONE (merged in PR #71)
+
+## ACTIVE — TC-IOS-STATS-MVP-V1
+ID: TC-IOS-STATS-MVP-V1
+Title: Stats MVP（今日单数 + 总/拍/选时长汇总）
 AssignedTo: Executor
 
 Goal:
-- 在 Home 的“第N单”会话卡片上展示三段时长：总/拍摄/选片（历史会话也可显示）。
+- 基于 main 的 sessionSummaries 聚合结果展示 Stats MVP（今日单数 + 今日总/拍/选总时长）。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -125,13 +129,11 @@ Guardrails:
 - PR 前必须跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 Acceptance:
-- 每个会话卡片（第N单）标题下方或右侧一行 secondary 文本显示：
-  - `总 00:30  拍 00:12  选 00:18`
-- 计算规则（按 session 关键时间点）：
-  - total：endedAt ? endedAt - shootingStart : now - shootingStart
-  - shooting：selectingStart ? selectingStart - shootingStart : (endedAt ? endedAt - shootingStart : now - shootingStart)
-  - selecting：selectingStart ? (endedAt ? endedAt - selectingStart : now - selectingStart) : 不显示/显示 `--`
-- 依旧保持：每会话一张卡片、关键节点≤3行、不刷屏；列表排序与“底部=第1单”的编号语义不变。
+- Stats 页面展示：
+  - 今日单数（sessionSummaries 统计当日会话数）
+  - 今日总时长 / 今日拍摄 / 今日选片（汇总显示，次要样式即可）
+- 计算仅基于 Home 的 sessionSummaries（不引入 raw log 追加）。
+- 不影响 Home 会话时间线显示与排序语义。
 
 StopCondition:
 - PR opened to main（不合并）
