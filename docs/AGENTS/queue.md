@@ -58,34 +58,39 @@ Status: PAUSED (spec alignment priority)
 ID: TC-IOS-HOME-TIMELINE-V1
 Status: ABANDONED (PR #64 closed; raw event log direction rejected)
 
-## ACTIVE — TC-IOS-HOME-TIMELINE-SPEC-LOCK
+## DONE — TC-IOS-HOME-TIMELINE-SPEC-LOCK
 ID: TC-IOS-HOME-TIMELINE-SPEC-LOCK
-Title: iOS 首页时间线会话边界/聚合规则锁定（docs-only）
+Status: DONE (merged in PR #66)
+
+## ACTIVE — TC-IOS-HOME-TIMELINE-V2
+ID: TC-IOS-HOME-TIMELINE-V2
+Title: iOS 首页会话时间线（会话聚合，非 raw log）
 AssignedTo: Executor
 
 Goal:
-- 锁定会话级时间线的边界与聚合规则，避免 raw event log 刷屏。
-- 如发现 PR #64 未关闭或有回滚需求，先处置并在 exec.md 记录。
+- 基于 SPEC-LOCK（docs/SPEC.md）实现 iPhone 首页“会话时间线”。
+- 按会话聚合展示，杜绝 raw log 追加刷屏，不大改首页结构。
 
 Scope (Allowed files ONLY):
-- docs/SPEC.md
+- PhotoFlow/PhotoFlow/**/*.swift
 - docs/AGENTS/exec.md（追加）
 
 Forbidden:
 - 禁止修改：
-  - PhotoFlow/PhotoFlow/**
   - PhotoFlow/PhotoFlowWatch Watch App/**
   - PhotoFlow/PhotoFlowWatchWidget/**
-  - *.plist / *.entitlements / project.pbxproj
+  - **/Info.plist
+  - **/*.entitlements
+  - **/*.pbxproj
 - 不新增 target/build settings
 - 不触碰 watch/widget/config
 
 Acceptance:
-- 时间线展示单位=会话（Session），不是 raw event log。
-- 每会话一个卡片/cell；会话内按早→晚；会话之间最新在上（允许 reversed 渲染）。
-- 会话内仅展示关键节点（建议≤3条）：拍摄开始/选片开始/结束。
-- 重复/乱序事件必须去重/合并：只更新节点时间或忽略，不得新增行。
-- 记录 PR #64 处置结论（关闭/无需回滚）在 exec.md。
+- Session Boundary：按 docs/SPEC.md（SPEC-LOCK）定义的会话开始/结束规则与会话 ID 稳定性。
+- UI Rules：每会话一个卡片/cell；会话内早→晚；会话之间最新在上（允许 reversed 渲染）。
+- Aggregation & Dedup：关键节点≤3条（拍摄开始/选片开始/结束）；重复/乱序事件只更新节点时间或忽略，不得新增行。
+- Manual Acceptance Tests：A/B/C 必须在真机跑，exec.md 标注 PASS/FAIL（可附简述/截图）。
+- 运行护栏：`bash scripts/ios_safe.sh --clean-deriveddata` PASS（提交/PR 前贴结果）。
 
 Guardrails:
 - 默认禁止修改 watch/widget 代码、Info.plist、project.pbxproj、entitlements、targets/appex 配置。
@@ -93,7 +98,7 @@ Guardrails:
 - 每次提交/PR 前必须跑并贴结果：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 StopCondition:
-- docs-only PR opened to main（不合并）
+- PR opened to main（不合并）
 - CI green
 - exec.md 更新
 - STOP
