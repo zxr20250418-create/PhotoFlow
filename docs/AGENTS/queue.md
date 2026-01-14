@@ -62,10 +62,15 @@ Status: ABANDONED (PR #64 closed; raw event log direction rejected)
 ID: TC-IOS-HOME-TIMELINE-SPEC-LOCK
 Status: DONE (merged in PR #66)
 
-## ACTIVE — TC-IOS-HOME-TIMELINE-V2
+## DONE — TC-IOS-BOTTOMBAR-NEXTACTION-V1
+ID: TC-IOS-BOTTOMBAR-NEXTACTION-V1
+Status: DONE (merged in PR #69)
+
+## PAUSED — TC-IOS-HOME-TIMELINE-V2
 ID: TC-IOS-HOME-TIMELINE-V2
 Title: iOS 首页会话时间线（会话聚合，非 raw log）
 AssignedTo: Executor
+Status: PAUSED (awaiting PR #68 merge)
 
 Goal:
 - 基于 SPEC-LOCK（docs/SPEC.md）实现 iPhone 首页“会话时间线”。
@@ -101,4 +106,35 @@ StopCondition:
 - PR opened to main（不合并）
 - CI green
 - exec.md 更新
+- STOP
+
+## ACTIVE — TC-IOS-HOME-SESSION-DURATIONS-V1
+ID: TC-IOS-HOME-SESSION-DURATIONS-V1
+Title: Home 会话卡片显示三段时长（总/拍/选）
+AssignedTo: Executor
+
+Goal:
+- 在 Home 的“第N单”会话卡片上展示三段时长：总/拍摄/选片（历史会话也可显示）。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必须跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Acceptance:
+- 每个会话卡片（第N单）标题下方或右侧一行 secondary 文本显示：
+  - `总 00:30  拍 00:12  选 00:18`
+- 计算规则（按 session 关键时间点）：
+  - total：endedAt ? endedAt - shootingStart : now - shootingStart
+  - shooting：selectingStart ? selectingStart - shootingStart : (endedAt ? endedAt - shootingStart : now - shootingStart)
+  - selecting：selectingStart ? (endedAt ? endedAt - selectingStart : now - selectingStart) : 不显示/显示 `--`
+- 依旧保持：每会话一张卡片、关键节点≤3行、不刷屏；列表排序与“底部=第1单”的编号语义不变。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
 - STOP
