@@ -169,6 +169,54 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 }
 
+struct SessionMeta: Codable, Equatable {
+    var amountCents: Int?
+    var shotCount: Int?
+    var selectedCount: Int?
+    var reviewNote: String?
+
+    var isEmpty: Bool {
+        amountCents == nil && shotCount == nil && selectedCount == nil && reviewNote == nil
+    }
+}
+
+@MainActor
+final class SessionMetaStore: ObservableObject {
+    @Published private(set) var metas: [String: SessionMeta] = [:]
+    private let storageKey = "pf_session_meta_v1"
+    private let defaults = UserDefaults.standard
+
+    init() {
+        load()
+    }
+
+    func meta(for id: String) -> SessionMeta {
+        metas[id] ?? SessionMeta()
+    }
+
+    func update(_ meta: SessionMeta, for id: String) {
+        if meta.isEmpty {
+            metas.removeValue(forKey: id)
+        } else {
+            metas[id] = meta
+        }
+        save()
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) else {
+            return
+        }
+        metas = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(metas) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}
+
 struct ContentView: View {
     enum Stage {
         case idle
@@ -218,6 +266,10 @@ struct ContentView: View {
         }
     }
 
+    struct EditingSession: Identifiable {
+        let id: String
+    }
+
     private enum StatsRange: String, CaseIterable {
         case today
         case week
@@ -241,6 +293,13 @@ struct ContentView: View {
     @State private var now = Date()
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
+    @StateObject private var metaStore: SessionMetaStore
+    @State private var editingSession: EditingSession?
+    @State private var draftAmount = ""
+    @State private var draftShotCount = ""
+    @State private var draftSelected = ""
+    @State private var draftReviewNote = ""
+    @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
 #if DEBUG
     @State private var showDebugPanel = false
@@ -250,6 +309,7 @@ struct ContentView: View {
 
     init(syncStore: WatchSyncStore) {
         self.syncStore = syncStore
+        _metaStore = StateObject(wrappedValue: SessionMetaStore())
     }
 
     var body: some View {
@@ -265,6 +325,38 @@ struct ContentView: View {
         }
         .alert(item: $activeAlert) { alert in
             Alert(title: Text(alert.message))
+        }
+        .sheet(item: $editingSession) { session in
+            NavigationStack {
+                Form {
+                    Section {
+                        TextField("金额", text: $draftAmount)
+                            .keyboardType(.decimalPad)
+                        TextField("拍摄张数", text: $draftShotCount)
+                            .keyboardType(.numberPad)
+                        TextField("选片张数", text: $draftSelected)
+                            .keyboardType(.numberPad)
+                    }
+                    Section("复盘备注") {
+                        TextEditor(text: $draftReviewNote)
+                            .frame(minHeight: 100)
+                    }
+                }
+                .navigationTitle("编辑指标")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") {
+                            editingSession = nil
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            saveMeta(for: session.id)
+                            editingSession = nil
+                        }
+                    }
+                }
+            }
         }
         .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
@@ -307,12 +399,30 @@ struct ContentView: View {
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
                                 }
+                                Button(action: { startEditingMeta(for: summary.id) }) {
+                                    Image(systemName: "pencil")
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
                             }
                             Text(sessionDurationSummary(for: summary))
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                                 .lineLimit(1)
+                            if let metaText = metaSummary(for: summary.id) {
+                                Text(metaText)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            if let notePreview = metaNotePreview(for: summary.id) {
+                                Text(notePreview)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
                             ForEach(timelineRows(for: summary), id: \.label) { row in
                                 HStack {
                                     Text(formatTimelineTime(row.time))
@@ -533,6 +643,7 @@ struct ContentView: View {
             return
         }
         let now = Date()
+        let endedSessionId = targetStage == .ended ? activeSessionIndex().map { sessionSummaries[$0].id } : nil
         switch targetStage {
         case .shooting:
             session = Session()
@@ -549,6 +660,12 @@ struct ContentView: View {
             break
         }
         updateSessionSummary(for: targetStage, at: now)
+        if targetStage == .ended {
+            let sessionId = endedSessionId ?? sessionIdForTimestamp(now)
+            if let sessionId {
+                promptSettlementIfNeeded(for: sessionId)
+            }
+        }
         syncStageState(now: now)
     }
 
@@ -568,7 +685,11 @@ struct ContentView: View {
         case "end":
             session.endedAt = timestamp
             stage = .ended
+            let endedSessionId = activeSessionIndex().map { sessionSummaries[$0].id }
             updateSessionSummary(for: .ended, at: timestamp)
+            if let sessionId = endedSessionId ?? sessionIdForTimestamp(timestamp) {
+                promptSettlementIfNeeded(for: sessionId)
+            }
         default:
             break
         }
@@ -672,6 +793,11 @@ struct ContentView: View {
         return recentEndedSessionIndex(for: timestamp)
     }
 
+    private func sessionIdForTimestamp(_ timestamp: Date) -> String? {
+        guard let index = targetSessionIndex(for: timestamp) else { return nil }
+        return sessionSummaries[index].id
+    }
+
     private func recentEndedSessionIndex(for timestamp: Date) -> Int? {
         guard let index = sessionSummaries.indices.last else { return nil }
         guard let endedAt = sessionSummaries[index].endedAt else { return nil }
@@ -720,6 +846,87 @@ struct ContentView: View {
             parts.append("选 \(format(selecting))")
         }
         return parts.joined(separator: "  ")
+    }
+
+    private func startEditingMeta(for sessionId: String) {
+        let meta = metaStore.meta(for: sessionId)
+        draftAmount = meta.amountCents.map(amountText(from:)) ?? ""
+        draftShotCount = meta.shotCount.map(String.init) ?? ""
+        draftSelected = meta.selectedCount.map(String.init) ?? ""
+        draftReviewNote = meta.reviewNote ?? ""
+        editingSession = EditingSession(id: sessionId)
+    }
+
+    private func saveMeta(for sessionId: String) {
+        let meta = SessionMeta(
+            amountCents: parseAmountCents(from: draftAmount),
+            shotCount: parseInt(from: draftShotCount),
+            selectedCount: parseInt(from: draftSelected),
+            reviewNote: normalizedNote(from: draftReviewNote)
+        )
+        metaStore.update(meta, for: sessionId)
+    }
+
+    private func promptSettlementIfNeeded(for sessionId: String) {
+        guard lastPromptedSessionId != sessionId else { return }
+        lastPromptedSessionId = sessionId
+        startEditingMeta(for: sessionId)
+    }
+
+    private func metaSummary(for sessionId: String) -> String? {
+        let meta = metaStore.meta(for: sessionId)
+        var parts: [String] = []
+        if let amountCents = meta.amountCents {
+            parts.append(formatAmount(cents: amountCents))
+        }
+        if let shot = meta.shotCount {
+            parts.append("拍\(shot)张")
+        }
+        if let selected = meta.selectedCount {
+            parts.append("选\(selected)张")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func metaNotePreview(for sessionId: String) -> String? {
+        guard let note = metaStore.meta(for: sessionId).reviewNote else { return nil }
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func formatAmount(cents: Int) -> String {
+        if cents % 100 == 0 {
+            return "¥\(cents / 100)"
+        }
+        let value = Double(cents) / 100
+        return String(format: "¥%.2f", value)
+    }
+
+    private func amountText(from cents: Int) -> String {
+        if cents % 100 == 0 {
+            return "\(cents / 100)"
+        }
+        let value = Double(cents) / 100
+        return String(format: "%.2f", value)
+    }
+
+    private func parseAmountCents(from text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let normalized = trimmed.replacingOccurrences(of: ",", with: "")
+        guard let value = Double(normalized) else { return nil }
+        return Int((value * 100).rounded())
+    }
+
+    private func parseInt(from text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let value = Int(trimmed), value >= 0 else { return nil }
+        return value
+    }
+
+    private func normalizedNote(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func sessionDurations(for summary: SessionSummary) -> (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval?) {
