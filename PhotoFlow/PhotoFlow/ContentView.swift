@@ -177,6 +177,11 @@ struct ContentView: View {
         case ended
     }
 
+    enum Tab {
+        case home
+        case stats
+    }
+
     struct Session {
         var shootingStart: Date?
         var selectingStart: Date?
@@ -210,6 +215,7 @@ struct ContentView: View {
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+    @State private var selectedTab: Tab = .home
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -221,9 +227,29 @@ struct ContentView: View {
     }
 
     var body: some View {
-        let durations = computeDurations(now: now)
+        ZStack {
+            if selectedTab == .home {
+                homeView
+            } else {
+                statsView
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            bottomBar
+        }
+        .alert(item: $activeAlert) { alert in
+            Alert(title: Text(alert.message))
+        }
+        .onReceive(ticker) { now = $0 }
+        .onReceive(syncStore.$incomingEvent) { event in
+            guard let event = event else { return }
+            applySessionEvent(event)
+        }
+    }
 
-        VStack(spacing: 16) {
+    private var homeView: some View {
+        let durations = computeDurations(now: now)
+        return VStack(spacing: 16) {
             VStack(spacing: 8) {
                 Text(syncStore.isOnDuty ? stageLabel : "未上班")
                     .font(.title2)
@@ -233,12 +259,6 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Button(action: handlePrimaryAction) {
-                Text(primaryButtonTitle)
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-
             Button(syncStore.isOnDuty ? "下班" : "上班") {
                 let nextOnDuty = !syncStore.isOnDuty
                 syncStore.setOnDuty(nextOnDuty)
@@ -247,7 +267,6 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(.bordered)
-
 #if DEBUG
             Button(action: { showDebugPanel.toggle() }) {
                 Text("Debug")
@@ -281,15 +300,44 @@ struct ContentView: View {
             }
 #endif
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
-        .alert(item: $activeAlert) { alert in
-            Alert(title: Text(alert.message))
+    }
+
+    private var statsView: some View {
+        VStack {
+            Text("Stats")
+                .font(.title3)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
         }
-        .onReceive(ticker) { now = $0 }
-        .onReceive(syncStore.$incomingEvent) { event in
-            guard let event = event else { return }
-            applySessionEvent(event)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
+    private var bottomBar: some View {
+        HStack(spacing: 16) {
+            bottomTabButton(title: "Home", systemImage: "house", tab: .home)
+            Spacer(minLength: 0)
+            nextActionButton
+            Spacer(minLength: 0)
+            bottomTabButton(title: "Stats", systemImage: "chart.bar", tab: .stats)
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+    }
+
+    private func bottomTabButton(title: String, systemImage: String, tab: Tab) -> some View {
+        Button(action: { selectedTab = tab }) {
+            VStack(spacing: 2) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.caption2)
+            .frame(minWidth: 44)
+        }
+        .foregroundStyle(selectedTab == tab ? .primary : .secondary)
     }
 
     private var stageLabel: String {
@@ -305,50 +353,87 @@ struct ContentView: View {
         }
     }
 
-    private var primaryButtonTitle: String {
-        if !syncStore.isOnDuty {
-            return "开始拍摄"
-        }
+    private var nextActionTitle: String {
         switch stage {
-        case .idle:
-            return "开始拍摄"
+        case .idle, .ended:
+            return "拍摄"
         case .shooting:
-            return "开始选片"
+            return "选片"
         case .selecting:
             return "结束"
-        case .ended:
-            return "开始拍摄"
         }
     }
 
-    private func handlePrimaryAction() {
-        guard syncStore.isOnDuty else {
-            activeAlert = .notOnDuty
-            return
+    private var nextActionButton: some View {
+        Button(action: performNextAction) {
+            Text(nextActionTitle)
+                .frame(minWidth: 72)
         }
-        let now = Date()
-        switch stage {
-        case .idle:
-            stage = .shooting
-            session.shootingStart = now
-        case .shooting:
-            stage = .selecting
-            session.selectingStart = now
-        case .selecting:
-            stage = .ended
-            session.endedAt = now
-        case .ended:
-            session = Session()
-            session.shootingStart = now
-            stage = .shooting
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .contextMenu {
+            Button("拍摄") { performStageAction(.shooting) }
+                .disabled(!canStartShooting)
+            Button("选片") { performStageAction(.selecting) }
+                .disabled(!canStartSelecting)
+            Button("结束") { performStageAction(.ended) }
+                .disabled(!canEndSession)
         }
-        syncStageState(now: now)
+    }
+
+    private var canStartShooting: Bool {
+        stage == .idle || stage == .ended
+    }
+
+    private var canStartSelecting: Bool {
+        stage == .shooting
+    }
+
+    private var canEndSession: Bool {
+        stage == .shooting || stage == .selecting
     }
 
     private func resetSession() {
         stage = .idle
         session = Session()
         syncStageState(now: Date())
+    }
+
+    private func performNextAction() {
+        let targetStage: Stage
+        switch stage {
+        case .idle, .ended:
+            targetStage = .shooting
+        case .shooting:
+            targetStage = .selecting
+        case .selecting:
+            targetStage = .ended
+        }
+        performStageAction(targetStage)
+    }
+
+    private func performStageAction(_ targetStage: Stage) {
+        guard syncStore.isOnDuty else {
+            activeAlert = .notOnDuty
+            return
+        }
+        let now = Date()
+        switch targetStage {
+        case .shooting:
+            session = Session()
+            session.shootingStart = now
+            stage = .shooting
+        case .selecting:
+            session.shootingStart = session.shootingStart ?? now
+            session.selectingStart = now
+            stage = .selecting
+        case .ended:
+            session.endedAt = now
+            stage = .ended
+        case .idle:
+            break
+        }
+        syncStageState(now: now)
     }
 
     private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
