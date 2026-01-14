@@ -397,3 +397,23 @@
 ## iOS-only safe workflow
 - Run: `bash scripts/ios_safe.sh --clean-deriveddata`
 - Protects against accidental edits to watch/widget code, plist/entitlements, and Xcode project config; runs iOS + watch + widget builds to catch regressions.
+
+## TC-IOS-HOME-TIMELINE-V2
+
+## Timeline Data Source
+- In-memory session summaries derived from local stage changes and incoming session events (no raw event log).
+
+## Aggregation & Sort Rules
+- One card per session; only key nodes (拍摄开始/选片开始/结束) are shown.
+- Duplicates/oo-order events only update existing node timestamps; no new rows are added.
+- Sessions are stored in ascending order and rendered reversed so newest appears on top.
+- Within a session, rows are sorted early → late by timestamp.
+
+## Manual Verification
+1) iPhone 拍摄→选片→结束：仅 1 个会话卡片，≤3 行，无刷屏。 (FAIL - NOT RUN)
+2) 本地 + watch 回传（重复/乱序）：仍 1 个会话卡片，不新增行。 (FAIL - NOT RUN)
+3) 连续两单：2 个会话卡片，新会话在上，内部顺序正确。 (FAIL - NOT RUN)
+
+## Build
+- `bash scripts/ios_safe.sh --clean-deriveddata`
+  - Result: ** PASS **

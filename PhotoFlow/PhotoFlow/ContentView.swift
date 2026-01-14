@@ -183,6 +183,13 @@ struct ContentView: View {
         var endedAt: Date?
     }
 
+    struct SessionSummary: Identifiable {
+        let id: String
+        var shootingStart: Date?
+        var selectingStart: Date?
+        var endedAt: Date?
+    }
+
     enum ActiveAlert: Identifiable {
         case notOnDuty
         case cannotEndWhileShooting
@@ -210,6 +217,7 @@ struct ContentView: View {
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+    @State private var sessionSummaries: [SessionSummary] = []
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -238,6 +246,45 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("会话时间线")
+                    .font(.headline)
+                if sessionSummaries.isEmpty {
+                    Text("暂无记录")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(sessionSummaries.reversed()) { summary in
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let startTime = sessionStartTime(for: summary) {
+                                Text("会话 \(formatTimelineTime(startTime))")
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                            } else {
+                                Text("会话")
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                            }
+                            ForEach(timelineRows(for: summary), id: \.label) { row in
+                                HStack {
+                                    Text(formatTimelineTime(row.time))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(row.label)
+                                        .font(.caption)
+                                    Spacer(minLength: 0)
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.thinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Button(syncStore.isOnDuty ? "下班" : "上班") {
                 let nextOnDuty = !syncStore.isOnDuty
@@ -342,10 +389,12 @@ struct ContentView: View {
             session.shootingStart = now
             stage = .shooting
         }
+        updateSessionSummary(for: stage, at: now)
         syncStageState(now: now)
     }
 
     private func resetSession() {
+        endActiveSessionIfNeeded(at: Date())
         stage = .idle
         session = Session()
         syncStageState(now: Date())
@@ -359,12 +408,15 @@ struct ContentView: View {
             session = Session()
             session.shootingStart = timestamp
             stage = .shooting
+            updateSessionSummary(for: .shooting, at: timestamp)
         case "startSelecting":
             session.selectingStart = timestamp
             stage = .selecting
+            updateSessionSummary(for: .selecting, at: timestamp)
         case "end":
             session.endedAt = timestamp
             stage = .ended
+            updateSessionSummary(for: .ended, at: timestamp)
         default:
             break
         }
@@ -406,6 +458,112 @@ struct ContentView: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func updateSessionSummary(for stage: Stage, at timestamp: Date) {
+        switch stage {
+        case .shooting:
+            if let index = targetSessionIndex(for: timestamp) {
+                let current = sessionSummaries[index].shootingStart
+                if current == nil || timestamp < current! {
+                    sessionSummaries[index].shootingStart = timestamp
+                }
+            } else {
+                let sessionId = makeSessionId(startedAt: timestamp)
+                sessionSummaries.append(SessionSummary(
+                    id: sessionId,
+                    shootingStart: timestamp,
+                    selectingStart: nil,
+                    endedAt: nil
+                ))
+            }
+        case .selecting:
+            guard let index = targetSessionIndex(for: timestamp) else { return }
+            let current = sessionSummaries[index].selectingStart
+            if current == nil || timestamp < current! {
+                sessionSummaries[index].selectingStart = timestamp
+            }
+        case .ended:
+            guard let index = targetSessionIndex(for: timestamp) else { return }
+            let current = sessionSummaries[index].endedAt
+            if current == nil || timestamp > current! {
+                sessionSummaries[index].endedAt = timestamp
+            }
+        case .idle:
+            break
+        }
+        sortSessionSummaries()
+    }
+
+    private func endActiveSessionIfNeeded(at timestamp: Date) {
+        guard let index = activeSessionIndex() else { return }
+        let current = sessionSummaries[index].endedAt
+        if current == nil || timestamp > current! {
+            sessionSummaries[index].endedAt = timestamp
+        }
+        sortSessionSummaries()
+    }
+
+    private func activeSessionIndex() -> Int? {
+        sessionSummaries.lastIndex(where: { $0.endedAt == nil })
+    }
+
+    private func targetSessionIndex(for timestamp: Date) -> Int? {
+        if let activeIndex = activeSessionIndex() {
+            if let activeStart = sessionStartTime(for: sessionSummaries[activeIndex]),
+               timestamp < activeStart,
+               let endedIndex = recentEndedSessionIndex(for: timestamp) {
+                return endedIndex
+            }
+            return activeIndex
+        }
+        return recentEndedSessionIndex(for: timestamp)
+    }
+
+    private func recentEndedSessionIndex(for timestamp: Date) -> Int? {
+        guard let index = sessionSummaries.indices.last else { return nil }
+        guard let endedAt = sessionSummaries[index].endedAt else { return nil }
+        return timestamp <= endedAt ? index : nil
+    }
+
+    private func sortSessionSummaries() {
+        sessionSummaries.sort { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
+    }
+
+    private func sessionStartTime(for summary: SessionSummary) -> Date? {
+        [summary.shootingStart, summary.selectingStart, summary.endedAt].compactMap { $0 }.min()
+    }
+
+    private func sessionSortKey(for summary: SessionSummary) -> Date {
+        sessionStartTime(for: summary) ?? Date.distantPast
+    }
+
+    private func timelineRows(for summary: SessionSummary) -> [(label: String, time: Date)] {
+        var rows: [(label: String, time: Date)] = []
+        if let shootingStart = summary.shootingStart {
+            rows.append((label: "拍摄开始", time: shootingStart))
+        }
+        if let selectingStart = summary.selectingStart {
+            rows.append((label: "选片开始", time: selectingStart))
+        }
+        if let endedAt = summary.endedAt {
+            rows.append((label: "结束", time: endedAt))
+        }
+        return rows.sorted { $0.time < $1.time }
+    }
+
+    private func formatTimelineTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private func makeSessionId(startedAt: Date) -> String {
+        let base = "session-\(Int(startedAt.timeIntervalSince1970 * 1000))"
+        if sessionSummaries.contains(where: { $0.id == base }) {
+            return base + "-" + UUID().uuidString
+        }
+        return base
     }
 
     private func syncStageState(now: Date) {
