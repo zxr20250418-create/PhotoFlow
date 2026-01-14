@@ -116,14 +116,17 @@ Status: DONE (merged in PR #71)
 ID: TC-IOS-STATS-MVP-V1
 Status: DONE (merged in PR #73)
 
-## ACTIVE — TC-IOS-STATS-RANGE-V1
+## DONE — TC-IOS-STATS-RANGE-V1
 ID: TC-IOS-STATS-RANGE-V1
-Title: Stats 范围切换（今日/本周/本月，ISO 周一）
+Status: DONE (merged in PR #75)
+
+## ACTIVE — TC-IOS-STATS-METRICS-V1
+ID: TC-IOS-STATS-METRICS-V1
+Title: Stats 经营指标补充（平均时长 + 选片占比）
 AssignedTo: Executor
 
 Goal:
-- Stats 页面新增范围切换（今日/本周/本月），仅切换汇总口径。
-- 继续显示单数 + 总/拍摄/选片总时长。
+- 在 Stats 现有范围切换与四行汇总下新增两行指标：平均每单总时长、选片占比。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -133,24 +136,17 @@ Guardrails:
 - 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
 - PR 前必须跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
-Definitions:
-- 过滤依据：以每个 session 的 `shootingStart` 所在日期判断归属范围。
-- Calendar：使用 `Calendar(identifier: .iso8601)`（ISO 周一开始）。
-- 今日：`isoCal.isDateInToday(shootingStart)`
-- 本周：`isoCal.dateInterval(of: .weekOfYear, for: now)`，`interval.contains(shootingStart)`
-- 本月：`isoCal.dateInterval(of: .month, for: now)`，`interval.contains(shootingStart)`
-- 汇总时长复用 sessionDurations（total/shooting/selecting；selecting 可空）。
-
 Acceptance:
-- Stats 顶部出现 Segmented：`今日｜本周｜本月`，默认选中今日。
-- 任意范围下显示四行：单数/总时长/拍摄时长/选片时长。
-- 进行中会话：汇总应包含进行中时长（使用 now 计算）。
-- 不引入 raw log；不改变 Home 排序/编号语义。
+- 在 Stats 现有四行下方新增两行：
+  - 平均每单总时长：N>0 显示 `总时长 / N`；N=0 显示 `--`
+  - 选片占比：总时长>0 显示 `选片 / 总` 百分比；总时长=0 显示 `--`
+- 两项指标随范围切换（今日/本周/本月）同步变化。
+- 不改变 session 边界语义，不引入 raw log，不改 Home 排序/编号语义。
 
 Manual Verification:
-- A：切换 今日/本周/本月 时单数与时长会变化（数据足够时）。
-- B：一致性检查：本周 >= 今日；本月 >= 本周。
-- C：进行中会话总时长会增长（至少在今日范围观察 10 秒）。
+- A：N=0 时平均与占比为 `--`。
+- B：N>0 时平均为正且合理；占比在 0%–100%。
+- C：切换范围后两项指标随之变化（数据足够时）。
 - D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
