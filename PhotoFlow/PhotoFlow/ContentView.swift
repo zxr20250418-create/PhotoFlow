@@ -986,18 +986,18 @@ struct ContentView: View {
 
     private func metaSummary(for sessionId: String) -> String? {
         let meta = metaStore.meta(for: sessionId)
-        let hasShot = meta.shotCount != nil
-        let hasSelected = meta.selectedCount != nil
-        guard hasShot || hasSelected else { return nil }
-        let shotText = meta.shotCount.map { "拍\($0)张" } ?? "拍--张"
-        let selectedText = meta.selectedCount.map { "选\($0)张" } ?? "选--张"
-        let rateText: String
-        if let shot = meta.shotCount, shot > 0, let selected = meta.selectedCount {
-            rateText = "\(Int((Double(selected) / Double(shot) * 100).rounded()))%"
-        } else {
-            rateText = "--"
+        var parts: [String] = []
+        if let shot = meta.shotCount {
+            parts.append("拍\(shot)张")
         }
-        return [shotText, selectedText, "选片率\(rateText)"].joined(separator: " · ")
+        if let selected = meta.selectedCount {
+            parts.append("选\(selected)张")
+        }
+        if let shot = meta.shotCount, shot > 0, let selected = meta.selectedCount {
+            let rate = Int((Double(selected) / Double(shot) * 100).rounded())
+            parts.append("选片率\(rate)%")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func amountText(for summary: SessionSummary) -> String {
