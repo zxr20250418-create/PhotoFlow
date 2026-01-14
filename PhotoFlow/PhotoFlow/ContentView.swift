@@ -169,12 +169,65 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 }
 
+struct SessionMeta: Codable, Equatable {
+    var amountCents: Int?
+    var shotCount: Int?
+    var selectedCount: Int?
+    var reviewNote: String?
+
+    var isEmpty: Bool {
+        amountCents == nil && shotCount == nil && selectedCount == nil && reviewNote == nil
+    }
+}
+
+@MainActor
+final class SessionMetaStore: ObservableObject {
+    @Published private(set) var metas: [String: SessionMeta] = [:]
+    private let storageKey = "pf_session_meta_v1"
+    private let defaults = UserDefaults.standard
+
+    init() {
+        load()
+    }
+
+    func meta(for id: String) -> SessionMeta {
+        metas[id] ?? SessionMeta()
+    }
+
+    func update(_ meta: SessionMeta, for id: String) {
+        if meta.isEmpty {
+            metas.removeValue(forKey: id)
+        } else {
+            metas[id] = meta
+        }
+        save()
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) else {
+            return
+        }
+        metas = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(metas) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}
+
 struct ContentView: View {
     enum Stage {
         case idle
         case shooting
         case selecting
         case ended
+    }
+
+    enum Tab {
+        case home
+        case stats
     }
 
     struct Session {
@@ -213,11 +266,41 @@ struct ContentView: View {
         }
     }
 
+    struct EditingSession: Identifiable {
+        let id: String
+    }
+
+    private enum StatsRange: String, CaseIterable {
+        case today
+        case week
+        case month
+
+        var title: String {
+            switch self {
+            case .today:
+                return "今日"
+            case .week:
+                return "本周"
+            case .month:
+                return "本月"
+            }
+        }
+    }
+
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+    @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
+    @StateObject private var metaStore: SessionMetaStore
+    @State private var editingSession: EditingSession?
+    @State private var draftAmount = ""
+    @State private var draftShotCount = ""
+    @State private var draftSelected = ""
+    @State private var draftReviewNote = ""
+    @State private var lastPromptedSessionId: String?
+    @State private var statsRange: StatsRange = .today
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -226,26 +309,74 @@ struct ContentView: View {
 
     init(syncStore: WatchSyncStore) {
         self.syncStore = syncStore
+        _metaStore = StateObject(wrappedValue: SessionMetaStore())
     }
 
     var body: some View {
-        let durations = computeDurations(now: now)
-
-        VStack(spacing: 16) {
-            VStack(spacing: 8) {
-                Text(syncStore.isOnDuty ? stageLabel : "未上班")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+        ZStack {
+            if selectedTab == .home {
+                homeView
+            } else {
+                statsView
             }
-
-            Button(action: handlePrimaryAction) {
-                Text(primaryButtonTitle)
-                    .frame(maxWidth: .infinity)
+        }
+        .safeAreaInset(edge: .bottom) {
+            bottomBar
+        }
+        .alert(item: $activeAlert) { alert in
+            Alert(title: Text(alert.message))
+        }
+        .sheet(item: $editingSession) { session in
+            NavigationStack {
+                Form {
+                    Section {
+                        TextField("金额", text: $draftAmount)
+                            .keyboardType(.decimalPad)
+                        TextField("拍摄张数", text: $draftShotCount)
+                            .keyboardType(.numberPad)
+                        TextField("选片张数", text: $draftSelected)
+                            .keyboardType(.numberPad)
+                    }
+                    Section("复盘备注") {
+                        TextEditor(text: $draftReviewNote)
+                            .frame(minHeight: 100)
+                    }
+                }
+                .navigationTitle("编辑指标")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") {
+                            editingSession = nil
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            saveMeta(for: session.id)
+                            editingSession = nil
+                        }
+                    }
+                }
             }
-            .buttonStyle(.borderedProminent)
+        }
+        .onReceive(ticker) { now = $0 }
+        .onReceive(syncStore.$incomingEvent) { event in
+            guard let event = event else { return }
+            applySessionEvent(event)
+        }
+    }
+
+    private var homeView: some View {
+        return VStack(spacing: 16) {
+            Button(syncStore.isOnDuty ? "下班" : "上班") {
+                let nextOnDuty = !syncStore.isOnDuty
+                syncStore.setOnDuty(nextOnDuty)
+                if !nextOnDuty {
+                    resetSession()
+                }
+            }
+            .buttonStyle(.bordered)
+
+            todayBanner
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("会话时间线")
@@ -261,25 +392,50 @@ struct ContentView: View {
                         let order = total - displayIndex
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .firstTextBaseline) {
-                                Text("第\(order)单")
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
+                                HStack(spacing: 6) {
+                                    Text("第\(order)单")
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                    if let startTime = summary.shootingStart ?? sessionStartTime(for: summary) {
+                                        Text(formatSessionTime(startTime))
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                            .monospacedDigit()
+                                    }
+                                }
                                 Spacer(minLength: 8)
-                                if let startTime = summary.shootingStart ?? sessionStartTime(for: summary) {
-                                    Text(formatTimelineTime(startTime))
-                                        .font(.footnote)
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(amountText(for: summary))
+                                        .font(.headline)
+                                        .monospacedDigit()
+                                    Text(rphText(for: summary))
+                                        .font(.caption2)
                                         .foregroundStyle(.secondary)
+                                        .monospacedDigit()
                                 }
+                                Button(action: { startEditingMeta(for: summary.id) }) {
+                                    Image(systemName: "pencil")
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
                             }
-                            ForEach(timelineRows(for: summary), id: \.label) { row in
-                                HStack {
-                                    Text(formatTimelineTime(row.time))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Text(row.label)
-                                        .font(.caption)
-                                    Spacer(minLength: 0)
-                                }
+                            Text(sessionDurationSummary(for: summary))
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .lineLimit(1)
+                            if let metaText = metaSummary(for: summary.id) {
+                                Text(metaText)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            if let notePreview = metaNotePreview(for: summary.id) {
+                                Text(notePreview)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
                             }
                         }
                         .padding(8)
@@ -290,16 +446,6 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button(syncStore.isOnDuty ? "下班" : "上班") {
-                let nextOnDuty = !syncStore.isOnDuty
-                syncStore.setOnDuty(nextOnDuty)
-                if !nextOnDuty {
-                    resetSession()
-                }
-            }
-            .buttonStyle(.bordered)
-
 #if DEBUG
             Button(action: { showDebugPanel.toggle() }) {
                 Text("Debug")
@@ -333,15 +479,202 @@ struct ContentView: View {
             }
 #endif
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
-        .alert(item: $activeAlert) { alert in
-            Alert(title: Text(alert.message))
+    }
+
+    private var todayBanner: some View {
+        let isoCal = Calendar(identifier: .iso8601)
+        let todaySessions = sessionSummaries.filter { summary in
+            guard let shootingStart = summary.shootingStart else { return false }
+            return isoCal.isDateInToday(shootingStart)
         }
-        .onReceive(ticker) { now = $0 }
-        .onReceive(syncStore.$incomingEvent) { event in
-            guard let event = event else { return }
-            applySessionEvent(event)
+        let totals = todaySessions.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, summary in
+            let durations = sessionDurations(for: summary)
+            result.total += durations.total
+            result.shooting += durations.shooting
+            if let selecting = durations.selecting {
+                result.selecting += selecting
+            }
         }
+        let metaTotals = todaySessions.reduce(into: (amountCents: 0, hasAmount: false, shot: 0, hasShot: false, selected: 0, hasSelected: false)) { result, summary in
+            let meta = metaStore.meta(for: summary.id)
+            if let amount = meta.amountCents {
+                result.amountCents += amount
+                result.hasAmount = true
+            }
+            if let shot = meta.shotCount {
+                result.shot += shot
+                result.hasShot = true
+            }
+            if let selected = meta.selectedCount {
+                result.selected += selected
+                result.hasSelected = true
+            }
+        }
+        let count = todaySessions.count
+        let amountText = metaTotals.hasAmount ? formatAmount(cents: metaTotals.amountCents) : "--"
+        let rateText = (metaTotals.hasShot && metaTotals.hasSelected && metaTotals.shot > 0)
+            ? "\(Int((Double(metaTotals.selected) / Double(metaTotals.shot) * 100).rounded()))%"
+            : "--"
+        return Button(action: { selectedTab = .stats }) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("今日收入")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Text(amountText)
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .monospacedDigit()
+                }
+                Text("\(count)单 · 总 \(format(totals.total))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Text("拍 \(format(totals.shooting)) · 选 \(format(totals.selecting)) · 拍 \(metaTotals.hasShot ? "\(metaTotals.shot)张" : "--") · 选 \(metaTotals.hasSelected ? "\(metaTotals.selected)张" : "--") · 选片率 \(rateText)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var statsView: some View {
+        let isoCal = Calendar(identifier: .iso8601)
+        let filteredSessions = sessionSummaries.filter { summary in
+            guard let shootingStart = summary.shootingStart else { return false }
+            switch statsRange {
+            case .today:
+                return isoCal.isDateInToday(shootingStart)
+            case .week:
+                guard let interval = isoCal.dateInterval(of: .weekOfYear, for: now) else { return false }
+                return interval.contains(shootingStart)
+            case .month:
+                guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
+                return interval.contains(shootingStart)
+            }
+        }
+        let totals = filteredSessions.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, summary in
+            let durations = sessionDurations(for: summary)
+            result.total += durations.total
+            result.shooting += durations.shooting
+            if let selecting = durations.selecting {
+                result.selecting += selecting
+            }
+        }
+        let count = filteredSessions.count
+        let avgTotal = count > 0 ? totals.total / Double(count) : nil
+        let selectShare = totals.total > 0 ? totals.selecting / totals.total : nil
+        let prefix = statsRange.title
+        let avgText = avgTotal.map { format($0) } ?? "--"
+        let shareText = selectShare.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
+        let bizTotals = filteredSessions.reduce(into: (amountCents: 0, hasAmount: false, shot: 0, hasShot: false, selected: 0, hasSelected: false)) { result, summary in
+            let meta = metaStore.meta(for: summary.id)
+            if let amount = meta.amountCents {
+                result.amountCents += amount
+                result.hasAmount = true
+            }
+            if let shot = meta.shotCount {
+                result.shot += shot
+                result.hasShot = true
+            }
+            if let selected = meta.selectedCount {
+                result.selected += selected
+                result.hasSelected = true
+            }
+        }
+        let revenueText = bizTotals.hasAmount ? formatAmount(cents: bizTotals.amountCents) : "--"
+        let avgRevenueText = (bizTotals.hasAmount && count > 0)
+            ? formatAmount(cents: Int((Double(bizTotals.amountCents) / Double(count)).rounded()))
+            : "--"
+        let shotText = bizTotals.hasShot ? "\(bizTotals.shot)" : "--"
+        let selectedText = bizTotals.hasSelected ? "\(bizTotals.selected)" : "--"
+        let selectRateText = (bizTotals.hasShot && bizTotals.hasSelected && bizTotals.shot > 0)
+            ? "\(Int((Double(bizTotals.selected) / Double(bizTotals.shot) * 100).rounded()))%"
+            : "--"
+        let rphText: String = {
+            guard bizTotals.hasAmount, totals.total > 0 else { return "--" }
+            let hours = totals.total / 3600
+            let revenue = Double(bizTotals.amountCents) / 100
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        let avgSelectRateText: String = {
+            var sum: Double = 0
+            var validCount = 0
+            for summary in filteredSessions {
+                let meta = metaStore.meta(for: summary.id)
+                guard let shot = meta.shotCount, shot > 0,
+                      let selected = meta.selectedCount else { continue }
+                sum += Double(selected) / Double(shot)
+                validCount += 1
+            }
+            guard validCount > 0 else { return "--" }
+            let avg = sum / Double(validCount)
+            return "\(Int((avg * 100).rounded()))%"
+        }()
+        return VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: $statsRange) {
+                ForEach(StatsRange.allCases, id: \.self) { range in
+                    Text(range.title).tag(range)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text("\(prefix)单数 \(count)")
+            Text("\(prefix)总时长 \(format(totals.total))")
+            Text("\(prefix)拍摄时长 \(format(totals.shooting))")
+            Text("\(prefix)选片时长 \(format(totals.selecting))")
+            Text("\(prefix)平均每单总时长 \(avgText)")
+            Text("\(prefix)选片占比 \(shareText)")
+            Divider()
+            Text("经营汇总")
+                .font(.headline)
+            Text("收入合计 \(revenueText)")
+            Text("平均客单价 \(avgRevenueText)")
+            Text("拍摄张数合计 \(shotText)")
+            Text("选片张数合计 \(selectedText)")
+            Text("选片率 \(selectRateText)")
+            Text("RPH \(rphText)")
+            Text("平均选片率 \(avgSelectRateText)")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding()
+    }
+
+    private var bottomBar: some View {
+        return HStack(alignment: .bottom, spacing: 16) {
+            bottomTabButton(title: "Home", systemImage: "house", tab: .home)
+            Spacer(minLength: 0)
+            VStack(spacing: 4) {
+                Text(syncStore.isOnDuty ? stageLabel : "未上班")
+                    .font(.headline)
+                nextActionButton
+            }
+            Spacer(minLength: 0)
+            bottomTabButton(title: "Stats", systemImage: "chart.bar", tab: .stats)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+    }
+
+    private func bottomTabButton(title: String, systemImage: String, tab: Tab) -> some View {
+        Button(action: { selectedTab = tab }) {
+            VStack(spacing: 2) {
+                Image(systemName: systemImage)
+                Text(title)
+            }
+            .font(.caption2)
+            .frame(minWidth: 44)
+        }
+        .foregroundStyle(selectedTab == tab ? .primary : .secondary)
     }
 
     private var stageLabel: String {
@@ -357,45 +690,52 @@ struct ContentView: View {
         }
     }
 
-    private var primaryButtonTitle: String {
-        if !syncStore.isOnDuty {
-            return "开始拍摄"
-        }
+    private var nextActionTitle: String {
         switch stage {
-        case .idle:
-            return "开始拍摄"
+        case .idle, .ended:
+            return "拍摄"
         case .shooting:
-            return "开始选片"
+            return "选片"
         case .selecting:
             return "结束"
-        case .ended:
-            return "开始拍摄"
         }
     }
 
-    private func handlePrimaryAction() {
-        guard syncStore.isOnDuty else {
-            activeAlert = .notOnDuty
-            return
+    private var nextActionButton: some View {
+        let durations = computeDurations(now: now)
+        return Button(action: performNextAction) {
+            VStack(spacing: 2) {
+                Text(nextActionTitle)
+                    .font(.headline)
+                Text("总 \(format(durations.total)) · 阶段 \(format(durations.currentStage))")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 96)
         }
-        let now = Date()
-        switch stage {
-        case .idle:
-            stage = .shooting
-            session.shootingStart = now
-        case .shooting:
-            stage = .selecting
-            session.selectingStart = now
-        case .selecting:
-            stage = .ended
-            session.endedAt = now
-        case .ended:
-            session = Session()
-            session.shootingStart = now
-            stage = .shooting
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .contextMenu {
+            Button("拍摄") { performStageAction(.shooting) }
+                .disabled(!canStartShooting)
+            Button("选片") { performStageAction(.selecting) }
+                .disabled(!canStartSelecting)
+            Button("结束") { performStageAction(.ended) }
+                .disabled(!canEndSession)
         }
-        updateSessionSummary(for: stage, at: now)
-        syncStageState(now: now)
+    }
+
+    private var canStartShooting: Bool {
+        stage == .idle || stage == .ended
+    }
+
+    private var canStartSelecting: Bool {
+        stage == .shooting
+    }
+
+    private var canEndSession: Bool {
+        stage == .shooting || stage == .selecting
     }
 
     private func resetSession() {
@@ -403,6 +743,52 @@ struct ContentView: View {
         stage = .idle
         session = Session()
         syncStageState(now: Date())
+    }
+
+    private func performNextAction() {
+        let targetStage: Stage
+        switch stage {
+        case .idle, .ended:
+            targetStage = .shooting
+        case .shooting:
+            targetStage = .selecting
+        case .selecting:
+            targetStage = .ended
+        }
+        performStageAction(targetStage)
+    }
+
+    private func performStageAction(_ targetStage: Stage) {
+        guard syncStore.isOnDuty else {
+            activeAlert = .notOnDuty
+            return
+        }
+        let now = Date()
+        let endedSessionId = targetStage == .ended ? activeSessionIndex().map { sessionSummaries[$0].id } : nil
+        switch targetStage {
+        case .shooting:
+            session = Session()
+            session.shootingStart = now
+            stage = .shooting
+        case .selecting:
+            session.shootingStart = session.shootingStart ?? now
+            session.selectingStart = now
+            stage = .selecting
+        case .ended:
+            session.endedAt = now
+            stage = .ended
+        case .idle:
+            break
+        }
+        updateSessionSummary(for: targetStage, at: now)
+        if targetStage == .ended {
+            let sessionId = endedSessionId ?? sessionIdForTimestamp(now)
+            if let sessionId {
+                promptSettlementIfNeeded(for: sessionId)
+            }
+        }
+        updateSessionSummary(for: stage, at: now)
+        syncStageState(now: now)
     }
 
     private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
@@ -421,7 +807,11 @@ struct ContentView: View {
         case "end":
             session.endedAt = timestamp
             stage = .ended
+            let endedSessionId = activeSessionIndex().map { sessionSummaries[$0].id }
             updateSessionSummary(for: .ended, at: timestamp)
+            if let sessionId = endedSessionId ?? sessionIdForTimestamp(timestamp) {
+                promptSettlementIfNeeded(for: sessionId)
+            }
         default:
             break
         }
@@ -525,6 +915,10 @@ struct ContentView: View {
         return recentEndedSessionIndex(for: timestamp)
     }
 
+    private func sessionIdForTimestamp(_ timestamp: Date) -> String? {
+        guard let index = targetSessionIndex(for: timestamp) else { return nil }
+        return sessionSummaries[index].id
+    }
     private func recentEndedSessionIndex(for timestamp: Date) -> Int? {
         guard let index = sessionSummaries.indices.last else { return nil }
         guard let endedAt = sessionSummaries[index].endedAt else { return nil }
@@ -543,24 +937,150 @@ struct ContentView: View {
         sessionStartTime(for: summary) ?? Date.distantPast
     }
 
-    private func timelineRows(for summary: SessionSummary) -> [(label: String, time: Date)] {
-        var rows: [(label: String, time: Date)] = []
-        if let shootingStart = summary.shootingStart {
-            rows.append((label: "拍摄开始", time: shootingStart))
-        }
-        if let selectingStart = summary.selectingStart {
-            rows.append((label: "选片开始", time: selectingStart))
-        }
-        if let endedAt = summary.endedAt {
-            rows.append((label: "结束", time: endedAt))
-        }
-        return rows.sorted { $0.time < $1.time }
+    private static let sessionTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private func formatSessionTime(_ date: Date) -> String {
+        ContentView.sessionTimeFormatter.string(from: date)
     }
 
-    private func formatTimelineTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: date)
+    private func sessionDurationSummary(for summary: SessionSummary) -> String {
+        let durations = sessionDurations(for: summary)
+        var parts = [
+            "总 \(format(durations.total))",
+            "拍 \(format(durations.shooting))"
+        ]
+        if let selecting = durations.selecting {
+            parts.append("选 \(format(selecting))")
+        }
+        return parts.joined(separator: "  ")
+    }
+
+    private func startEditingMeta(for sessionId: String) {
+        let meta = metaStore.meta(for: sessionId)
+        draftAmount = meta.amountCents.map(amountText(from:)) ?? ""
+        draftShotCount = meta.shotCount.map(String.init) ?? ""
+        draftSelected = meta.selectedCount.map(String.init) ?? ""
+        draftReviewNote = meta.reviewNote ?? ""
+        editingSession = EditingSession(id: sessionId)
+    }
+
+    private func saveMeta(for sessionId: String) {
+        let meta = SessionMeta(
+            amountCents: parseAmountCents(from: draftAmount),
+            shotCount: parseInt(from: draftShotCount),
+            selectedCount: parseInt(from: draftSelected),
+            reviewNote: normalizedNote(from: draftReviewNote)
+        )
+        metaStore.update(meta, for: sessionId)
+    }
+
+    private func promptSettlementIfNeeded(for sessionId: String) {
+        guard lastPromptedSessionId != sessionId else { return }
+        lastPromptedSessionId = sessionId
+        startEditingMeta(for: sessionId)
+    }
+
+    private func metaSummary(for sessionId: String) -> String? {
+        let meta = metaStore.meta(for: sessionId)
+        var parts: [String] = []
+        if let shot = meta.shotCount {
+            parts.append("拍\(shot)张")
+        }
+        if let selected = meta.selectedCount {
+            parts.append("选\(selected)张")
+        }
+        if let shot = meta.shotCount, shot > 0, let selected = meta.selectedCount {
+            let rate = Int((Double(selected) / Double(shot) * 100).rounded())
+            parts.append("选片率\(rate)%")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func amountText(for summary: SessionSummary) -> String {
+        let meta = metaStore.meta(for: summary.id)
+        return meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
+    }
+
+    private func rphText(for summary: SessionSummary) -> String {
+        let meta = metaStore.meta(for: summary.id)
+        guard let amountCents = meta.amountCents else { return "RPH --" }
+        let totalSeconds = sessionDurations(for: summary).total
+        guard totalSeconds > 0 else { return "RPH --" }
+        let revenue = Double(amountCents) / 100
+        let hours = totalSeconds / 3600
+        return String(format: "RPH ¥%.0f/小时", revenue / hours)
+    }
+
+    private func metaNotePreview(for sessionId: String) -> String? {
+        guard let note = metaStore.meta(for: sessionId).reviewNote else { return nil }
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func formatAmount(cents: Int) -> String {
+        if cents % 100 == 0 {
+            return "¥\(cents / 100)"
+        }
+        let value = Double(cents) / 100
+        return String(format: "¥%.2f", value)
+    }
+
+    private func amountText(from cents: Int) -> String {
+        if cents % 100 == 0 {
+            return "\(cents / 100)"
+        }
+        let value = Double(cents) / 100
+        return String(format: "%.2f", value)
+    }
+
+    private func parseAmountCents(from text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let normalized = trimmed.replacingOccurrences(of: ",", with: "")
+        guard let value = Double(normalized) else { return nil }
+        return Int((value * 100).rounded())
+    }
+
+    private func parseInt(from text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let value = Int(trimmed), value >= 0 else { return nil }
+        return value
+    }
+
+    private func normalizedNote(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func sessionDurations(for summary: SessionSummary) -> (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval?) {
+        guard let shootingStart = summary.shootingStart else {
+            return (0, 0, nil)
+        }
+        let endTime = summary.endedAt ?? now
+        let total = max(0, endTime.timeIntervalSince(shootingStart))
+
+        let shooting: TimeInterval
+        if let selectingStart = summary.selectingStart {
+            shooting = max(0, selectingStart.timeIntervalSince(shootingStart))
+        } else if let endedAt = summary.endedAt {
+            shooting = max(0, endedAt.timeIntervalSince(shootingStart))
+        } else {
+            shooting = max(0, now.timeIntervalSince(shootingStart))
+        }
+
+        let selecting: TimeInterval?
+        if let selectingStart = summary.selectingStart {
+            let selectingEnd = summary.endedAt ?? now
+            selecting = max(0, selectingEnd.timeIntervalSince(selectingStart))
+        } else {
+            selecting = nil
+        }
+
+        return (total, shooting, selecting)
     }
 
     private func makeSessionId(startedAt: Date) -> String {

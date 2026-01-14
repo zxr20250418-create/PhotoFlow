@@ -54,38 +54,132 @@ Status: DONE (merged in PR #61)
 ID: TC-WIDGET-STATE-WRITE-FIX
 Status: PAUSED (spec alignment priority)
 
-## ACTIVE — TC-IOS-HOME-TIMELINE-V1
+## ABANDONED — TC-IOS-HOME-TIMELINE-V1
 ID: TC-IOS-HOME-TIMELINE-V1
-Title: iOS 首页会话时间线（按时间早→晚；显示从下到上）
+Status: ABANDONED (PR #64 closed; raw event log direction rejected)
+
+## DONE — TC-IOS-HOME-TIMELINE-SPEC-LOCK
+ID: TC-IOS-HOME-TIMELINE-SPEC-LOCK
+Status: DONE (merged in PR #66)
+
+## DONE — TC-IOS-BOTTOMBAR-NEXTACTION-V1
+ID: TC-IOS-BOTTOMBAR-NEXTACTION-V1
+Status: DONE (merged in PR #69)
+
+## PAUSED — TC-IOS-HOME-TIMELINE-V2
+ID: TC-IOS-HOME-TIMELINE-V2
+Title: iOS 首页会话时间线（会话聚合，非 raw log）
 AssignedTo: Executor
+Status: PAUSED (awaiting PR #68 merge)
 
 Goal:
-- 在 iOS 首页加入一个“会话时间线”区块，展示 stage 变化记录（拍摄/选片/停止）与时间戳。
-- 排序规则：按时间从早到晚（ascending），但视觉呈现从下到上（最新在上方）。
-- 不修改 watch/widget/config，避免牵连手表端。
+- 基于 SPEC-LOCK（docs/SPEC.md）实现 iPhone 首页“会话时间线”。
+- 按会话聚合展示，杜绝 raw log 追加刷屏，不大改首页结构。
 
 Scope (Allowed files ONLY):
-- 仅 iOS 目录：PhotoFlow/PhotoFlow/**（iPhone app Swift files）
+- PhotoFlow/PhotoFlow/**/*.swift
 - docs/AGENTS/exec.md（追加）
 
 Forbidden:
 - 禁止修改：
   - PhotoFlow/PhotoFlowWatch Watch App/**
   - PhotoFlow/PhotoFlowWatchWidget/**
-  - *.plist / *.entitlements / project.pbxproj
+  - **/Info.plist
+  - **/*.entitlements
+  - **/*.pbxproj
 - 不新增 target/build settings
-- 不重构现有架构（只加一个轻量 timeline）
+- 不触碰 watch/widget/config
 
 Acceptance:
-- 首页出现 timeline 区块（标题：例如“今日时间线/会话时间线”）
-- 记录项包含：时间（HH:mm:ss 或 HH:mm）、stage 中文（拍摄/选片/停止）、来源（手机/手表可选，若暂无则先留空）
-- 排序：数据按时间升序；UI 显示最新在上（通过 reversed/rotation 等实现均可）
-- 运行护栏：bash scripts/ios_safe.sh --clean-deriveddata PASS
-- xcodebuild（ios_safe 自带）通过
-- exec.md 记录：实现方式、排序逻辑、手动验证 PASS
+- Session Boundary：按 docs/SPEC.md（SPEC-LOCK）定义的会话开始/结束规则与会话 ID 稳定性。
+- UI Rules：每会话一个卡片/cell；会话内早→晚；会话之间最新在上（允许 reversed 渲染）。
+- Aggregation & Dedup：关键节点≤3条（拍摄开始/选片开始/结束）；重复/乱序事件只更新节点时间或忽略，不得新增行。
+- Manual Acceptance Tests：A/B/C 必须在真机跑，exec.md 标注 PASS/FAIL（可附简述/截图）。
+- 运行护栏：`bash scripts/ios_safe.sh --clean-deriveddata` PASS（提交/PR 前贴结果）。
+
+Guardrails:
+- 默认禁止修改 watch/widget 代码、Info.plist、project.pbxproj、entitlements、targets/appex 配置。
+- 任何必须触碰配置的工作必须单独开“配置卡”，并贴 preflight 输出。
+- 每次提交/PR 前必须跑并贴结果：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 StopCondition:
 - PR opened to main（不合并）
 - CI green
 - exec.md 更新
+- STOP
+
+## DONE — TC-IOS-HOME-SESSION-DURATIONS-V1
+ID: TC-IOS-HOME-SESSION-DURATIONS-V1
+Status: DONE (merged in PR #71)
+
+## DONE — TC-IOS-STATS-MVP-V1
+ID: TC-IOS-STATS-MVP-V1
+Status: DONE (merged in PR #73)
+
+## DONE — TC-IOS-STATS-RANGE-V1
+ID: TC-IOS-STATS-RANGE-V1
+Status: DONE (merged in PR #75)
+
+## DONE — TC-IOS-STATS-METRICS-V1
+ID: TC-IOS-STATS-METRICS-V1
+Status: DONE (merged in PR #77)
+
+## DONE — TC-IOS-HOME-SESSION-KEYMETRICS-V1
+ID: TC-IOS-HOME-SESSION-KEYMETRICS-V1
+Status: DONE (merged in PR #79)
+
+## DONE — TC-IOS-STATS-BIZSUM-V1
+ID: TC-IOS-STATS-BIZSUM-V1
+Status: DONE (merged in PR #81)
+
+## DONE — TC-IOS-HOME-TODAY-BANNER-V1
+ID: TC-IOS-HOME-TODAY-BANNER-V1
+Status: DONE (merged in PR #83)
+
+## DONE — TC-IOS-STATS-EFFICIENCY-V1
+ID: TC-IOS-STATS-EFFICIENCY-V1
+Status: DONE (merged in PR #85)
+
+## DONE — TC-IOS-HOME-SESSION-CARD-SCAN-V1
+ID: TC-IOS-HOME-SESSION-CARD-SCAN-V1
+Status: DONE (merged in PR #87)
+
+## ACTIVE — TC-IOS-STATS-AVGSELRATE-EXCLUDE-ALLTAKE-V1
+ID: TC-IOS-STATS-AVGSELRATE-EXCLUDE-ALLTAKE-V1
+Title: Stats 平均选片率剔除全要单 + 全要占比
+AssignedTo: Executor
+
+Goal:
+- 平均选片率剔除“全要/打包单”，并显示全要占比（与范围切换同步）。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Definitions:
+- 全要单：shotCount>0 且 selectedCount==shotCount。
+- 平均选片率样本：shotCount>0 且 selectedCount!=nil 且 selectedCount<shotCount。
+- avgPickRate = mean(selectedCount/shotCount) over 样本；样本数=0 → `--`。
+- 全要占比：allTakeCount / (allTakeCount + avgSampleCount)；分母=0 → `--`。
+- 范围过滤：复用 Stats 现有 今日/本周/本月 口径（按 shootingStart 归属范围，ISO 周一规则）。
+
+Acceptance:
+- “平均选片率”一行改为：`平均选片率 XX%（全要 YY%）`，不可算显示 `--`。
+- 两个百分比均为 0%–100% 且随范围切换同步变化。
+- 不引入 raw log；不改 session 边界语义与 Home 排序/编号语义。
+
+Manual Verification:
+- A：样本数=0 → 平均选片率显示 `--`。
+- B：存在全要单时：全要占比 >0，平均选片率不被 100% 拉高。
+- C：切换 今日/本周/本月 → 两个值同步变化（数据足够时）。
+- D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
 - STOP
