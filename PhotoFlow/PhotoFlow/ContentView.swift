@@ -392,7 +392,12 @@ struct ContentView: View {
                 result.selecting += selecting
             }
         }
+        let count = filteredSessions.count
+        let avgTotal = count > 0 ? totals.total / Double(count) : nil
+        let selectShare = totals.total > 0 ? totals.selecting / totals.total : nil
         let prefix = statsRange.title
+        let avgText = avgTotal.map { format($0) } ?? "--"
+        let shareText = selectShare.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
         return VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
                 ForEach(StatsRange.allCases, id: \.self) { range in
@@ -401,10 +406,12 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
-            Text("\(prefix)单数 \(filteredSessions.count)")
+            Text("\(prefix)单数 \(count)")
             Text("\(prefix)总时长 \(format(totals.total))")
             Text("\(prefix)拍摄时长 \(format(totals.shooting))")
             Text("\(prefix)选片时长 \(format(totals.selecting))")
+            Text("\(prefix)平均每单总时长 \(avgText)")
+            Text("\(prefix)选片占比 \(shareText)")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
