@@ -173,9 +173,10 @@ struct SessionMeta: Codable, Equatable {
     var amountCents: Int?
     var shotCount: Int?
     var selectedCount: Int?
+    var reviewNote: String?
 
     var isEmpty: Bool {
-        amountCents == nil && shotCount == nil && selectedCount == nil
+        amountCents == nil && shotCount == nil && selectedCount == nil && reviewNote == nil
     }
 }
 
@@ -297,6 +298,7 @@ struct ContentView: View {
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
     @State private var draftSelected = ""
+    @State private var draftReviewNote = ""
     @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
 #if DEBUG
@@ -334,6 +336,10 @@ struct ContentView: View {
                             .keyboardType(.numberPad)
                         TextField("选片张数", text: $draftSelected)
                             .keyboardType(.numberPad)
+                    }
+                    Section("复盘备注") {
+                        TextEditor(text: $draftReviewNote)
+                            .frame(minHeight: 100)
                     }
                 }
                 .navigationTitle("编辑指标")
@@ -410,6 +416,12 @@ struct ContentView: View {
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
+                            }
+                            if let notePreview = metaNotePreview(for: summary.id) {
+                                Text(notePreview)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
                             }
                             ForEach(timelineRows(for: summary), id: \.label) { row in
                                 HStack {
@@ -841,6 +853,7 @@ struct ContentView: View {
         draftAmount = meta.amountCents.map(amountText(from:)) ?? ""
         draftShotCount = meta.shotCount.map(String.init) ?? ""
         draftSelected = meta.selectedCount.map(String.init) ?? ""
+        draftReviewNote = meta.reviewNote ?? ""
         editingSession = EditingSession(id: sessionId)
     }
 
@@ -848,7 +861,8 @@ struct ContentView: View {
         let meta = SessionMeta(
             amountCents: parseAmountCents(from: draftAmount),
             shotCount: parseInt(from: draftShotCount),
-            selectedCount: parseInt(from: draftSelected)
+            selectedCount: parseInt(from: draftSelected),
+            reviewNote: normalizedNote(from: draftReviewNote)
         )
         metaStore.update(meta, for: sessionId)
     }
@@ -872,6 +886,12 @@ struct ContentView: View {
             parts.append("选\(selected)张")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func metaNotePreview(for sessionId: String) -> String? {
+        guard let note = metaStore.meta(for: sessionId).reviewNote else { return nil }
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func formatAmount(cents: Int) -> String {
@@ -902,6 +922,11 @@ struct ContentView: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let value = Int(trimmed), value >= 0 else { return nil }
         return value
+    }
+
+    private func normalizedNote(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func sessionDurations(for summary: SessionSummary) -> (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval?) {
