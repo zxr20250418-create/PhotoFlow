@@ -136,13 +136,17 @@ Status: DONE (merged in PR #81)
 ID: TC-IOS-HOME-TODAY-BANNER-V1
 Status: DONE (merged in PR #83)
 
-## ACTIVE — TC-IOS-STATS-EFFICIENCY-V1
+## DONE — TC-IOS-STATS-EFFICIENCY-V1
 ID: TC-IOS-STATS-EFFICIENCY-V1
-Title: Stats 效率指标（RPH + 平均选片率）
+Status: DONE (merged in PR #85)
+
+## ACTIVE — TC-IOS-HOME-SESSION-CARD-SCAN-V1
+ID: TC-IOS-HOME-SESSION-CARD-SCAN-V1
+Title: Home 会话卡片摘要增强（更好扫）
 AssignedTo: Executor
 
 Goal:
-- 在 Stats BizSum 区域新增 RPH 与平均选片率指标，随范围切换同步变化。
+- 强化 Home 会话卡片扫描性：时间挪到标题、金额置顶并显示 RPH、移除事件明细列表。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -152,24 +156,17 @@ Guardrails:
 - 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
 - PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
-Definitions:
-- 收入：BizSum 同口径（amount 求和；缺失忽略）。
-- 总时长：Stats 现有汇总中的总时长（total duration）。
-- RPH：收入合计 / (总时长小时数)；总时长=0 或收入缺失 → `--`。
-- 每单选片率：对每个 session，若 shotCount>0 且 selectedCount 有值，则 rate = selectedCount/shotCount。
-- 平均选片率：mean(rate) over valid sessions；有效样本数=0 → `--`。
-
 Acceptance:
-- BizSum 区域新增两行：
-  - RPH：`¥X/小时` 或 `¥X/h`（不可算显示 `--`）。
-  - 平均选片率：`XX%`（不可算显示 `--`）。
-- 两项指标随 今日/本周/本月 切换同步变化。
-- 不改变 session 边界语义，不引入 raw log，不改 Home 排序/编号语义。
+- Header 行左侧：`第N单 HH:mm`（时间只显示到分，不显示秒）。
+- Header 行右侧：`¥金额  RPH ¥xxx/小时`（金额主，RPH 次要；不可算显示 `--`）。
+- 原摘要行去掉金额，仅保留张数/选片率：`拍5张 · 选1张 · 选片率20%`。
+- 移除事件明细列表（拍摄开始/选片开始/结束）默认展示。
+- 备注预览保留（若有）。
 
 Manual Verification:
-- A：N=0 时两项显示 `--`。
-- B：N>0 且总时长>0 时，RPH 为正且合理；平均选片率在 0%–100%。
-- C：切换 今日/本周/本月，两项指标同步变化（数据足够时）。
+- A：Header 行满足“第N单 HH:mm / 右侧 ¥金额 + RPH”。
+- B：金额不再出现在中部摘要行；仅剩张数与选片率。
+- C：事件明细不再显示在 Home 卡片内。
 - D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
