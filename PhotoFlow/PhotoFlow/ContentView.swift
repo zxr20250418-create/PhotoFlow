@@ -169,6 +169,54 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 }
 
+struct SessionMeta: Codable, Equatable {
+    var amountCents: Int?
+    var isPaid: Bool?
+    var peopleCount: Int?
+    var selectedCount: Int?
+
+    var isEmpty: Bool {
+        amountCents == nil && isPaid == nil && peopleCount == nil && selectedCount == nil
+    }
+}
+
+@MainActor
+final class SessionMetaStore: ObservableObject {
+    @Published private(set) var metas: [String: SessionMeta] = [:]
+    private let storageKey = "pf_session_meta_v1"
+    private let defaults = UserDefaults.standard
+
+    init() {
+        load()
+    }
+
+    func meta(for id: String) -> SessionMeta {
+        metas[id] ?? SessionMeta()
+    }
+
+    func update(_ meta: SessionMeta, for id: String) {
+        if meta.isEmpty {
+            metas.removeValue(forKey: id)
+        } else {
+            metas[id] = meta
+        }
+        save()
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) else {
+            return
+        }
+        metas = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(metas) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}
+
 struct ContentView: View {
     enum Stage {
         case idle
@@ -218,6 +266,29 @@ struct ContentView: View {
         }
     }
 
+    enum PaidStatus: String, CaseIterable, Identifiable {
+        case unknown
+        case paid
+        case unpaid
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .unknown:
+                return "未设置"
+            case .paid:
+                return "已收"
+            case .unpaid:
+                return "未收"
+            }
+        }
+    }
+
+    struct EditingSession: Identifiable {
+        let id: String
+    }
+
     private enum StatsRange: String, CaseIterable {
         case today
         case week
@@ -241,6 +312,12 @@ struct ContentView: View {
     @State private var now = Date()
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
+    @StateObject private var metaStore: SessionMetaStore
+    @State private var editingSession: EditingSession?
+    @State private var draftAmount = ""
+    @State private var draftPeople = ""
+    @State private var draftSelected = ""
+    @State private var draftPaidStatus: PaidStatus = .unknown
     @State private var statsRange: StatsRange = .today
 #if DEBUG
     @State private var showDebugPanel = false
@@ -250,6 +327,7 @@ struct ContentView: View {
 
     init(syncStore: WatchSyncStore) {
         self.syncStore = syncStore
+        _metaStore = StateObject(wrappedValue: SessionMetaStore())
     }
 
     var body: some View {
@@ -265,6 +343,39 @@ struct ContentView: View {
         }
         .alert(item: $activeAlert) { alert in
             Alert(title: Text(alert.message))
+        }
+        .sheet(item: $editingSession) { session in
+            NavigationStack {
+                Form {
+                    Section {
+                        TextField("金额", text: $draftAmount)
+                            .keyboardType(.decimalPad)
+                        Picker("收款", selection: $draftPaidStatus) {
+                            ForEach(PaidStatus.allCases) { status in
+                                Text(status.title).tag(status)
+                            }
+                        }
+                        TextField("人数", text: $draftPeople)
+                            .keyboardType(.numberPad)
+                        TextField("选片张数", text: $draftSelected)
+                            .keyboardType(.numberPad)
+                    }
+                }
+                .navigationTitle("编辑指标")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") {
+                            editingSession = nil
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            saveMeta(for: session.id)
+                            editingSession = nil
+                        }
+                    }
+                }
+            }
         }
         .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
@@ -307,12 +418,24 @@ struct ContentView: View {
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
                                 }
+                                Button(action: { startEditingMeta(for: summary.id) }) {
+                                    Image(systemName: "pencil")
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
                             }
                             Text(sessionDurationSummary(for: summary))
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                                 .lineLimit(1)
+                            if let metaText = metaSummary(for: summary.id) {
+                                Text(metaText)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
                             ForEach(timelineRows(for: summary), id: \.label) { row in
                                 HStack {
                                     Text(formatTimelineTime(row.time))
@@ -720,6 +843,95 @@ struct ContentView: View {
             parts.append("选 \(format(selecting))")
         }
         return parts.joined(separator: "  ")
+    }
+
+    private func startEditingMeta(for sessionId: String) {
+        let meta = metaStore.meta(for: sessionId)
+        draftAmount = meta.amountCents.map(amountText(from:)) ?? ""
+        draftPeople = meta.peopleCount.map(String.init) ?? ""
+        draftSelected = meta.selectedCount.map(String.init) ?? ""
+        draftPaidStatus = paidStatus(from: meta.isPaid)
+        editingSession = EditingSession(id: sessionId)
+    }
+
+    private func saveMeta(for sessionId: String) {
+        let meta = SessionMeta(
+            amountCents: parseAmountCents(from: draftAmount),
+            isPaid: paidValue(from: draftPaidStatus),
+            peopleCount: parseInt(from: draftPeople),
+            selectedCount: parseInt(from: draftSelected)
+        )
+        metaStore.update(meta, for: sessionId)
+    }
+
+    private func metaSummary(for sessionId: String) -> String? {
+        let meta = metaStore.meta(for: sessionId)
+        var parts: [String] = []
+        if let amountCents = meta.amountCents {
+            parts.append(formatAmount(cents: amountCents))
+        }
+        if let people = meta.peopleCount {
+            parts.append("\(people)人")
+        }
+        if let selected = meta.selectedCount {
+            parts.append("\(selected)张")
+        }
+        if let isPaid = meta.isPaid {
+            parts.append(isPaid ? "已收" : "未收")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func formatAmount(cents: Int) -> String {
+        if cents % 100 == 0 {
+            return "¥\(cents / 100)"
+        }
+        let value = Double(cents) / 100
+        return String(format: "¥%.2f", value)
+    }
+
+    private func amountText(from cents: Int) -> String {
+        if cents % 100 == 0 {
+            return "\(cents / 100)"
+        }
+        let value = Double(cents) / 100
+        return String(format: "%.2f", value)
+    }
+
+    private func parseAmountCents(from text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let normalized = trimmed.replacingOccurrences(of: ",", with: "")
+        guard let value = Double(normalized) else { return nil }
+        return Int((value * 100).rounded())
+    }
+
+    private func parseInt(from text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let value = Int(trimmed), value >= 0 else { return nil }
+        return value
+    }
+
+    private func paidStatus(from value: Bool?) -> PaidStatus {
+        switch value {
+        case .some(true):
+            return .paid
+        case .some(false):
+            return .unpaid
+        case .none:
+            return .unknown
+        }
+    }
+
+    private func paidValue(from status: PaidStatus) -> Bool? {
+        switch status {
+        case .paid:
+            return true
+        case .unpaid:
+            return false
+        case .unknown:
+            return nil
+        }
     }
 
     private func sessionDurations(for summary: SessionSummary) -> (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval?) {
