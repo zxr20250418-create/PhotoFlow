@@ -352,13 +352,25 @@ struct ContentView: View {
     }
 
     private var statsView: some View {
-        VStack {
-            Text("Stats")
-                .font(.title3)
-                .fontWeight(.semibold)
-                .foregroundStyle(.secondary)
+        let todaysSessions = sessionSummaries.filter { summary in
+            guard let shootingStart = summary.shootingStart else { return false }
+            return Calendar.current.isDateInToday(shootingStart)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        let totals = todaysSessions.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, summary in
+            let durations = sessionDurations(for: summary)
+            result.total += durations.total
+            result.shooting += durations.shooting
+            if let selecting = durations.selecting {
+                result.selecting += selecting
+            }
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("今日单数 \(todaysSessions.count)")
+            Text("今日总时长 \(format(totals.total))")
+            Text("今日拍摄时长 \(format(totals.shooting))")
+            Text("今日选片时长 \(format(totals.selecting))")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
     }
 
