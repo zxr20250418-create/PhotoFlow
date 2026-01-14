@@ -171,12 +171,11 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
 struct SessionMeta: Codable, Equatable {
     var amountCents: Int?
-    var isPaid: Bool?
-    var peopleCount: Int?
+    var shotCount: Int?
     var selectedCount: Int?
 
     var isEmpty: Bool {
-        amountCents == nil && isPaid == nil && peopleCount == nil && selectedCount == nil
+        amountCents == nil && shotCount == nil && selectedCount == nil
     }
 }
 
@@ -266,25 +265,6 @@ struct ContentView: View {
         }
     }
 
-    enum PaidStatus: String, CaseIterable, Identifiable {
-        case unknown
-        case paid
-        case unpaid
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .unknown:
-                return "未设置"
-            case .paid:
-                return "已收"
-            case .unpaid:
-                return "未收"
-            }
-        }
-    }
-
     struct EditingSession: Identifiable {
         let id: String
     }
@@ -315,9 +295,9 @@ struct ContentView: View {
     @StateObject private var metaStore: SessionMetaStore
     @State private var editingSession: EditingSession?
     @State private var draftAmount = ""
-    @State private var draftPeople = ""
+    @State private var draftShotCount = ""
     @State private var draftSelected = ""
-    @State private var draftPaidStatus: PaidStatus = .unknown
+    @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
 #if DEBUG
     @State private var showDebugPanel = false
@@ -350,12 +330,7 @@ struct ContentView: View {
                     Section {
                         TextField("金额", text: $draftAmount)
                             .keyboardType(.decimalPad)
-                        Picker("收款", selection: $draftPaidStatus) {
-                            ForEach(PaidStatus.allCases) { status in
-                                Text(status.title).tag(status)
-                            }
-                        }
-                        TextField("人数", text: $draftPeople)
+                        TextField("拍摄张数", text: $draftShotCount)
                             .keyboardType(.numberPad)
                         TextField("选片张数", text: $draftSelected)
                             .keyboardType(.numberPad)
@@ -656,6 +631,7 @@ struct ContentView: View {
             return
         }
         let now = Date()
+        let endedSessionId = targetStage == .ended ? activeSessionIndex().map { sessionSummaries[$0].id } : nil
         switch targetStage {
         case .shooting:
             session = Session()
@@ -672,6 +648,12 @@ struct ContentView: View {
             break
         }
         updateSessionSummary(for: targetStage, at: now)
+        if targetStage == .ended {
+            let sessionId = endedSessionId ?? sessionIdForTimestamp(now)
+            if let sessionId {
+                promptSettlementIfNeeded(for: sessionId)
+            }
+        }
         syncStageState(now: now)
     }
 
@@ -691,7 +673,11 @@ struct ContentView: View {
         case "end":
             session.endedAt = timestamp
             stage = .ended
+            let endedSessionId = activeSessionIndex().map { sessionSummaries[$0].id }
             updateSessionSummary(for: .ended, at: timestamp)
+            if let sessionId = endedSessionId ?? sessionIdForTimestamp(timestamp) {
+                promptSettlementIfNeeded(for: sessionId)
+            }
         default:
             break
         }
@@ -795,6 +781,11 @@ struct ContentView: View {
         return recentEndedSessionIndex(for: timestamp)
     }
 
+    private func sessionIdForTimestamp(_ timestamp: Date) -> String? {
+        guard let index = targetSessionIndex(for: timestamp) else { return nil }
+        return sessionSummaries[index].id
+    }
+
     private func recentEndedSessionIndex(for timestamp: Date) -> Int? {
         guard let index = sessionSummaries.indices.last else { return nil }
         guard let endedAt = sessionSummaries[index].endedAt else { return nil }
@@ -848,20 +839,24 @@ struct ContentView: View {
     private func startEditingMeta(for sessionId: String) {
         let meta = metaStore.meta(for: sessionId)
         draftAmount = meta.amountCents.map(amountText(from:)) ?? ""
-        draftPeople = meta.peopleCount.map(String.init) ?? ""
+        draftShotCount = meta.shotCount.map(String.init) ?? ""
         draftSelected = meta.selectedCount.map(String.init) ?? ""
-        draftPaidStatus = paidStatus(from: meta.isPaid)
         editingSession = EditingSession(id: sessionId)
     }
 
     private func saveMeta(for sessionId: String) {
         let meta = SessionMeta(
             amountCents: parseAmountCents(from: draftAmount),
-            isPaid: paidValue(from: draftPaidStatus),
-            peopleCount: parseInt(from: draftPeople),
+            shotCount: parseInt(from: draftShotCount),
             selectedCount: parseInt(from: draftSelected)
         )
         metaStore.update(meta, for: sessionId)
+    }
+
+    private func promptSettlementIfNeeded(for sessionId: String) {
+        guard lastPromptedSessionId != sessionId else { return }
+        lastPromptedSessionId = sessionId
+        startEditingMeta(for: sessionId)
     }
 
     private func metaSummary(for sessionId: String) -> String? {
@@ -870,14 +865,11 @@ struct ContentView: View {
         if let amountCents = meta.amountCents {
             parts.append(formatAmount(cents: amountCents))
         }
-        if let people = meta.peopleCount {
-            parts.append("\(people)人")
+        if let shot = meta.shotCount {
+            parts.append("拍\(shot)张")
         }
         if let selected = meta.selectedCount {
-            parts.append("\(selected)张")
-        }
-        if let isPaid = meta.isPaid {
-            parts.append(isPaid ? "已收" : "未收")
+            parts.append("选\(selected)张")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -910,28 +902,6 @@ struct ContentView: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let value = Int(trimmed), value >= 0 else { return nil }
         return value
-    }
-
-    private func paidStatus(from value: Bool?) -> PaidStatus {
-        switch value {
-        case .some(true):
-            return .paid
-        case .some(false):
-            return .unpaid
-        case .none:
-            return .unknown
-        }
-    }
-
-    private func paidValue(from status: PaidStatus) -> Bool? {
-        switch status {
-        case .paid:
-            return true
-        case .unpaid:
-            return false
-        case .unknown:
-            return nil
-        }
     }
 
     private func sessionDurations(for summary: SessionSummary) -> (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval?) {
