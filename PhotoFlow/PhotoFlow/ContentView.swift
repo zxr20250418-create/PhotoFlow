@@ -605,19 +605,36 @@ struct ContentView: View {
             let revenue = Double(bizTotals.amountCents) / 100
             return String(format: "¥%.0f/小时", revenue / hours)
         }()
-        let avgSelectRateText: String = {
+        let (avgSelectRateText, allTakeShareText): (String, String) = {
             var sum: Double = 0
-            var validCount = 0
+            var avgCount = 0
+            var allTakeCount = 0
             for summary in filteredSessions {
                 let meta = metaStore.meta(for: summary.id)
                 guard let shot = meta.shotCount, shot > 0,
                       let selected = meta.selectedCount else { continue }
+                if selected > shot {
+                    continue
+                }
+                if selected == shot {
+                    allTakeCount += 1
+                    continue
+                }
                 sum += Double(selected) / Double(shot)
-                validCount += 1
+                avgCount += 1
             }
-            guard validCount > 0 else { return "--" }
-            let avg = sum / Double(validCount)
-            return "\(Int((avg * 100).rounded()))%"
+            let avgText: String
+            if avgCount > 0 {
+                let avg = sum / Double(avgCount)
+                avgText = "\(Int((avg * 100).rounded()))%"
+            } else {
+                avgText = "--"
+            }
+            let denom = allTakeCount + avgCount
+            let shareText = denom > 0
+                ? "\(Int((Double(allTakeCount) / Double(denom) * 100).rounded()))%"
+                : "--"
+            return (avgText, shareText)
         }()
         return VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
@@ -642,7 +659,7 @@ struct ContentView: View {
             Text("选片张数合计 \(selectedText)")
             Text("选片率 \(selectRateText)")
             Text("RPH \(rphText)")
-            Text("平均选片率 \(avgSelectRateText)")
+            Text("平均选片率 \(avgSelectRateText)（全要 \(allTakeShareText)）")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
@@ -987,15 +1004,28 @@ struct ContentView: View {
     private func metaSummary(for sessionId: String) -> String? {
         let meta = metaStore.meta(for: sessionId)
         var parts: [String] = []
-        if let shot = meta.shotCount {
+        let shot = meta.shotCount
+        let selected = meta.selectedCount
+        if let shot {
             parts.append("拍\(shot)张")
         }
-        if let selected = meta.selectedCount {
+        if let shot, let selected {
+            if selected > shot {
+                return parts.isEmpty ? nil : parts.joined(separator: " · ")
+            }
+            if shot > 0 && selected == shot {
+                parts.append("全要")
+                return parts.joined(separator: " · ")
+            }
             parts.append("选\(selected)张")
+            if shot > 0 && selected < shot {
+                let rate = Int((Double(selected) / Double(shot) * 100).rounded())
+                parts.append("选片率\(rate)%")
+            }
+            return parts.joined(separator: " · ")
         }
-        if let shot = meta.shotCount, shot > 0, let selected = meta.selectedCount {
-            let rate = Int((Double(selected) / Double(shot) * 100).rounded())
-            parts.append("选片率\(rate)%")
+        if shot == nil, let selected {
+            parts.append("选\(selected)张")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
