@@ -54,38 +54,46 @@ Status: DONE (merged in PR #61)
 ID: TC-WIDGET-STATE-WRITE-FIX
 Status: PAUSED (spec alignment priority)
 
-## ACTIVE — TC-IOS-HOME-TIMELINE-V1
+## ABANDONED — TC-IOS-HOME-TIMELINE-V1
 ID: TC-IOS-HOME-TIMELINE-V1
-Title: iOS 首页会话时间线（按时间早→晚；显示从下到上）
+Status: ABANDONED (PR #64 closed; raw event log direction rejected)
+
+## ACTIVE — TC-IOS-HOME-TIMELINE-SPEC-LOCK
+ID: TC-IOS-HOME-TIMELINE-SPEC-LOCK
+Title: iOS 首页时间线会话边界/聚合规则锁定（docs-only）
 AssignedTo: Executor
 
 Goal:
-- 在 iOS 首页加入一个“会话时间线”区块，展示 stage 变化记录（拍摄/选片/停止）与时间戳。
-- 排序规则：按时间从早到晚（ascending），但视觉呈现从下到上（最新在上方）。
-- 不修改 watch/widget/config，避免牵连手表端。
+- 锁定会话级时间线的边界与聚合规则，避免 raw event log 刷屏。
+- 如发现 PR #64 未关闭或有回滚需求，先处置并在 exec.md 记录。
 
 Scope (Allowed files ONLY):
-- 仅 iOS 目录：PhotoFlow/PhotoFlow/**（iPhone app Swift files）
+- docs/SPEC.md
 - docs/AGENTS/exec.md（追加）
 
 Forbidden:
 - 禁止修改：
+  - PhotoFlow/PhotoFlow/**
   - PhotoFlow/PhotoFlowWatch Watch App/**
   - PhotoFlow/PhotoFlowWatchWidget/**
   - *.plist / *.entitlements / project.pbxproj
 - 不新增 target/build settings
-- 不重构现有架构（只加一个轻量 timeline）
+- 不触碰 watch/widget/config
 
 Acceptance:
-- 首页出现 timeline 区块（标题：例如“今日时间线/会话时间线”）
-- 记录项包含：时间（HH:mm:ss 或 HH:mm）、stage 中文（拍摄/选片/停止）、来源（手机/手表可选，若暂无则先留空）
-- 排序：数据按时间升序；UI 显示最新在上（通过 reversed/rotation 等实现均可）
-- 运行护栏：bash scripts/ios_safe.sh --clean-deriveddata PASS
-- xcodebuild（ios_safe 自带）通过
-- exec.md 记录：实现方式、排序逻辑、手动验证 PASS
+- 时间线展示单位=会话（Session），不是 raw event log。
+- 每会话一个卡片/cell；会话内按早→晚；会话之间最新在上（允许 reversed 渲染）。
+- 会话内仅展示关键节点（建议≤3条）：拍摄开始/选片开始/结束。
+- 重复/乱序事件必须去重/合并：只更新节点时间或忽略，不得新增行。
+- 记录 PR #64 处置结论（关闭/无需回滚）在 exec.md。
+
+Guardrails:
+- 默认禁止修改 watch/widget 代码、Info.plist、project.pbxproj、entitlements、targets/appex 配置。
+- 任何必须触碰配置的工作必须单独开“配置卡”，并贴 preflight 输出。
+- 每次提交/PR 前必须跑并贴结果：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 StopCondition:
-- PR opened to main（不合并）
+- docs-only PR opened to main（不合并）
 - CI green
 - exec.md 更新
 - STOP
