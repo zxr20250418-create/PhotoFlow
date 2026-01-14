@@ -255,15 +255,17 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(Array(sessionSummaries.reversed().enumerated()), id: \.element.id) { index, summary in
+                    let displaySessions = Array(sessionSummaries.reversed())
+                    ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
+                        let total = displaySessions.count
+                        let order = total - displayIndex
                         VStack(alignment: .leading, spacing: 4) {
-                            let displayIndex = index + 1
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text("第\(displayIndex)单")
+                            HStack(alignment: .firstTextBaseline) {
+                                Text("第\(order)单")
                                     .font(.subheadline)
                                     .fontWeight(.semibold)
-                                Spacer(minLength: 0)
-                                if let startTime = sessionStartTime(for: summary) {
+                                Spacer(minLength: 8)
+                                if let startTime = summary.shootingStart ?? sessionStartTime(for: summary) {
                                     Text(formatTimelineTime(startTime))
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
