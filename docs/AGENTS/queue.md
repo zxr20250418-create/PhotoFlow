@@ -250,7 +250,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-DATA-QUALITY-V2
+## DONE — TC-IOS-DATA-QUALITY-V2
+Status: DONE (merged in PR #106)
 ID: TC-IOS-DATA-QUALITY-V2
 Title: Stats 数据质量（缺失/异常提示，支持直达编辑）
 AssignedTo: Executor
