@@ -605,10 +605,12 @@ struct ContentView: View {
             let revenue = Double(bizTotals.amountCents) / 100
             return String(format: "¥%.0f/小时", revenue / hours)
         }()
-        let (avgSelectRateText, allTakeShareText): (String, String) = {
-            var sum: Double = 0
+        let (avgSelectRateText, allTakeShareText, weightedPickRateText): (String, String, String) = {
+            var sumRatio: Double = 0
             var avgCount = 0
             var allTakeCount = 0
+            var sumSelected = 0
+            var sumShot = 0
             for summary in filteredSessions {
                 let meta = metaStore.meta(for: summary.id)
                 guard let shot = meta.shotCount, shot > 0,
@@ -620,12 +622,14 @@ struct ContentView: View {
                     allTakeCount += 1
                     continue
                 }
-                sum += Double(selected) / Double(shot)
+                sumRatio += Double(selected) / Double(shot)
                 avgCount += 1
+                sumSelected += selected
+                sumShot += shot
             }
             let avgText: String
             if avgCount > 0 {
-                let avg = sum / Double(avgCount)
+                let avg = sumRatio / Double(avgCount)
                 avgText = "\(Int((avg * 100).rounded()))%"
             } else {
                 avgText = "--"
@@ -634,7 +638,10 @@ struct ContentView: View {
             let shareText = denom > 0
                 ? "\(Int((Double(allTakeCount) / Double(denom) * 100).rounded()))%"
                 : "--"
-            return (avgText, shareText)
+            let weightedText = sumShot > 0
+                ? "\(Int((Double(sumSelected) / Double(sumShot) * 100).rounded()))%"
+                : "--"
+            return (avgText, shareText, weightedText)
         }()
         return VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
@@ -659,7 +666,8 @@ struct ContentView: View {
             Text("选片张数合计 \(selectedText)")
             Text("选片率 \(selectRateText)")
             Text("RPH \(rphText)")
-            Text("平均选片率 \(avgSelectRateText)（全要 \(allTakeShareText)）")
+            Text("平均选片率（按单） \(avgSelectRateText)（全要 \(allTakeShareText)）")
+            Text("选片率（按张） \(weightedPickRateText)")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
