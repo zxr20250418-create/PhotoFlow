@@ -144,13 +144,17 @@ Status: DONE (merged in PR #85)
 ID: TC-IOS-HOME-SESSION-CARD-SCAN-V1
 Status: DONE (merged in PR #87)
 
-## ACTIVE — TC-IOS-STATS-AVGSELRATE-EXCLUDE-ALLTAKE-V1
+## DONE — TC-IOS-STATS-AVGSELRATE-EXCLUDE-ALLTAKE-V1
 ID: TC-IOS-STATS-AVGSELRATE-EXCLUDE-ALLTAKE-V1
-Title: Stats 平均选片率剔除全要单 + 全要占比
+Status: DONE (merged in PR #89)
+
+## ACTIVE — TC-IOS-STATS-TOP3-V1
+ID: TC-IOS-STATS-TOP3-V1
+Title: Stats Top 3（收入 / RPH / 用时）
 AssignedTo: Executor
 
 Goal:
-- 平均选片率剔除“全要/打包单”，并显示全要占比（与范围切换同步）。
+- Stats 页面新增 “Top 3” 区块：收入 Top3 / RPH Top3 / 用时 Top3，随范围切换同步变化。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -161,22 +165,23 @@ Guardrails:
 - PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 Definitions:
-- 全要单：shotCount>0 且 selectedCount==shotCount。
-- 平均选片率样本：shotCount>0 且 selectedCount!=nil 且 selectedCount<shotCount。
-- avgPickRate = mean(selectedCount/shotCount) over 样本；样本数=0 → `--`。
-- 全要占比：allTakeCount / (allTakeCount + avgSampleCount)；分母=0 → `--`。
 - 范围过滤：复用 Stats 现有 今日/本周/本月 口径（按 shootingStart 归属范围，ISO 周一规则）。
+- 收入 Top3：仅纳入 amount 有值的 session。
+- RPH Top3：仅纳入 amount 有值 且 totalSeconds>0 的 session。
+- 用时 Top3：仅纳入 totalSeconds>0 的 session。
+- 排序：降序取前 3；不足 3 条显示实际条数或“暂无足够数据”。
 
 Acceptance:
-- “平均选片率”一行改为：`平均选片率 XX%（全要 YY%）`，不可算显示 `--`。
-- 两个百分比均为 0%–100% 且随范围切换同步变化。
-- 不引入 raw log；不改 session 边界语义与 Home 排序/编号语义。
+- Stats 增加 “Top 3” 区块，分三组：收入 / RPH / 用时。
+- 每条一行展示（示例：`第N单 HH:mm  ¥xxx` / `RPH ¥xxx/小时` / `用时 mm:ss`）。
+- Top 3 随 今日/本周/本月 切换同步变化。
 
 Manual Verification:
-- A：样本数=0 → 平均选片率显示 `--`。
-- B：存在全要单时：全要占比 >0，平均选片率不被 100% 拉高。
-- C：切换 今日/本周/本月 → 两个值同步变化（数据足够时）。
-- D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+- A：切换 今日/本周/本月 → Top3 随范围变化（数据足够时）。
+- B：收入 Top3 排序正确（高→低）。
+- C：RPH Top3 排序正确（高→低）。
+- D：用时 Top3 排序正确（长→短）。
+- E：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
