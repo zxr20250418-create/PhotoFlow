@@ -880,7 +880,8 @@ struct ContentView: View {
             let barSegments = segments.map { ($0.1.timeIntervalSince($0.0), $0.2) }
             return (workTotal, idleTotal, utilization, barSegments)
         }()
-        return VStack(alignment: .leading, spacing: 8) {
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
                 ForEach(StatsRange.allCases, id: \.self) { range in
                     Text(range.title).tag(range)
@@ -1013,9 +1014,10 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding()
     }
 
     private var bottomBar: some View {
