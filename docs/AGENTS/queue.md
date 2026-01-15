@@ -292,3 +292,65 @@ StopCondition:
 - CI green
 - exec.md 更新（若有）
 - STOP
+
+## DONE — TC-IOS-DUTY-MAINBUTTON-V1
+Status: DONE (merged in PR #106 / #107; duty control + queue advance)
+ID: TC-IOS-DUTY-MAINBUTTON-V1
+Title: 上班并入中间主按钮
+AssignedTo: Executor
+
+Goal:
+- 未上班时中间按钮显示“上班”；上班后显示下一步动作；下班入口移到长按菜单。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
+## ACTIVE — TC-IOS-SHIFT-CALENDAR-V1
+ID: TC-IOS-SHIFT-CALENDAR-V1
+Title: 月历记录（每日收入 + 上班时长）& 上下班时间可补记/更正
+AssignedTo: Executor
+
+Goal:
+- 提供月历视图：每天格子显示“收入 + 上班时长”。
+- 支持忘记下班/时间不准的补记与更正（可编辑上下班时间）。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Requirements:
+- 新增 ShiftRecordStore（UserDefaults JSON）：records[YYYY-MM-DD] = {startAt, endAt}。
+- setDuty(true) 写入 startAt（空则写 now）；setDuty(false) 写入 endAt=now；可双写旧 pf_shift_start/pf_shift_end。
+- 上班时长按日裁剪：dayWindow = [day 00:00, nextDay 00:00]。
+- duration = max(0, min(endAt ?? now, dayEnd) - max(startAt, dayStart))。
+- Stats 顶部按钮“记录（月历）”进入 CalendarView（不新增 tab）。
+- 月历：顶部年月切换，网格显示“收入 + 上班时长”，进行中显示角标。
+- 本月汇总：本月收入 + 本月上班时长。
+- 选中日明细：上班/下班/上班时长 + 编辑与补下班。
+- 浮动“+”：补记当天班次 startAt/endAt。
+- 文案统一“上班时长”（不再用“在岗时间”）。
+
+Acceptance:
+- 进入月历可切月；每天格子显示收入与上班时长。
+- 编辑/补下班后，上班时长与本月汇总实时更新。
+- `bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+
+Manual Verification:
+- A：Stats 点击“记录（月历）”进入月历；可切月。
+- B：月历每天格子显示“收入 + 上班时长”；本月汇总正确。
+- C：编辑某天上班/下班时间后，上班时长与本月汇总联动更新。
+- D：忘点下班时可补下班。
+- E：ios_safe PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
