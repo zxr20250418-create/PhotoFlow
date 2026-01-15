@@ -302,6 +302,8 @@ struct ContentView: View {
     @State private var draftReviewNote = ""
     @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
+    @State private var shiftStart: Date?
+    @State private var shiftEnd: Date?
     @State private var isReviewDigestPresented = false
 #if DEBUG
     @State private var showDebugPanel = false
@@ -312,6 +314,11 @@ struct ContentView: View {
     init(syncStore: WatchSyncStore) {
         self.syncStore = syncStore
         _metaStore = StateObject(wrappedValue: SessionMetaStore())
+        let defaults = UserDefaults.standard
+        let start = defaults.object(forKey: "pf_shift_start") as? Date
+        let end = defaults.object(forKey: "pf_shift_end") as? Date
+        _shiftStart = State(initialValue: start)
+        _shiftEnd = State(initialValue: end)
     }
 
     var body: some View {
@@ -373,9 +380,16 @@ struct ContentView: View {
             Button(syncStore.isOnDuty ? "下班" : "上班") {
                 let nextOnDuty = !syncStore.isOnDuty
                 syncStore.setOnDuty(nextOnDuty)
-                if !nextOnDuty {
+                if nextOnDuty {
+                    shiftStart = now
+                    shiftEnd = nil
+                } else {
+                    shiftEnd = now
                     resetSession()
                 }
+                let defaults = UserDefaults.standard
+                defaults.set(shiftStart, forKey: "pf_shift_start")
+                defaults.set(shiftEnd, forKey: "pf_shift_end")
             }
             .buttonStyle(.bordered)
 
@@ -811,6 +825,61 @@ struct ContentView: View {
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
+        let shiftWindow: (start: Date, end: Date)? = {
+            guard let start = shiftStart else { return nil }
+            let end = shiftEnd ?? (syncStore.isOnDuty ? now : nil)
+            guard let end, end > start else { return nil }
+            return (start, end)
+        }()
+        let mergedWorkIntervals: [(Date, Date)] = {
+            guard let shiftWindow else { return [] }
+            let raw = filteredSessions.compactMap { summary -> (Date, Date)? in
+                guard let start = summary.shootingStart else { return nil }
+                let end = summary.endedAt ?? now
+                return (start, end)
+            }
+            let clipped = raw.compactMap { interval -> (Date, Date)? in
+                let start = max(interval.0, shiftWindow.start)
+                let end = min(interval.1, shiftWindow.end)
+                return end > start ? (start, end) : nil
+            }
+            let sorted = clipped.sorted { $0.0 < $1.0 }
+            var merged: [(Date, Date)] = []
+            for interval in sorted {
+                if let last = merged.last, interval.0 <= last.1 {
+                    let newEnd = max(last.1, interval.1)
+                    merged[merged.count - 1].1 = newEnd
+                } else {
+                    merged.append(interval)
+                }
+            }
+            return merged
+        }()
+        let shiftTotals: (work: TimeInterval, idle: TimeInterval, utilization: String, segments: [(TimeInterval, Bool)]) = {
+            guard let shiftWindow else { return (0, 0, "--", []) }
+            let shiftDuration = shiftWindow.end.timeIntervalSince(shiftWindow.start)
+            guard shiftDuration > 0 else { return (0, 0, "--", []) }
+            let workTotal = mergedWorkIntervals.reduce(0) { $0 + $1.1.timeIntervalSince($1.0) }
+            let idleTotal = max(0, shiftDuration - workTotal)
+            let utilization = "\(Int((workTotal / shiftDuration * 100).rounded()))%"
+            var idleIntervals: [(Date, Date)] = []
+            var cursor = shiftWindow.start
+            for work in mergedWorkIntervals {
+                if work.0 > cursor {
+                    idleIntervals.append((cursor, work.0))
+                }
+                cursor = max(cursor, work.1)
+            }
+            if cursor < shiftWindow.end {
+                idleIntervals.append((cursor, shiftWindow.end))
+            }
+            var segments: [(Date, Date, Bool)] = []
+            segments.append(contentsOf: mergedWorkIntervals.map { ($0.0, $0.1, true) })
+            segments.append(contentsOf: idleIntervals.map { ($0.0, $0.1, false) })
+            segments.sort { $0.0 < $1.0 }
+            let barSegments = segments.map { ($0.1.timeIntervalSince($0.0), $0.2) }
+            return (workTotal, idleTotal, utilization, barSegments)
+        }()
         return VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
                 ForEach(StatsRange.allCases, id: \.self) { range in
@@ -908,6 +977,41 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            Divider()
+            Text("上班时间线")
+                .font(.headline)
+            if statsRange != .today {
+                Text("仅今日显示")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let shiftWindow {
+                let shiftStartText = formatSessionTime(shiftWindow.start)
+                let shiftEndText = shiftEnd == nil ? "进行中" : formatSessionTime(shiftWindow.end)
+                Text("上班 \(shiftStartText) · 下班 \(shiftEndText)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("工作 \(format(shiftTotals.work)) · 空余 \(format(shiftTotals.idle)) · 利用率 \(shiftTotals.utilization)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                GeometryReader { proxy in
+                    HStack(spacing: 0) {
+                        ForEach(Array(shiftTotals.segments.enumerated()), id: \.offset) { _, segment in
+                            let width = proxy.size.width * segment.0 / max(1, shiftWindow.end.timeIntervalSince(shiftWindow.start))
+                            Rectangle()
+                                .fill(segment.1 ? Color.primary : Color.secondary.opacity(0.25))
+                                .frame(width: width)
+                        }
+                    }
+                    .frame(height: 12)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .frame(height: 12)
+            } else {
+                Text("暂无上班记录")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
