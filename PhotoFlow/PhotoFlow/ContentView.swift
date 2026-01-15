@@ -368,7 +368,8 @@ struct ContentView: View {
     }
 
     private var homeView: some View {
-        return VStack(spacing: 16) {
+        return NavigationStack {
+            VStack(spacing: 16) {
             Button(syncStore.isOnDuty ? "下班" : "上班") {
                 let nextOnDuty = !syncStore.isOnDuty
                 syncStore.setOnDuty(nextOnDuty)
@@ -392,7 +393,7 @@ struct ContentView: View {
                     ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
                         let total = displaySessions.count
                         let order = total - displayIndex
-                        VStack(alignment: .leading, spacing: 4) {
+                        let card = VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .firstTextBaseline) {
                                 HStack(spacing: 6) {
                                     Text("第\(order)单")
@@ -415,12 +416,6 @@ struct ContentView: View {
                                         .foregroundStyle(.secondary)
                                         .monospacedDigit()
                                 }
-                                Button(action: { startEditingMeta(for: summary.id) }) {
-                                    Image(systemName: "pencil")
-                                        .font(.caption)
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.secondary)
                             }
                             Text(sessionDurationSummary(for: summary))
                                 .font(.footnote)
@@ -444,6 +439,21 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(.thinMaterial)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                        ZStack(alignment: .topTrailing) {
+                            NavigationLink {
+                                sessionDetailView(summary: summary, order: order)
+                            } label: {
+                                card
+                            }
+                            .buttonStyle(.plain)
+                            Button(action: { startEditingMeta(for: summary.id) }) {
+                                Image(systemName: "pencil")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .padding(6)
+                        }
                     }
                 }
             }
@@ -480,9 +490,123 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
 #endif
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+    }
+
+    private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
+        let meta = metaStore.meta(for: summary.id)
+        let startTime = summary.shootingStart ?? sessionStartTime(for: summary)
+        let timeText = startTime.map(formatSessionTime) ?? "--"
+        let amountText = meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
+        let rphLine = rphText(for: summary)
+        let shot = meta.shotCount
+        let selected = meta.selectedCount
+        let pickRateText: String = {
+            guard let shot = shot, shot > 0, let selected = selected else { return "--" }
+            if selected > shot { return "--" }
+            if selected == shot { return "全要" }
+            let rate = Int((Double(selected) / Double(shot) * 100).rounded())
+            return "\(rate)%"
+        }()
+        let note = meta.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let noteText = note.isEmpty ? "暂无备注" : note
+
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("第\(order)单 \(timeText)")
+                            .font(.headline)
+                        Spacer(minLength: 8)
+                        Text(amountText)
+                            .font(.headline)
+                            .monospacedDigit()
+                    }
+                    Text(rphLine)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("结算信息")
+                        .font(.headline)
+                    HStack {
+                        Text("金额")
+                        Spacer()
+                        Text(amountText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("拍摄张数")
+                        Spacer()
+                        Text(shot.map(String.init) ?? "--")
+                    }
+                    HStack {
+                        Text("选片张数")
+                        Spacer()
+                        Text(selected.map(String.init) ?? "--")
+                    }
+                    HStack {
+                        Text("选片率")
+                        Spacer()
+                        Text(pickRateText)
+                    }
+                }
+                .font(.footnote)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("事件时间线")
+                        .font(.headline)
+                    HStack {
+                        Text("拍摄开始")
+                        Spacer()
+                        Text(summary.shootingStart.map(formatSessionTimeWithSeconds) ?? "--")
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("选片开始")
+                        Spacer()
+                        Text(summary.selectingStart.map(formatSessionTimeWithSeconds) ?? "--")
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("结束")
+                        Spacer()
+                        Text(summary.endedAt.map(formatSessionTimeWithSeconds) ?? "--")
+                            .monospacedDigit()
+                    }
+                }
+                .font(.footnote)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("复盘备注")
+                        .font(.headline)
+                    Text(noteText)
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("复制备注") {
+                        UIPasteboard.general.string = note
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(note.isEmpty)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+        }
+        .navigationTitle("单子详情")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("编辑") {
+                    startEditingMeta(for: summary.id)
+                }
+            }
+        }
     }
 
     private var todayBanner: some View {
@@ -1085,6 +1209,12 @@ struct ContentView: View {
         return formatter
     }()
 
+    private static let sessionTimeWithSecondsFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
     private static let reviewDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
@@ -1093,6 +1223,10 @@ struct ContentView: View {
 
     private func formatSessionTime(_ date: Date) -> String {
         ContentView.sessionTimeFormatter.string(from: date)
+    }
+
+    private func formatSessionTimeWithSeconds(_ date: Date) -> String {
+        ContentView.sessionTimeWithSecondsFormatter.string(from: date)
     }
 
     private func reviewDateText(_ date: Date) -> String {
