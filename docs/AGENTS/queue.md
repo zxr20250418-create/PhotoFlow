@@ -160,13 +160,17 @@ Status: DONE (merged in PR #93)
 ID: TC-IOS-HOME-SESSION-DETAIL-V1
 Status: DONE (merged in PR #95)
 
-## ACTIVE — TC-IOS-DATA-QUALITY-V1
+## ABANDONED — TC-IOS-DATA-QUALITY-V1
 ID: TC-IOS-DATA-QUALITY-V1
-Title: Stats 数据质量（缺失/异常）
+Status: ABANDONED (Stats 卡住，相关 PR 已关闭未合并)
+
+## ACTIVE — TC-IOS-SHIFT-TIMELINE-V1
+ID: TC-IOS-SHIFT-TIMELINE-V1
+Title: 上班→下班时间线（工作/空余）
 AssignedTo: Executor
 
 Goal:
-- Stats 新增“数据质量”区块：展示缺失/异常计数与具体单子，并可跳转详情补填。
+- Stats（今日）展示上班时间线与工作/空余总时长及利用率。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -177,21 +181,20 @@ Guardrails:
 - PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 Definitions:
-- 范围过滤：复用 Stats 今日/本周/本月口径（按 shootingStart 归属范围，ISO 周一规则）。
-- 缺失项：金额缺失 / 拍摄张数缺失或<=0 / 选片张数缺失 / 备注缺失（trim 空）。
-- 异常项：selectedCount > shotCount；总时长==0。
-- 全要单不算异常：shotCount>0 && selectedCount==shotCount。
+- shiftStart = onDutyAt；shiftEnd = offDutyAt（未下班用 now）。
+- session intervals = [shootingStart, endedAt]（未结束用 now）。
+- 裁剪到 [shiftStart, shiftEnd] 后做 union merge。
+- workTotal = union length；idleTotal = (shiftEnd - shiftStart) - workTotal；利用率 = workTotal / (shiftEnd - shiftStart)。
 
 Acceptance:
-- Stats 增加“数据质量”区块，摘要显示：缺失 X · 异常 Y。
-- 缺失列表：`第N单 HH:mm：缺金额/缺拍/缺选/缺备注`。
-- 异常列表：`第N单 HH:mm：选片>拍摄/总时长为0`。
-- 点击条目跳转到单子详情页进行编辑补填。
+- Stats 今日新增“上班时间线”，展示上班/下班时间、工作/空余/利用率。
+- 时间线条：深色=工作，浅色=空余。
+- 工作段列表可选（若有，支持进入单子详情页）。
 
 Manual Verification:
-- A：切换 今日/本周/本月 → 缺失/异常计数同步变化。
-- B：列表能列出具体单子；点击可跳到详情页。
-- C：补填后计数/列表即时更新；重启后仍正确。
+- A：上班→下班时间线显示正确（未下班实时更新）。
+- B：工作/空余总时长与利用率合理（多单合并不重复）。
+- C：工作段列表可跳转详情页（若实现）。
 - D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
