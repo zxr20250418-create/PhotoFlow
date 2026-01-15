@@ -7,6 +7,7 @@
 
 import Combine
 import SwiftUI
+import UIKit
 import WatchConnectivity
 
 @MainActor
@@ -301,6 +302,7 @@ struct ContentView: View {
     @State private var draftReviewNote = ""
     @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
+    @State private var isReviewDigestPresented = false
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -643,6 +645,7 @@ struct ContentView: View {
                 : "--"
             return (avgText, shareText, weightedText)
         }()
+        let reviewDigestText = dailyReviewDigestText()
         let orderById = Dictionary(uniqueKeysWithValues: sessionSummaries.enumerated().map { ($0.element.id, $0.offset + 1) })
         let sessionLabel: (SessionSummary) -> String = { summary in
             var parts: [String] = []
@@ -744,6 +747,42 @@ struct ContentView: View {
             } else {
                 ForEach(Array(durationTop3.enumerated()), id: \.offset) { _, item in
                     Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
+                }
+            }
+            Divider()
+            Text("今日复盘备注")
+                .font(.headline)
+            Button("查看/复制") {
+                isReviewDigestPresented = true
+            }
+            .buttonStyle(.bordered)
+            .sheet(isPresented: $isReviewDigestPresented) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ScrollView {
+                            Text(reviewDigestText)
+                                .font(.footnote)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        HStack(spacing: 12) {
+                            Button("复制") {
+                                UIPasteboard.general.string = reviewDigestText
+                            }
+                            ShareLink(item: reviewDigestText) {
+                                Text("分享")
+                            }
+                        }
+                    }
+                    .padding()
+                    .navigationTitle("今日复盘备注")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                isReviewDigestPresented = false
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1046,8 +1085,18 @@ struct ContentView: View {
         return formatter
     }()
 
+    private static let reviewDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
     private func formatSessionTime(_ date: Date) -> String {
         ContentView.sessionTimeFormatter.string(from: date)
+    }
+
+    private func reviewDateText(_ date: Date) -> String {
+        ContentView.reviewDateFormatter.string(from: date)
     }
 
     private func sessionDurationSummary(for summary: SessionSummary) -> String {
@@ -1114,6 +1163,41 @@ struct ContentView: View {
             parts.append("选\(selected)张")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func dailyReviewDigestText() -> String {
+        let isoCal = Calendar(identifier: .iso8601)
+        let todaySessions = sessionSummaries.filter { summary in
+            guard let shootingStart = summary.shootingStart else { return false }
+            return isoCal.isDateInToday(shootingStart)
+        }
+        let ordered = todaySessions.sorted { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
+        var lines: [String] = []
+        for (index, summary) in ordered.enumerated() {
+            let meta = metaStore.meta(for: summary.id)
+            let note = meta.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !note.isEmpty else { continue }
+            var parts: [String] = []
+            let order = index + 1
+            let timeText = formatSessionTime(summary.shootingStart ?? sessionSortKey(for: summary))
+            parts.append("第\(order)单 \(timeText)")
+            if let amount = meta.amountCents {
+                parts.append(formatAmount(cents: amount))
+            }
+            if let shot = meta.shotCount {
+                parts.append("拍\(shot)")
+            }
+            if let selected = meta.selectedCount {
+                parts.append("选\(selected)")
+            }
+            let line = parts.joined(separator: "  ") + "  ——  " + note
+            lines.append(line)
+        }
+        let header = "\(reviewDateText(now)) 今日复盘备注"
+        if lines.isEmpty {
+            return "\(header)\n暂无备注"
+        }
+        return ([header] + lines).joined(separator: "\n")
     }
 
     private func amountText(for summary: SessionSummary) -> String {
