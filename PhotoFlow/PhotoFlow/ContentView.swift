@@ -303,6 +303,92 @@ final class ManualSessionStore: ObservableObject {
     }
 }
 
+struct ShiftRecord: Codable, Equatable {
+    var startAt: Date?
+    var endAt: Date?
+
+    var isEmpty: Bool {
+        startAt == nil && endAt == nil
+    }
+}
+
+@MainActor
+final class ShiftRecordStore: ObservableObject {
+    @Published private(set) var records: [String: ShiftRecord] = [:]
+    private let storageKey = "pf_shift_records_v1"
+    private let defaults = UserDefaults.standard
+    private let calendar: Calendar
+    private let formatter: DateFormatter
+
+    init() {
+        calendar = Calendar(identifier: .iso8601)
+        formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        load()
+    }
+
+    func dayKey(for date: Date) -> String {
+        formatter.string(from: date)
+    }
+
+    func record(for key: String) -> ShiftRecord? {
+        records[key]
+    }
+
+    func upsert(_ record: ShiftRecord, for key: String) {
+        if record.isEmpty {
+            records.removeValue(forKey: key)
+        } else {
+            records[key] = record
+        }
+        save()
+    }
+
+    func setStartIfNeeded(_ start: Date, for key: String) {
+        var record = records[key] ?? ShiftRecord()
+        if record.startAt == nil {
+            record.startAt = start
+        }
+        record.endAt = nil
+        upsert(record, for: key)
+    }
+
+    func setEnd(_ end: Date, for key: String) {
+        var record = records[key] ?? ShiftRecord()
+        record.endAt = end
+        upsert(record, for: key)
+    }
+
+    func seedFromLegacy(start: Date?, end: Date?) {
+        guard let start else { return }
+        let key = dayKey(for: start)
+        var record = records[key] ?? ShiftRecord()
+        if record.startAt == nil {
+            record.startAt = start
+        }
+        if let end {
+            record.endAt = end
+        }
+        upsert(record, for: key)
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: ShiftRecord].self, from: data) else {
+            return
+        }
+        records = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(records) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}
+
 struct ContentView: View {
     enum Stage {
         case idle
@@ -403,6 +489,7 @@ struct ContentView: View {
     @StateObject private var metaStore: SessionMetaStore
     @StateObject private var timeOverrideStore: SessionTimeOverrideStore
     @StateObject private var manualSessionStore: ManualSessionStore
+    @StateObject private var shiftRecordStore: ShiftRecordStore
     @State private var editingSession: EditingSession?
     @State private var timeEditingSession: TimeEditingSession?
     @State private var draftAmount = ""
@@ -429,6 +516,7 @@ struct ContentView: View {
     @State private var shiftEnd: Date?
     @State private var isReviewDigestPresented = false
     @State private var isDataQualityPresented = false
+    @State private var isShiftCalendarPresented = false
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -440,11 +528,14 @@ struct ContentView: View {
         _metaStore = StateObject(wrappedValue: SessionMetaStore())
         _timeOverrideStore = StateObject(wrappedValue: SessionTimeOverrideStore())
         _manualSessionStore = StateObject(wrappedValue: ManualSessionStore())
+        let shiftStore = ShiftRecordStore()
+        _shiftRecordStore = StateObject(wrappedValue: shiftStore)
         let defaults = UserDefaults.standard
         let start = defaults.object(forKey: "pf_shift_start") as? Date
         let end = defaults.object(forKey: "pf_shift_end") as? Date
         _shiftStart = State(initialValue: start)
         _shiftEnd = State(initialValue: end)
+        shiftStore.seedFromLegacy(start: start, end: end)
     }
 
     var body: some View {
@@ -997,6 +1088,43 @@ struct ContentView: View {
         }
     }
 
+    private var shiftCalendarView: some View {
+        ShiftCalendarView(
+            sessions: effectiveSessionSummaries,
+            metaStore: metaStore,
+            shiftRecordStore: shiftRecordStore,
+            now: now,
+            effectiveShootingStart: { summary in
+                effectiveTimes(for: summary).shootingStart
+            },
+            formatAmount: { cents in
+                formatAmount(cents: cents)
+            },
+            formatTime: { date in
+                formatSessionTime(date)
+            },
+            onUpdateRecord: { day, record in
+                updateShiftRecord(record, for: day)
+            }
+        )
+    }
+
+    private func updateShiftRecord(_ record: ShiftRecord, for day: Date) {
+        let key = shiftRecordStore.dayKey(for: day)
+        shiftRecordStore.upsert(record, for: key)
+        syncShiftStateIfNeeded(for: day, record: record)
+    }
+
+    private func syncShiftStateIfNeeded(for day: Date, record: ShiftRecord) {
+        let isoCal = Calendar(identifier: .iso8601)
+        guard isoCal.isDateInToday(day) else { return }
+        shiftStart = record.startAt
+        shiftEnd = record.endAt
+        let defaults = UserDefaults.standard
+        defaults.set(shiftStart, forKey: "pf_shift_start")
+        defaults.set(shiftEnd, forKey: "pf_shift_end")
+    }
+
     private var todayBanner: some View {
         let isoCal = Calendar(identifier: .iso8601)
         let todaySessions = effectiveSessionSummaries.filter { summary in
@@ -1265,6 +1393,11 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
+            Button("记录（月历）") {
+                isShiftCalendarPresented = true
+            }
+            .buttonStyle(.bordered)
+
             Text("上班时间线")
                 .font(.headline)
             if statsRange != .today {
@@ -1422,6 +1555,9 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
+        .sheet(isPresented: $isShiftCalendarPresented) {
+            shiftCalendarView
+        }
     }
 
     private var bottomBar: some View {
@@ -1530,13 +1666,24 @@ struct ContentView: View {
 
     private func setDuty(_ onDuty: Bool) {
         syncStore.setOnDuty(onDuty)
+        let key = shiftRecordStore.dayKey(for: now)
+        var record = shiftRecordStore.record(for: key) ?? ShiftRecord()
         if onDuty {
-            shiftStart = now
+            if record.startAt == nil {
+                record.startAt = now
+            }
+            record.endAt = nil
+            shiftStart = record.startAt
             shiftEnd = nil
         } else {
+            if record.startAt == nil {
+                record.startAt = shiftStart ?? now
+            }
+            record.endAt = now
             shiftEnd = now
             resetSession()
         }
+        shiftRecordStore.upsert(record, for: key)
         let defaults = UserDefaults.standard
         defaults.set(shiftStart, forKey: "pf_shift_start")
         defaults.set(shiftEnd, forKey: "pf_shift_end")
@@ -2039,6 +2186,302 @@ struct ContentView: View {
             startedAt: startedAt,
             lastUpdatedAt: now
         )
+    }
+}
+
+private struct ShiftCalendarView: View {
+    let sessions: [ContentView.SessionSummary]
+    @ObservedObject var metaStore: SessionMetaStore
+    @ObservedObject var shiftRecordStore: ShiftRecordStore
+    let now: Date
+    let effectiveShootingStart: (ContentView.SessionSummary) -> Date?
+    let formatAmount: (Int) -> String
+    let formatTime: (Date) -> String
+    let onUpdateRecord: (Date, ShiftRecord) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var monthCursor: Date
+    @State private var selectedDay: Date?
+    @State private var editingDay: EditingDay?
+    @State private var draftStart = Date()
+    @State private var draftEnd = Date()
+    @State private var draftHasEnd = true
+
+    private let calendar = Calendar(identifier: .iso8601)
+
+    private static let monthFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy年M月"
+        return formatter
+    }()
+
+    init(
+        sessions: [ContentView.SessionSummary],
+        metaStore: SessionMetaStore,
+        shiftRecordStore: ShiftRecordStore,
+        now: Date,
+        effectiveShootingStart: @escaping (ContentView.SessionSummary) -> Date?,
+        formatAmount: @escaping (Int) -> String,
+        formatTime: @escaping (Date) -> String,
+        onUpdateRecord: @escaping (Date, ShiftRecord) -> Void
+    ) {
+        self.sessions = sessions
+        self.metaStore = metaStore
+        self.shiftRecordStore = shiftRecordStore
+        self.now = now
+        self.effectiveShootingStart = effectiveShootingStart
+        self.formatAmount = formatAmount
+        self.formatTime = formatTime
+        self.onUpdateRecord = onUpdateRecord
+        let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: now)) ?? now
+        _monthCursor = State(initialValue: monthStart)
+        _selectedDay = State(initialValue: calendar.startOfDay(for: now))
+    }
+
+    var body: some View {
+        let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: monthCursor)) ?? monthCursor
+        let days = monthDays(start: monthStart)
+        let leading = leadingBlankCount(monthStart: monthStart)
+        let incomeByDay = dailyIncome()
+        let monthIncome = days.reduce(0) { $0 + (incomeByDay[shiftRecordStore.dayKey(for: $1)] ?? 0) }
+        let hasIncome = days.contains { incomeByDay[shiftRecordStore.dayKey(for: $0)] != nil }
+        let monthShift = days.reduce(0) { $0 + shiftInfo(for: $1).duration }
+
+        return NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Button {
+                            monthCursor = calendar.date(byAdding: .month, value: -1, to: monthStart) ?? monthStart
+                        } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        Spacer()
+                        Text(Self.monthFormatter.string(from: monthStart))
+                            .font(.headline)
+                        Spacer()
+                        Button {
+                            monthCursor = calendar.date(byAdding: .month, value: 1, to: monthStart) ?? monthStart
+                        } label: {
+                            Image(systemName: "chevron.right")
+                        }
+                    }
+
+                    let weekdaySymbols = weekdayHeaders()
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 7), spacing: 8) {
+                        ForEach(weekdaySymbols, id: \.self) { symbol in
+                            Text(symbol)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                        }
+
+                        ForEach(0..<leading, id: \.self) { _ in
+                            Color.clear.frame(height: 62)
+                        }
+
+                        ForEach(days, id: \.self) { day in
+                            let key = shiftRecordStore.dayKey(for: day)
+                            let income = incomeByDay[key]
+                            let shift = shiftInfo(for: day)
+                            let isSelected = selectedDay.map { calendar.isDate($0, inSameDayAs: day) } ?? false
+                            let incomeText = income.map(formatAmount) ?? "--"
+                            Button {
+                                selectedDay = calendar.startOfDay(for: day)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text("\(calendar.component(.day, from: day))")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        if shift.isOngoing {
+                                            Circle()
+                                                .fill(Color.orange)
+                                                .frame(width: 6, height: 6)
+                                        }
+                                    }
+                                    Text("收入 \(incomeText)")
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                    Text("上班时长 \(shift.display)")
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                }
+                                .padding(6)
+                                .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
+                                .background(isSelected ? Color.primary.opacity(0.08) : Color.secondary.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    let monthIncomeText = hasIncome ? formatAmount(monthIncome) : "--"
+                    Text("本月收入 \(monthIncomeText) · 本月上班时长 \(formatHours(monthShift))")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    if let selectedDay {
+                        let key = shiftRecordStore.dayKey(for: selectedDay)
+                        let record = shiftRecordStore.record(for: key)
+                        let shift = shiftInfo(for: selectedDay)
+                        let startText = record?.startAt.map(formatTime) ?? "--"
+                        let endText = record?.endAt.map(formatTime) ?? (record?.startAt != nil ? "进行中" : "--")
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("明细")
+                                .font(.headline)
+                            HStack {
+                                Text("上班 \(startText)")
+                                Text("下班 \(endText)")
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            Text("上班时长 \(shift.display)")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Button(record == nil ? "补记" : "编辑") {
+                                    startEditing(day: selectedDay, record: record)
+                                }
+                                .buttonStyle(.bordered)
+                                if record?.startAt != nil, record?.endAt == nil {
+                                    Button("补下班") {
+                                        let end = min(now, dayEnd(for: selectedDay))
+                                        onUpdateRecord(selectedDay, ShiftRecord(startAt: record?.startAt, endAt: end))
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("记录（月历）")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        startEditing(day: selectedDay ?? now, record: shiftRecordStore.record(for: shiftRecordStore.dayKey(for: selectedDay ?? now)))
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .sheet(item: $editingDay) { day in
+                let selected = day.date
+                NavigationStack {
+                    Form {
+                        Section("上班时间") {
+                            DatePicker("上班", selection: $draftStart, displayedComponents: [.hourAndMinute])
+                            Toggle("有下班时间", isOn: $draftHasEnd)
+                            if draftHasEnd {
+                                DatePicker("下班", selection: $draftEnd, displayedComponents: [.hourAndMinute])
+                            }
+                        }
+                    }
+                    .navigationTitle("编辑班次")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") {
+                                editingDay = nil
+                            }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("保存") {
+                                let start = draftStart
+                                var end = draftHasEnd ? draftEnd : nil
+                                if let endValue = end, endValue < start {
+                                    end = start
+                                }
+                                onUpdateRecord(selected, ShiftRecord(startAt: start, endAt: end))
+                                editingDay = nil
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func monthDays(start: Date) -> [Date] {
+        guard let range = calendar.range(of: .day, in: .month, for: start) else { return [] }
+        return range.compactMap { calendar.date(byAdding: .day, value: $0 - 1, to: start) }
+    }
+
+    private func leadingBlankCount(monthStart: Date) -> Int {
+        let weekday = calendar.component(.weekday, from: monthStart)
+        let offset = weekday - calendar.firstWeekday
+        return (offset + 7) % 7
+    }
+
+    private func weekdayHeaders() -> [String] {
+        let symbols = calendar.shortStandaloneWeekdaySymbols
+        let startIndex = calendar.firstWeekday - 1
+        return Array(symbols[startIndex...] + symbols[..<startIndex])
+    }
+
+    private func dailyIncome() -> [String: Int] {
+        var totals: [String: Int] = [:]
+        for summary in sessions {
+            guard let start = effectiveShootingStart(summary) else { continue }
+            let key = shiftRecordStore.dayKey(for: start)
+            if let amount = metaStore.meta(for: summary.id).amountCents {
+                totals[key, default: 0] += amount
+            }
+        }
+        return totals
+    }
+
+    private func dayEnd(for day: Date) -> Date {
+        let start = calendar.startOfDay(for: day)
+        return calendar.date(byAdding: .day, value: 1, to: start) ?? start
+    }
+
+    private func shiftInfo(for day: Date) -> (duration: TimeInterval, isOngoing: Bool, display: String) {
+        let key = shiftRecordStore.dayKey(for: day)
+        guard let record = shiftRecordStore.record(for: key),
+              let startAt = record.startAt else {
+            return (0, false, "--")
+        }
+        let startOfDay = calendar.startOfDay(for: day)
+        let endOfDay = dayEnd(for: day)
+        let effectiveStart = max(startAt, startOfDay)
+        let effectiveEnd = min(record.endAt ?? now, endOfDay)
+        let duration = max(0, effectiveEnd.timeIntervalSince(effectiveStart))
+        let isOngoing = record.endAt == nil
+        return (duration, isOngoing, formatHours(duration))
+    }
+
+    private func formatHours(_ duration: TimeInterval) -> String {
+        guard duration > 0 else { return "0.0h" }
+        let hours = duration / 3600
+        return String(format: "%.1fh", hours)
+    }
+
+    private func startEditing(day: Date, record: ShiftRecord?) {
+        let dayStart = calendar.startOfDay(for: day)
+        let defaultStart = calendar.date(byAdding: .hour, value: 9, to: dayStart) ?? dayStart
+        let defaultEnd = calendar.date(byAdding: .hour, value: 18, to: dayStart) ?? dayStart
+        draftStart = record?.startAt ?? defaultStart
+        if let end = record?.endAt {
+            draftEnd = end
+            draftHasEnd = true
+        } else {
+            draftEnd = min(now, dayEnd(for: day))
+            draftHasEnd = record?.startAt != nil
+        }
+        editingDay = EditingDay(date: day)
+    }
+
+    private struct EditingDay: Identifiable {
+        let id = UUID()
+        let date: Date
     }
 }
 
