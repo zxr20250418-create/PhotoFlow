@@ -549,22 +549,6 @@ struct ContentView: View {
     private var homeView: some View {
         return NavigationStack {
             VStack(spacing: 16) {
-            Button(syncStore.isOnDuty ? "下班" : "上班") {
-                let nextOnDuty = !syncStore.isOnDuty
-                syncStore.setOnDuty(nextOnDuty)
-                if nextOnDuty {
-                    shiftStart = now
-                    shiftEnd = nil
-                } else {
-                    shiftEnd = now
-                    resetSession()
-                }
-                let defaults = UserDefaults.standard
-                defaults.set(shiftStart, forKey: "pf_shift_start")
-                defaults.set(shiftEnd, forKey: "pf_shift_end")
-            }
-            .buttonStyle(.bordered)
-
             todayBanner
 
             VStack(alignment: .leading, spacing: 8) {
@@ -1494,28 +1478,42 @@ struct ContentView: View {
     }
 
     private var nextActionButton: some View {
-        let durations = computeDurations(now: now)
-        return Button(action: performNextAction) {
-            VStack(spacing: 2) {
-                Text(nextActionTitle)
+        if syncStore.isOnDuty {
+            let durations = computeDurations(now: now)
+            return AnyView(
+                Button(action: performNextAction) {
+                    VStack(spacing: 2) {
+                        Text(nextActionTitle)
+                            .font(.headline)
+                        Text("总 \(format(durations.total)) · 阶段 \(format(durations.currentStage))")
+                            .font(.footnote)
+                            .foregroundStyle(.white.opacity(0.85))
+                            .lineLimit(1)
+                    }
+                    .frame(minWidth: 96)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .contextMenu {
+                    Button("拍摄") { performStageAction(.shooting) }
+                        .disabled(!canStartShooting)
+                    Button("选片") { performStageAction(.selecting) }
+                        .disabled(!canStartSelecting)
+                    Button("结束") { performStageAction(.ended) }
+                        .disabled(!canEndSession)
+                    Button("下班", role: .destructive) { setDuty(false) }
+                }
+            )
+        }
+        return AnyView(
+            Button(action: { setDuty(true) }) {
+                Text("上班")
                     .font(.headline)
-                Text("总 \(format(durations.total)) · 阶段 \(format(durations.currentStage))")
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.85))
-                    .lineLimit(1)
+                    .frame(minWidth: 96)
             }
-            .frame(minWidth: 96)
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .contextMenu {
-            Button("拍摄") { performStageAction(.shooting) }
-                .disabled(!canStartShooting)
-            Button("选片") { performStageAction(.selecting) }
-                .disabled(!canStartSelecting)
-            Button("结束") { performStageAction(.ended) }
-                .disabled(!canEndSession)
-        }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+        )
     }
 
     private var canStartShooting: Bool {
@@ -1528,6 +1526,20 @@ struct ContentView: View {
 
     private var canEndSession: Bool {
         stage == .shooting || stage == .selecting
+    }
+
+    private func setDuty(_ onDuty: Bool) {
+        syncStore.setOnDuty(onDuty)
+        if onDuty {
+            shiftStart = now
+            shiftEnd = nil
+        } else {
+            shiftEnd = now
+            resetSession()
+        }
+        let defaults = UserDefaults.standard
+        defaults.set(shiftStart, forKey: "pf_shift_start")
+        defaults.set(shiftEnd, forKey: "pf_shift_end")
     }
 
     private func resetSession() {
