@@ -164,10 +164,11 @@ Status: DONE (merged in PR #95)
 ID: TC-IOS-DATA-QUALITY-V1
 Status: ABANDONED (Stats 卡住，相关 PR 已关闭未合并)
 
-## ACTIVE — TC-IOS-SHIFT-TIMELINE-V1
+## DONE — TC-IOS-SHIFT-TIMELINE-V1
 ID: TC-IOS-SHIFT-TIMELINE-V1
 Title: 上班→下班时间线（工作/空余）
 AssignedTo: Executor
+Status: DONE (merged in PR #101)
 
 Goal:
 - Stats（今日）展示上班时间线与工作/空余总时长及利用率。
@@ -196,6 +197,51 @@ Manual Verification:
 - B：工作/空余总时长与利用率合理（多单合并不重复）。
 - C：工作段列表可跳转详情页（若实现）。
 - D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
+## ACTIVE — TC-IOS-SESSION-BACKFILL-FIXTIME-V1
+ID: TC-IOS-SESSION-BACKFILL-FIXTIME-V1
+Title: 补记一单 + 更正时间（覆盖统计与时间线）
+AssignedTo: Executor
+
+Goal:
+- 支持补记一单（manual session）与更正时间（time override），并确保所有统计/时间线使用修正后的时间。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Requirements:
+- 补记一单入口：Stats（今日）上班时间线 section 下方按钮“补记一单”。
+- 补记表单字段：shootingStart、endedAt、selectingStart(可选)、amount、shotCount、selectedCount、reviewNote。
+- 校验：shootingStart < endedAt；selectingStart 若存在需在区间内。
+- 保存后：Home 列表可见，计入 Stats 汇总、Top3、上班时间线。
+- 更正时间入口：SessionDetailView 按钮“更正时间”，可编辑 shootingStart/selectingStart/endedAt。
+- 必须支持“恢复自动/清除更正”。
+- 统计/时间线使用“有效时间”：override 优先，否则原始时间。
+- 持久化：SessionTimeOverrideStore + manualSessions（按 sessionId）。
+
+Acceptance:
+- 补记后：Home/Stats 都可见，且计入今日汇总与上班时间线工作段。
+- 更正时间后：Stats/上班时间线按新时间更新；清除更正可恢复原始时间。
+- 重启后数据仍存在（持久化 OK）。
+- `bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+
+Manual Verification:
+- A：补记一单保存后，Home/Stats 都能看到，且计入今日汇总与上班时间线工作段。
+- B：更正时间后，Stats/上班时间线按新时间更新。
+- C：清除更正后回到原始时间（统计随之恢复）。
+- D：补记/更正数据重启后仍存在。
+- E：ios_safe PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
