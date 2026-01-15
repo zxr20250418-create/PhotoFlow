@@ -889,6 +889,77 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
+            Text("上班时间线")
+                .font(.headline)
+            if statsRange != .today {
+                Text("仅今日显示")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let shiftWindow {
+                let shiftStartText = formatSessionTime(shiftWindow.start)
+                let shiftEndText = shiftEnd == nil ? "进行中" : formatSessionTime(shiftWindow.end)
+                Text("上班 \(shiftStartText) · 下班 \(shiftEndText)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("工作 \(format(shiftTotals.work)) · 空余 \(format(shiftTotals.idle)) · 利用率 \(shiftTotals.utilization)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                GeometryReader { proxy in
+                    HStack(spacing: 0) {
+                        ForEach(Array(shiftTotals.segments.enumerated()), id: \.offset) { _, segment in
+                            let width = proxy.size.width * segment.0 / max(1, shiftWindow.end.timeIntervalSince(shiftWindow.start))
+                            Rectangle()
+                                .fill(segment.1 ? Color.primary : Color.secondary.opacity(0.25))
+                                .frame(width: width)
+                        }
+                    }
+                    .frame(height: 12)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .frame(height: 12)
+            } else {
+                Text("暂无上班记录")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("今日复盘备注")
+                .font(.headline)
+            Button("查看/复制") {
+                isReviewDigestPresented = true
+            }
+            .buttonStyle(.bordered)
+            .sheet(isPresented: $isReviewDigestPresented) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ScrollView {
+                            Text(reviewDigestText)
+                                .font(.footnote)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        HStack(spacing: 12) {
+                            Button("复制") {
+                                UIPasteboard.general.string = reviewDigestText
+                            }
+                            ShareLink(item: reviewDigestText) {
+                                Text("分享")
+                            }
+                        }
+                    }
+                    .padding()
+                    .navigationTitle("今日复盘备注")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                isReviewDigestPresented = false
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+
             Text("\(prefix)单数 \(count)")
             Text("\(prefix)总时长 \(format(totals.total))")
             Text("\(prefix)拍摄时长 \(format(totals.shooting))")
@@ -942,77 +1013,6 @@ struct ContentView: View {
                 ForEach(Array(durationTop3.enumerated()), id: \.offset) { _, item in
                     Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
                 }
-            }
-            Divider()
-            Text("今日复盘备注")
-                .font(.headline)
-            Button("查看/复制") {
-                isReviewDigestPresented = true
-            }
-            .buttonStyle(.bordered)
-            .sheet(isPresented: $isReviewDigestPresented) {
-                NavigationStack {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ScrollView {
-                            Text(reviewDigestText)
-                                .font(.footnote)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                        HStack(spacing: 12) {
-                            Button("复制") {
-                                UIPasteboard.general.string = reviewDigestText
-                            }
-                            ShareLink(item: reviewDigestText) {
-                                Text("分享")
-                            }
-                        }
-                    }
-                    .padding()
-                    .navigationTitle("今日复盘备注")
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("关闭") {
-                                isReviewDigestPresented = false
-                            }
-                        }
-                    }
-                }
-            }
-            Divider()
-            Text("上班时间线")
-                .font(.headline)
-            if statsRange != .today {
-                Text("仅今日显示")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else if let shiftWindow {
-                let shiftStartText = formatSessionTime(shiftWindow.start)
-                let shiftEndText = shiftEnd == nil ? "进行中" : formatSessionTime(shiftWindow.end)
-                Text("上班 \(shiftStartText) · 下班 \(shiftEndText)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text("工作 \(format(shiftTotals.work)) · 空余 \(format(shiftTotals.idle)) · 利用率 \(shiftTotals.utilization)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                GeometryReader { proxy in
-                    HStack(spacing: 0) {
-                        ForEach(Array(shiftTotals.segments.enumerated()), id: \.offset) { _, segment in
-                            let width = proxy.size.width * segment.0 / max(1, shiftWindow.end.timeIntervalSince(shiftWindow.start))
-                            Rectangle()
-                                .fill(segment.1 ? Color.primary : Color.secondary.opacity(0.25))
-                                .frame(width: width)
-                        }
-                    }
-                    .frame(height: 12)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .frame(height: 12)
-            } else {
-                Text("暂无上班记录")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
