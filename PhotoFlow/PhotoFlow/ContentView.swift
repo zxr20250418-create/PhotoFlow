@@ -181,6 +181,13 @@ struct SessionMeta: Codable, Equatable {
     }
 }
 
+struct SessionTimeOverride: Codable, Equatable {
+    var shootingStart: Date
+    var selectingStart: Date?
+    var endedAt: Date?
+    var updatedAt: Date
+}
+
 @MainActor
 final class SessionMetaStore: ObservableObject {
     @Published private(set) var metas: [String: SessionMeta] = [:]
@@ -218,6 +225,84 @@ final class SessionMetaStore: ObservableObject {
     }
 }
 
+@MainActor
+final class SessionTimeOverrideStore: ObservableObject {
+    @Published private(set) var overrides: [String: SessionTimeOverride] = [:]
+    private let storageKey = "pf_session_time_overrides_v1"
+    private let defaults = UserDefaults.standard
+
+    init() {
+        load()
+    }
+
+    func override(for id: String) -> SessionTimeOverride? {
+        overrides[id]
+    }
+
+    func update(_ overrideValue: SessionTimeOverride, for id: String) {
+        overrides[id] = overrideValue
+        save()
+    }
+
+    func clear(for id: String) {
+        overrides.removeValue(forKey: id)
+        save()
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: SessionTimeOverride].self, from: data) else {
+            return
+        }
+        overrides = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(overrides) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}
+
+struct ManualSession: Codable, Equatable, Identifiable {
+    let id: String
+    var shootingStart: Date
+    var selectingStart: Date?
+    var endedAt: Date
+}
+
+@MainActor
+final class ManualSessionStore: ObservableObject {
+    @Published private(set) var sessions: [String: ManualSession] = [:]
+    private let storageKey = "pf_manual_sessions_v1"
+    private let defaults = UserDefaults.standard
+
+    init() {
+        load()
+    }
+
+    func upsert(_ session: ManualSession) {
+        sessions[session.id] = session
+        save()
+    }
+
+    func session(for id: String) -> ManualSession? {
+        sessions[id]
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: ManualSession].self, from: data) else {
+            return
+        }
+        sessions = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(sessions) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}
+
 struct ContentView: View {
     enum Stage {
         case idle
@@ -244,9 +329,16 @@ struct ContentView: View {
         var endedAt: Date?
     }
 
+    struct SessionTimes {
+        var shootingStart: Date?
+        var selectingStart: Date?
+        var endedAt: Date?
+    }
+
     enum ActiveAlert: Identifiable {
         case notOnDuty
         case cannotEndWhileShooting
+        case validation(String)
 
         var id: String {
             switch self {
@@ -254,6 +346,8 @@ struct ContentView: View {
                 return "notOnDuty"
             case .cannotEndWhileShooting:
                 return "cannotEndWhileShooting"
+            case .validation(let message):
+                return "validation-\(message)"
             }
         }
 
@@ -263,11 +357,17 @@ struct ContentView: View {
                 return "未上班，无法开始记录"
             case .cannotEndWhileShooting:
                 return "拍摄中不可直接结束"
+            case .validation(let message):
+                return message
             }
         }
     }
 
     struct EditingSession: Identifiable {
+        let id: String
+    }
+
+    struct TimeEditingSession: Identifiable {
         let id: String
     }
 
@@ -295,11 +395,28 @@ struct ContentView: View {
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
     @StateObject private var metaStore: SessionMetaStore
+    @StateObject private var timeOverrideStore: SessionTimeOverrideStore
+    @StateObject private var manualSessionStore: ManualSessionStore
     @State private var editingSession: EditingSession?
+    @State private var timeEditingSession: TimeEditingSession?
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
     @State private var draftSelected = ""
     @State private var draftReviewNote = ""
+    @State private var draftManualShootingStart = Date()
+    @State private var draftManualSelectingStart = Date()
+    @State private var draftManualEndedAt = Date()
+    @State private var draftManualSelectingEnabled = false
+    @State private var draftManualAmount = ""
+    @State private var draftManualShotCount = ""
+    @State private var draftManualSelectedCount = ""
+    @State private var draftManualReviewNote = ""
+    @State private var isManualSessionPresented = false
+    @State private var draftOverrideShootingStart = Date()
+    @State private var draftOverrideSelectingStart = Date()
+    @State private var draftOverrideEndedAt = Date()
+    @State private var draftOverrideSelectingEnabled = false
+    @State private var draftOverrideEndedEnabled = false
     @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
     @State private var shiftStart: Date?
@@ -314,6 +431,8 @@ struct ContentView: View {
     init(syncStore: WatchSyncStore) {
         self.syncStore = syncStore
         _metaStore = StateObject(wrappedValue: SessionMetaStore())
+        _timeOverrideStore = StateObject(wrappedValue: SessionTimeOverrideStore())
+        _manualSessionStore = StateObject(wrappedValue: ManualSessionStore())
         let defaults = UserDefaults.standard
         let start = defaults.object(forKey: "pf_shift_start") as? Date
         let end = defaults.object(forKey: "pf_shift_end") as? Date
@@ -367,11 +486,57 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(item: $timeEditingSession) { session in
+            timeOverrideEditor(sessionId: session.id)
+        }
+        .sheet(isPresented: $isManualSessionPresented) {
+            manualSessionEditor
+        }
         .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
             applySessionEvent(event)
         }
+    }
+
+    private var effectiveSessionSummaries: [SessionSummary] {
+        var byId: [String: SessionSummary] = [:]
+        for summary in sessionSummaries {
+            byId[summary.id] = summary
+        }
+        for manual in manualSessionStore.sessions.values {
+            byId[manual.id] = SessionSummary(
+                id: manual.id,
+                shootingStart: manual.shootingStart,
+                selectingStart: manual.selectingStart,
+                endedAt: manual.endedAt
+            )
+        }
+        return byId.values.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+    }
+
+    private func effectiveTimes(for summary: SessionSummary) -> SessionTimes {
+        if let overrideValue = timeOverrideStore.override(for: summary.id) {
+            return SessionTimes(
+                shootingStart: overrideValue.shootingStart,
+                selectingStart: overrideValue.selectingStart,
+                endedAt: overrideValue.endedAt
+            )
+        }
+        return SessionTimes(
+            shootingStart: summary.shootingStart,
+            selectingStart: summary.selectingStart,
+            endedAt: summary.endedAt
+        )
+    }
+
+    private func effectiveSessionStartTime(for summary: SessionSummary) -> Date? {
+        let times = effectiveTimes(for: summary)
+        return [times.shootingStart, times.selectingStart, times.endedAt].compactMap { $0 }.min()
+    }
+
+    private func effectiveSessionSortKey(for summary: SessionSummary) -> Date {
+        effectiveSessionStartTime(for: summary) ?? Date.distantPast
     }
 
     private var homeView: some View {
@@ -398,12 +563,12 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("会话时间线")
                     .font(.headline)
-                if sessionSummaries.isEmpty {
+                if effectiveSessionSummaries.isEmpty {
                     Text("暂无记录")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    let displaySessions = Array(sessionSummaries.reversed())
+                    let displaySessions = Array(effectiveSessionSummaries.reversed())
                     ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
                         let total = displaySessions.count
                         let order = total - displayIndex
@@ -413,7 +578,7 @@ struct ContentView: View {
                                     Text("第\(order)单")
                                         .font(.subheadline)
                                         .fontWeight(.semibold)
-                                    if let startTime = summary.shootingStart ?? sessionStartTime(for: summary) {
+                                    if let startTime = effectiveSessionStartTime(for: summary) {
                                         Text(formatSessionTime(startTime))
                                             .font(.footnote)
                                             .foregroundStyle(.secondary)
@@ -512,10 +677,12 @@ struct ContentView: View {
 
     private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
         let meta = metaStore.meta(for: summary.id)
-        let startTime = summary.shootingStart ?? sessionStartTime(for: summary)
+        let times = effectiveTimes(for: summary)
+        let startTime = times.shootingStart ?? effectiveSessionStartTime(for: summary)
         let timeText = startTime.map(formatSessionTime) ?? "--"
         let amountText = meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
         let rphLine = rphText(for: summary)
+        let hasOverride = timeOverrideStore.override(for: summary.id) != nil
         let shot = meta.shotCount
         let selected = meta.selectedCount
         let pickRateText: String = {
@@ -543,6 +710,11 @@ struct ContentView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
+                    if hasOverride {
+                        Text("已更正")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -578,19 +750,19 @@ struct ContentView: View {
                     HStack {
                         Text("拍摄开始")
                         Spacer()
-                        Text(summary.shootingStart.map(formatSessionTimeWithSeconds) ?? "--")
+                        Text(times.shootingStart.map(formatSessionTimeWithSeconds) ?? "--")
                             .monospacedDigit()
                     }
                     HStack {
                         Text("选片开始")
                         Spacer()
-                        Text(summary.selectingStart.map(formatSessionTimeWithSeconds) ?? "--")
+                        Text(times.selectingStart.map(formatSessionTimeWithSeconds) ?? "--")
                             .monospacedDigit()
                     }
                     HStack {
                         Text("结束")
                         Spacer()
-                        Text(summary.endedAt.map(formatSessionTimeWithSeconds) ?? "--")
+                        Text(times.endedAt.map(formatSessionTimeWithSeconds) ?? "--")
                             .monospacedDigit()
                     }
                 }
@@ -615,7 +787,10 @@ struct ContentView: View {
         }
         .navigationTitle("单子详情")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button("更正时间") {
+                    startEditingTime(for: summary)
+                }
                 Button("编辑") {
                     startEditingMeta(for: summary.id)
                 }
@@ -623,10 +798,167 @@ struct ContentView: View {
         }
     }
 
+    private func startManualSessionDraft() {
+        let start = now
+        draftManualShootingStart = start
+        draftManualEndedAt = start.addingTimeInterval(60)
+        draftManualSelectingEnabled = false
+        draftManualSelectingStart = start
+        draftManualAmount = ""
+        draftManualShotCount = ""
+        draftManualSelectedCount = ""
+        draftManualReviewNote = ""
+        isManualSessionPresented = true
+    }
+
+    private func saveManualSession() {
+        let start = draftManualShootingStart
+        let end = draftManualEndedAt
+        guard start < end else {
+            activeAlert = .validation("拍摄开始需早于结束时间")
+            return
+        }
+        if draftManualSelectingEnabled {
+            let selecting = draftManualSelectingStart
+            guard selecting >= start && selecting <= end else {
+                activeAlert = .validation("选片开始需在拍摄开始与结束之间")
+                return
+            }
+        }
+        let sessionId = makeManualSessionId(startedAt: start)
+        let manual = ManualSession(
+            id: sessionId,
+            shootingStart: start,
+            selectingStart: draftManualSelectingEnabled ? draftManualSelectingStart : nil,
+            endedAt: end
+        )
+        manualSessionStore.upsert(manual)
+        let meta = SessionMeta(
+            amountCents: parseAmountCents(from: draftManualAmount),
+            shotCount: parseInt(from: draftManualShotCount),
+            selectedCount: parseInt(from: draftManualSelectedCount),
+            reviewNote: normalizedNote(from: draftManualReviewNote)
+        )
+        metaStore.update(meta, for: sessionId)
+        isManualSessionPresented = false
+    }
+
+    private var manualSessionEditor: some View {
+        NavigationStack {
+            Form {
+                Section("时间") {
+                    DatePicker("拍摄开始", selection: $draftManualShootingStart, displayedComponents: [.date, .hourAndMinute])
+                    DatePicker("结束", selection: $draftManualEndedAt, displayedComponents: [.date, .hourAndMinute])
+                    Toggle("有选片开始", isOn: $draftManualSelectingEnabled)
+                    if draftManualSelectingEnabled {
+                        DatePicker("选片开始", selection: $draftManualSelectingStart, displayedComponents: [.date, .hourAndMinute])
+                    }
+                }
+                Section("结算") {
+                    TextField("金额", text: $draftManualAmount)
+                        .keyboardType(.decimalPad)
+                    TextField("拍摄张数", text: $draftManualShotCount)
+                        .keyboardType(.numberPad)
+                    TextField("选片张数", text: $draftManualSelectedCount)
+                        .keyboardType(.numberPad)
+                }
+                Section("复盘备注") {
+                    TextEditor(text: $draftManualReviewNote)
+                        .frame(minHeight: 100)
+                }
+            }
+            .navigationTitle("补记一单")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        isManualSessionPresented = false
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        saveManualSession()
+                    }
+                }
+            }
+        }
+    }
+
+    private func startEditingTime(for summary: SessionSummary) {
+        let times = effectiveTimes(for: summary)
+        draftOverrideShootingStart = times.shootingStart ?? now
+        draftOverrideSelectingEnabled = times.selectingStart != nil
+        draftOverrideSelectingStart = times.selectingStart ?? draftOverrideShootingStart
+        draftOverrideEndedEnabled = times.endedAt != nil
+        draftOverrideEndedAt = times.endedAt ?? now
+        timeEditingSession = TimeEditingSession(id: summary.id)
+    }
+
+    private func saveTimeOverride(for sessionId: String) {
+        let start = draftOverrideShootingStart
+        let end = draftOverrideEndedEnabled ? draftOverrideEndedAt : nil
+        if let end, start >= end {
+            activeAlert = .validation("拍摄开始需早于结束时间")
+            return
+        }
+        if draftOverrideSelectingEnabled {
+            let selecting = draftOverrideSelectingStart
+            let validationEnd = end ?? now
+            guard selecting >= start && selecting <= validationEnd else {
+                activeAlert = .validation("选片开始需在拍摄开始与结束之间")
+                return
+            }
+        }
+        let overrideValue = SessionTimeOverride(
+            shootingStart: start,
+            selectingStart: draftOverrideSelectingEnabled ? draftOverrideSelectingStart : nil,
+            endedAt: end,
+            updatedAt: now
+        )
+        timeOverrideStore.update(overrideValue, for: sessionId)
+        timeEditingSession = nil
+    }
+
+    private func timeOverrideEditor(sessionId: String) -> some View {
+        NavigationStack {
+            Form {
+                Section("时间更正") {
+                    DatePicker("拍摄开始", selection: $draftOverrideShootingStart, displayedComponents: [.date, .hourAndMinute])
+                    Toggle("有选片开始", isOn: $draftOverrideSelectingEnabled)
+                    if draftOverrideSelectingEnabled {
+                        DatePicker("选片开始", selection: $draftOverrideSelectingStart, displayedComponents: [.date, .hourAndMinute])
+                    }
+                    Toggle("有结束时间", isOn: $draftOverrideEndedEnabled)
+                    if draftOverrideEndedEnabled {
+                        DatePicker("结束", selection: $draftOverrideEndedAt, displayedComponents: [.date, .hourAndMinute])
+                    }
+                }
+                Section {
+                    Button("清除更正", role: .destructive) {
+                        timeOverrideStore.clear(for: sessionId)
+                        timeEditingSession = nil
+                    }
+                }
+            }
+            .navigationTitle("更正时间")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        timeEditingSession = nil
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        saveTimeOverride(for: sessionId)
+                    }
+                }
+            }
+        }
+    }
+
     private var todayBanner: some View {
         let isoCal = Calendar(identifier: .iso8601)
-        let todaySessions = sessionSummaries.filter { summary in
-            guard let shootingStart = summary.shootingStart else { return false }
+        let todaySessions = effectiveSessionSummaries.filter { summary in
+            guard let shootingStart = effectiveTimes(for: summary).shootingStart else { return false }
             return isoCal.isDateInToday(shootingStart)
         }
         let totals = todaySessions.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, summary in
@@ -688,8 +1020,8 @@ struct ContentView: View {
 
     private var statsView: some View {
         let isoCal = Calendar(identifier: .iso8601)
-        let filteredSessions = sessionSummaries.filter { summary in
-            guard let shootingStart = summary.shootingStart else { return false }
+        let filteredSessions = effectiveSessionSummaries.filter { summary in
+            guard let shootingStart = effectiveTimes(for: summary).shootingStart else { return false }
             switch statsRange {
             case .today:
                 return isoCal.isDateInToday(shootingStart)
@@ -784,7 +1116,7 @@ struct ContentView: View {
             return (avgText, shareText, weightedText)
         }()
         let reviewDigestText = dailyReviewDigestText()
-        let orderById = Dictionary(uniqueKeysWithValues: sessionSummaries.enumerated().map { ($0.element.id, $0.offset + 1) })
+        let orderById = Dictionary(uniqueKeysWithValues: effectiveSessionSummaries.enumerated().map { ($0.element.id, $0.offset + 1) })
         let sessionLabel: (SessionSummary) -> String = { summary in
             var parts: [String] = []
             if let order = orderById[summary.id] {
@@ -792,7 +1124,7 @@ struct ContentView: View {
             } else {
                 parts.append("第?单")
             }
-            if let start = summary.shootingStart ?? sessionStartTime(for: summary) {
+            if let start = effectiveSessionStartTime(for: summary) {
                 parts.append(formatSessionTime(start))
             }
             return parts.joined(separator: " ")
@@ -834,8 +1166,9 @@ struct ContentView: View {
         let mergedWorkIntervals: [(Date, Date)] = {
             guard let shiftWindow else { return [] }
             let raw = filteredSessions.compactMap { summary -> (Date, Date)? in
-                guard let start = summary.shootingStart else { return nil }
-                let end = summary.endedAt ?? now
+                let times = effectiveTimes(for: summary)
+                guard let start = times.shootingStart else { return nil }
+                let end = times.endedAt ?? now
                 return (start, end)
             }
             let clipped = raw.compactMap { interval -> (Date, Date)? in
@@ -920,6 +1253,16 @@ struct ContentView: View {
                 .frame(height: 12)
             } else {
                 Text("暂无上班记录")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if statsRange == .today {
+                Button("补记一单") {
+                    startManualSessionDraft()
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Text("仅今日可补记")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1407,11 +1750,11 @@ struct ContentView: View {
 
     private func dailyReviewDigestText() -> String {
         let isoCal = Calendar(identifier: .iso8601)
-        let todaySessions = sessionSummaries.filter { summary in
-            guard let shootingStart = summary.shootingStart else { return false }
+        let todaySessions = effectiveSessionSummaries.filter { summary in
+            guard let shootingStart = effectiveTimes(for: summary).shootingStart else { return false }
             return isoCal.isDateInToday(shootingStart)
         }
-        let ordered = todaySessions.sorted { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
+        let ordered = todaySessions.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
         var lines: [String] = []
         for (index, summary) in ordered.enumerated() {
             let meta = metaStore.meta(for: summary.id)
@@ -1419,7 +1762,7 @@ struct ContentView: View {
             guard !note.isEmpty else { continue }
             var parts: [String] = []
             let order = index + 1
-            let timeText = formatSessionTime(summary.shootingStart ?? sessionSortKey(for: summary))
+            let timeText = formatSessionTime(effectiveSessionStartTime(for: summary) ?? effectiveSessionSortKey(for: summary))
             parts.append("第\(order)单 \(timeText)")
             if let amount = meta.amountCents {
                 parts.append(formatAmount(cents: amount))
@@ -1497,24 +1840,25 @@ struct ContentView: View {
     }
 
     private func sessionDurations(for summary: SessionSummary) -> (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval?) {
-        guard let shootingStart = summary.shootingStart else {
+        let times = effectiveTimes(for: summary)
+        guard let shootingStart = times.shootingStart else {
             return (0, 0, nil)
         }
-        let endTime = summary.endedAt ?? now
+        let endTime = times.endedAt ?? now
         let total = max(0, endTime.timeIntervalSince(shootingStart))
 
         let shooting: TimeInterval
-        if let selectingStart = summary.selectingStart {
+        if let selectingStart = times.selectingStart {
             shooting = max(0, selectingStart.timeIntervalSince(shootingStart))
-        } else if let endedAt = summary.endedAt {
+        } else if let endedAt = times.endedAt {
             shooting = max(0, endedAt.timeIntervalSince(shootingStart))
         } else {
             shooting = max(0, now.timeIntervalSince(shootingStart))
         }
 
         let selecting: TimeInterval?
-        if let selectingStart = summary.selectingStart {
-            let selectingEnd = summary.endedAt ?? now
+        if let selectingStart = times.selectingStart {
+            let selectingEnd = times.endedAt ?? now
             selecting = max(0, selectingEnd.timeIntervalSince(selectingStart))
         } else {
             selecting = nil
@@ -1526,6 +1870,14 @@ struct ContentView: View {
     private func makeSessionId(startedAt: Date) -> String {
         let base = "session-\(Int(startedAt.timeIntervalSince1970 * 1000))"
         if sessionSummaries.contains(where: { $0.id == base }) {
+            return base + "-" + UUID().uuidString
+        }
+        return base
+    }
+
+    private func makeManualSessionId(startedAt: Date) -> String {
+        let base = "manual-\(Int(startedAt.timeIntervalSince1970 * 1000))"
+        if sessionSummaries.contains(where: { $0.id == base }) || manualSessionStore.session(for: base) != nil {
             return base + "-" + UUID().uuidString
         }
         return base
