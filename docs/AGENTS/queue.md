@@ -148,13 +148,17 @@ Status: DONE (merged in PR #87)
 ID: TC-IOS-STATS-AVGSELRATE-EXCLUDE-ALLTAKE-V1
 Status: DONE (merged in PR #89)
 
-## ACTIVE — TC-IOS-STATS-TOP3-V1
+## DONE — TC-IOS-STATS-TOP3-V1
 ID: TC-IOS-STATS-TOP3-V1
-Title: Stats Top 3（收入 / RPH / 用时）
+Status: DONE (merged in PR #91)
+
+## ACTIVE — TC-IOS-DAILY-REVIEW-DIGEST-V1
+ID: TC-IOS-DAILY-REVIEW-DIGEST-V1
+Title: Stats 今日复盘备注汇总（可复制/分享）
 AssignedTo: Executor
 
 Goal:
-- Stats 页面新增 “Top 3” 区块：收入 Top3 / RPH Top3 / 用时 Top3，随范围切换同步变化。
+- 将“今日每单复盘备注”汇总为可复制/可分享文本，便于每日复盘。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -165,23 +169,21 @@ Guardrails:
 - PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
 Definitions:
-- 范围过滤：复用 Stats 现有 今日/本周/本月 口径（按 shootingStart 归属范围，ISO 周一规则）。
-- 收入 Top3：仅纳入 amount 有值的 session。
-- RPH Top3：仅纳入 amount 有值 且 totalSeconds>0 的 session。
-- 用时 Top3：仅纳入 totalSeconds>0 的 session。
-- 排序：降序取前 3；不足 3 条显示实际条数或“暂无足够数据”。
+- 今日口径：复用 Stats 现有“今日”过滤（按 shootingStart 归属范围，ISO 周一规则）。
+- 仅收集 reviewNote 非空（trim 后长度 > 0）。
+- 顺序：从早到晚（oldest=第1单）。
 
 Acceptance:
-- Stats 增加 “Top 3” 区块，分三组：收入 / RPH / 用时。
-- 每条一行展示（示例：`第N单 HH:mm  ¥xxx` / `RPH ¥xxx/小时` / `用时 mm:ss`）。
-- Top 3 随 今日/本周/本月 切换同步变化。
+- Stats 新增 “今日复盘备注” 区块，提供 查看/复制 按钮。
+- 弹出 sheet 展示汇总文本，并提供 复制 + 分享。
+- 文本格式：`YYYY-MM-DD 今日复盘备注` + 每条一行：
+  - `第N单 HH:mm  ¥金额  拍S 选K  ——  备注内容`（缺失字段省略，但第N单+HH:mm必须有）。
 
 Manual Verification:
-- A：切换 今日/本周/本月 → Top3 随范围变化（数据足够时）。
-- B：收入 Top3 排序正确（高→低）。
-- C：RPH Top3 排序正确（高→低）。
-- D：用时 Top3 排序正确（长→短）。
-- E：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+- A：今天≥2条备注时汇总包含且顺序正确。
+- B：空备注不收集。
+- C：复制/分享可用。
+- D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
