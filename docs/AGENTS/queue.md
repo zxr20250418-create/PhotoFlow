@@ -308,7 +308,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-SHIFT-CALENDAR-V1
+## DONE — TC-IOS-SHIFT-CALENDAR-V1
+Status: DONE (merged in PR #109)
 ID: TC-IOS-SHIFT-CALENDAR-V1
 Title: 月历记录（每日收入 + 上班时长）& 上下班时间可补记/更正
 AssignedTo: Executor
