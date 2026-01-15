@@ -156,13 +156,17 @@ Status: DONE (merged in PR #91)
 ID: TC-IOS-DAILY-REVIEW-DIGEST-V1
 Status: DONE (merged in PR #93)
 
-## ACTIVE — TC-IOS-HOME-SESSION-DETAIL-V1
+## DONE — TC-IOS-HOME-SESSION-DETAIL-V1
 ID: TC-IOS-HOME-SESSION-DETAIL-V1
-Title: 单子详情页（时间线/完整备注/结算信息/编辑）
+Status: DONE (merged in PR #95)
+
+## ACTIVE — TC-IOS-DATA-QUALITY-V1
+ID: TC-IOS-DATA-QUALITY-V1
+Title: Stats 数据质量（缺失/异常）
 AssignedTo: Executor
 
 Goal:
-- Home 负责扫读；点进单子详情页展示事件时间线、完整备注、结算信息，并提供编辑入口。
+- Stats 新增“数据质量”区块：展示缺失/异常计数与具体单子，并可跳转详情补填。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -172,21 +176,23 @@ Guardrails:
 - 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
 - PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
+Definitions:
+- 范围过滤：复用 Stats 今日/本周/本月口径（按 shootingStart 归属范围，ISO 周一规则）。
+- 缺失项：金额缺失 / 拍摄张数缺失或<=0 / 选片张数缺失 / 备注缺失（trim 空）。
+- 异常项：selectedCount > shotCount；总时长==0。
+- 全要单不算异常：shotCount>0 && selectedCount==shotCount。
+
 Acceptance:
-- Home 每单卡片可点击进入详情页（NavigationLink 或等价跳转）。
-- 详情页 Header：左侧第N单 + HH:mm；右侧金额（缺失 `--`）；第二行 RPH（不可算 `--`）。
-- 结算信息：金额/拍摄张数/选片张数；若 selected==shot 且 shot>0 显示“全要”；选片率不可算 `--`。
-- 事件时间线：拍摄开始/选片开始/结束（HH:mm:ss），缺失显示 `--` 或不显示。
-- 复盘备注：展示完整备注（可选中），提供复制按钮。
-- 编辑入口：编辑金额/拍摄张数/选片张数/复盘备注，保存后 Home 与详情即时更新且持久化。
-- Home 默认态不再展示事件时间线明细（时间线只在详情页）。
+- Stats 增加“数据质量”区块，摘要显示：缺失 X · 异常 Y。
+- 缺失列表：`第N单 HH:mm：缺金额/缺拍/缺选/缺备注`。
+- 异常列表：`第N单 HH:mm：选片>拍摄/总时长为0`。
+- 点击条目跳转到单子详情页进行编辑补填。
 
 Manual Verification:
-- A：Home 点任意一单可进入详情页，返回不丢状态。
-- B：详情页时间线正确显示；Home 不显示时间线明细。
-- C：详情页完整备注可查看并复制。
-- D：编辑后 Home/Stats 同步更新，重启仍保留。
-- E：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+- A：切换 今日/本周/本月 → 缺失/异常计数同步变化。
+- B：列表能列出具体单子；点击可跳到详情页。
+- C：补填后计数/列表即时更新；重启后仍正确。
+- D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
