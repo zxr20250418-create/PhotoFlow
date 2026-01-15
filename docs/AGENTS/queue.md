@@ -152,13 +152,17 @@ Status: DONE (merged in PR #89)
 ID: TC-IOS-STATS-TOP3-V1
 Status: DONE (merged in PR #91)
 
-## ACTIVE — TC-IOS-DAILY-REVIEW-DIGEST-V1
+## DONE — TC-IOS-DAILY-REVIEW-DIGEST-V1
 ID: TC-IOS-DAILY-REVIEW-DIGEST-V1
-Title: Stats 今日复盘备注汇总（可复制/分享）
+Status: DONE (merged in PR #93)
+
+## ACTIVE — TC-IOS-HOME-SESSION-DETAIL-V1
+ID: TC-IOS-HOME-SESSION-DETAIL-V1
+Title: 单子详情页（时间线/完整备注/结算信息/编辑）
 AssignedTo: Executor
 
 Goal:
-- 将“今日每单复盘备注”汇总为可复制/可分享文本，便于每日复盘。
+- Home 负责扫读；点进单子详情页展示事件时间线、完整备注、结算信息，并提供编辑入口。
 
 Scope (Allowed files ONLY):
 - PhotoFlow/PhotoFlow/**/*.swift
@@ -168,22 +172,21 @@ Guardrails:
 - 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
 - PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
 
-Definitions:
-- 今日口径：复用 Stats 现有“今日”过滤（按 shootingStart 归属范围，ISO 周一规则）。
-- 仅收集 reviewNote 非空（trim 后长度 > 0）。
-- 顺序：从早到晚（oldest=第1单）。
-
 Acceptance:
-- Stats 新增 “今日复盘备注” 区块，提供 查看/复制 按钮。
-- 弹出 sheet 展示汇总文本，并提供 复制 + 分享。
-- 文本格式：`YYYY-MM-DD 今日复盘备注` + 每条一行：
-  - `第N单 HH:mm  ¥金额  拍S 选K  ——  备注内容`（缺失字段省略，但第N单+HH:mm必须有）。
+- Home 每单卡片可点击进入详情页（NavigationLink 或等价跳转）。
+- 详情页 Header：左侧第N单 + HH:mm；右侧金额（缺失 `--`）；第二行 RPH（不可算 `--`）。
+- 结算信息：金额/拍摄张数/选片张数；若 selected==shot 且 shot>0 显示“全要”；选片率不可算 `--`。
+- 事件时间线：拍摄开始/选片开始/结束（HH:mm:ss），缺失显示 `--` 或不显示。
+- 复盘备注：展示完整备注（可选中），提供复制按钮。
+- 编辑入口：编辑金额/拍摄张数/选片张数/复盘备注，保存后 Home 与详情即时更新且持久化。
+- Home 默认态不再展示事件时间线明细（时间线只在详情页）。
 
 Manual Verification:
-- A：今天≥2条备注时汇总包含且顺序正确。
-- B：空备注不收集。
-- C：复制/分享可用。
-- D：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+- A：Home 点任意一单可进入详情页，返回不丢状态。
+- B：详情页时间线正确显示；Home 不显示时间线明细。
+- C：详情页完整备注可查看并复制。
+- D：编辑后 Home/Stats 同步更新，重启仍保留。
+- E：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
