@@ -500,6 +500,7 @@ struct ContentView: View {
         let meta = metaStore.meta(for: summary.id)
         let startTime = summary.shootingStart ?? sessionStartTime(for: summary)
         let timeText = startTime.map(formatSessionTime) ?? "--"
+        let orderText = order > 0 ? "第\(order)单" : "第?单"
         let amountText = meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
         let rphLine = rphText(for: summary)
         let shot = meta.shotCount
@@ -518,7 +519,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline) {
-                        Text("第\(order)单 \(timeText)")
+                        Text("\(orderText) \(timeText)")
                             .font(.headline)
                         Spacer(minLength: 8)
                         Text(amountText)
@@ -811,7 +812,38 @@ struct ContentView: View {
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
-        return VStack(alignment: .leading, spacing: 8) {
+        let qualityItems: [(summary: SessionSummary, missing: [String], anomalies: [String])] = filteredSessions.map { summary in
+            let meta = metaStore.meta(for: summary.id)
+            var missing: [String] = []
+            if meta.amountCents == nil {
+                missing.append("缺金额")
+            }
+            let shot = meta.shotCount
+            let selected = meta.selectedCount
+            if shot == nil || (shot ?? 0) <= 0 {
+                missing.append("缺拍")
+            }
+            if selected == nil {
+                missing.append("缺选")
+            }
+            let note = meta.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if note.isEmpty {
+                missing.append("缺备注")
+            }
+            var anomalies: [String] = []
+            if let shot, let selected, shot > 0, selected > shot {
+                anomalies.append("选片>拍摄")
+            }
+            let totalSeconds = sessionDurations(for: summary).total
+            if totalSeconds <= 0 {
+                anomalies.append("总时长为0")
+            }
+            return (summary, missing, anomalies)
+        }
+        let missingItems = qualityItems.filter { !$0.missing.isEmpty }
+        let anomalyItems = qualityItems.filter { !$0.anomalies.isEmpty }
+        return NavigationStack {
+            VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
                 ForEach(StatsRange.allCases, id: \.self) { range in
                     Text(range.title).tag(range)
@@ -909,9 +941,50 @@ struct ContentView: View {
                     }
                 }
             }
+            Divider()
+            Text("数据质量")
+                .font(.headline)
+            Text("缺失 \(missingItems.count) · 异常 \(anomalyItems.count)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("缺失")
+                .font(.subheadline)
+            if missingItems.isEmpty {
+                Text("暂无缺失")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(missingItems.enumerated()), id: \.offset) { _, item in
+                    let order = orderById[item.summary.id] ?? 0
+                    let reason = item.missing.joined(separator: "/")
+                    NavigationLink {
+                        sessionDetailView(summary: item.summary, order: order)
+                    } label: {
+                        Text("\(sessionLabel(item.summary))：\(reason)")
+                    }
+                }
+            }
+            Text("异常")
+                .font(.subheadline)
+            if anomalyItems.isEmpty {
+                Text("暂无异常")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(anomalyItems.enumerated()), id: \.offset) { _, item in
+                    let order = orderById[item.summary.id] ?? 0
+                    let reason = item.anomalies.joined(separator: "/")
+                    NavigationLink {
+                        sessionDetailView(summary: item.summary, order: order)
+                    } label: {
+                        Text("\(sessionLabel(item.summary))：\(reason)")
+                    }
+                }
+            }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding()
     }
 
     private var bottomBar: some View {
