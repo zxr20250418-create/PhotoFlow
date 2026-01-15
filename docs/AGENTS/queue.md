@@ -204,7 +204,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-SESSION-BACKFILL-FIXTIME-V1
+## DONE — TC-IOS-SESSION-BACKFILL-FIXTIME-V1
+Status: DONE (merged in PR #103)
 ID: TC-IOS-SESSION-BACKFILL-FIXTIME-V1
 Title: 补记一单 + 更正时间（覆盖统计与时间线）
 AssignedTo: Executor
@@ -242,6 +243,48 @@ Manual Verification:
 - C：清除更正后回到原始时间（统计随之恢复）。
 - D：补记/更正数据重启后仍存在。
 - E：ios_safe PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
+## ACTIVE — TC-IOS-DATA-QUALITY-V2
+ID: TC-IOS-DATA-QUALITY-V2
+Title: Stats 数据质量（缺失/异常提示，支持直达编辑）
+AssignedTo: Executor
+
+Goal:
+- 在 Stats（今日/本周/本月范围）新增“数据质量”区块：展示缺失/异常计数，并列出具体单子；点击条目进入 SessionDetail 补填。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Requirements:
+- 范围口径：复用 Stats 现有 segmented 的范围过滤（按 shootingStart 归属范围，ISO 周一规则保持一致）。
+- 缺失项：amount 为空；shotCount 为空或 <=0；selectedCount 为空；reviewNote trim 后为空。
+- 异常项：selectedCount > shotCount；总时长 == 0（或不可算）。
+- 全要单不算异常：shotCount>0 && selectedCount==shotCount。
+- UI：Stats 新增 section“数据质量”，顶部摘要“缺失 X · 异常 Y”，下方列出缺失/异常条目。
+- 交互：点击条目跳转 SessionDetailView，便于补填/纠错。
+
+Acceptance:
+- 切换今日/本周/本月时，缺失/异常计数与列表随范围变化。
+- 列表能显示“第N单 HH:mm：缺金额/缺拍/缺选/缺备注 …”或“选片>拍摄”等简要说明。
+- 在详情页补填后返回 Stats，计数/列表实时更新；重启后仍正确。
+- `bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+
+Manual Verification:
+- A：Stats 在今日/本周/本月切换时，缺失/异常计数同步变化。
+- B：缺失/异常列表能列出具体单子；点击可跳到详情页。
+- C：在详情页补填后返回 Stats，计数/列表即时更新；重启后仍正确。
+- D：ios_safe PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
