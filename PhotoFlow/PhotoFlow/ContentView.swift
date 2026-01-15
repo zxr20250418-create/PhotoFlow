@@ -335,6 +335,12 @@ struct ContentView: View {
         var endedAt: Date?
     }
 
+    struct DataQualityItem: Identifiable {
+        let id = UUID()
+        let summary: SessionSummary
+        let text: String
+    }
+
     enum ActiveAlert: Identifiable {
         case notOnDuty
         case cannotEndWhileShooting
@@ -422,6 +428,7 @@ struct ContentView: View {
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
     @State private var isReviewDigestPresented = false
+    @State private var isDataQualityPresented = false
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -955,6 +962,57 @@ struct ContentView: View {
         }
     }
 
+    private func dataQualityListView(
+        missing: [DataQualityItem],
+        anomaly: [DataQualityItem],
+        orderById: [String: Int]
+    ) -> some View {
+        NavigationStack {
+            List {
+                Section("缺失") {
+                    if missing.isEmpty {
+                        Text("暂无缺失")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(missing) { item in
+                            let order = orderById[item.summary.id] ?? 1
+                            NavigationLink {
+                                sessionDetailView(summary: item.summary, order: order)
+                            } label: {
+                                Text(item.text)
+                            }
+                        }
+                    }
+                }
+                Section("异常") {
+                    if anomaly.isEmpty {
+                        Text("暂无异常")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(anomaly) { item in
+                            let order = orderById[item.summary.id] ?? 1
+                            NavigationLink {
+                                sessionDetailView(summary: item.summary, order: order)
+                            } label: {
+                                Text(item.text)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("数据质量")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("关闭") {
+                        isDataQualityPresented = false
+                    }
+                }
+            }
+        }
+    }
+
     private var todayBanner: some View {
         let isoCal = Calendar(identifier: .iso8601)
         let todaySessions = effectiveSessionSummaries.filter { summary in
@@ -1157,6 +1215,7 @@ struct ContentView: View {
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
+        let dataQuality = dataQualityReport(for: filteredSessions, sessionLabel: sessionLabel)
         let shiftWindow: (start: Date, end: Date)? = {
             guard let start = shiftStart else { return nil }
             let end = shiftEnd ?? (syncStore.isOnDuty ? now : nil)
@@ -1356,6 +1415,24 @@ struct ContentView: View {
                 ForEach(Array(durationTop3.enumerated()), id: \.offset) { _, item in
                     Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
                 }
+            }
+            Divider()
+            Text("数据质量")
+                .font(.headline)
+            Text("缺失 \(dataQuality.missing.count) · 异常 \(dataQuality.anomaly.count)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Button("查看") {
+                isDataQualityPresented = true
+            }
+            .buttonStyle(.bordered)
+            .disabled(dataQuality.missing.isEmpty && dataQuality.anomaly.isEmpty)
+            .sheet(isPresented: $isDataQualityPresented) {
+                dataQualityListView(
+                    missing: dataQuality.missing,
+                    anomaly: dataQuality.anomaly,
+                    orderById: orderById
+                )
             }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1692,6 +1769,55 @@ struct ContentView: View {
             parts.append("选 \(format(selecting))")
         }
         return parts.joined(separator: "  ")
+    }
+
+    private func dataQualityReport(
+        for sessions: [SessionSummary],
+        sessionLabel: (SessionSummary) -> String
+    ) -> (missing: [DataQualityItem], anomaly: [DataQualityItem]) {
+        var missingItems: [DataQualityItem] = []
+        var anomalyItems: [DataQualityItem] = []
+        let ordered = sessions.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        for summary in ordered {
+            let meta = metaStore.meta(for: summary.id)
+            let label = sessionLabel(summary)
+            var missingParts: [String] = []
+            if meta.amountCents == nil {
+                missingParts.append("缺金额")
+            }
+            if (meta.shotCount ?? 0) <= 0 {
+                missingParts.append("缺拍")
+            }
+            if meta.selectedCount == nil {
+                missingParts.append("缺选")
+            }
+            let note = meta.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if note.isEmpty {
+                missingParts.append("缺备注")
+            }
+            if !missingParts.isEmpty {
+                let text = "\(label)：\(missingParts.joined(separator: " / "))"
+                missingItems.append(DataQualityItem(summary: summary, text: text))
+            }
+
+            var anomalyParts: [String] = []
+            if let shot = meta.shotCount, let selected = meta.selectedCount {
+                if shot == 0 && selected > 0 {
+                    anomalyParts.append("拍摄=0但有选片")
+                } else if selected > shot {
+                    anomalyParts.append("选片>拍摄")
+                }
+            }
+            let total = sessionDurations(for: summary).total
+            if total <= 0 {
+                anomalyParts.append("总时长=0")
+            }
+            if !anomalyParts.isEmpty {
+                let text = "\(label)：\(anomalyParts.joined(separator: " / "))"
+                anomalyItems.append(DataQualityItem(summary: summary, text: text))
+            }
+        }
+        return (missingItems, anomalyItems)
     }
 
     private func startEditingMeta(for sessionId: String) {
