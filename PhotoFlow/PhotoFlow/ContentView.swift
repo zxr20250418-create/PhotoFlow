@@ -643,6 +643,47 @@ struct ContentView: View {
                 : "--"
             return (avgText, shareText, weightedText)
         }()
+        let orderById = Dictionary(uniqueKeysWithValues: sessionSummaries.enumerated().map { ($0.element.id, $0.offset + 1) })
+        let sessionLabel: (SessionSummary) -> String = { summary in
+            var parts: [String] = []
+            if let order = orderById[summary.id] {
+                parts.append("第\(order)单")
+            } else {
+                parts.append("第?单")
+            }
+            if let start = summary.shootingStart ?? sessionStartTime(for: summary) {
+                parts.append(formatSessionTime(start))
+            }
+            return parts.joined(separator: " ")
+        }
+        let revenueTop3: [(SessionSummary, Int)] = {
+            let items = filteredSessions.compactMap { summary -> (SessionSummary, Int)? in
+                let meta = metaStore.meta(for: summary.id)
+                guard let amount = meta.amountCents else { return nil }
+                return (summary, amount)
+            }
+            return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
+        }()
+        let rphTop3: [(SessionSummary, Double)] = {
+            let items = filteredSessions.compactMap { summary -> (SessionSummary, Double)? in
+                let meta = metaStore.meta(for: summary.id)
+                guard let amount = meta.amountCents else { return nil }
+                let totalSeconds = sessionDurations(for: summary).total
+                guard totalSeconds > 0 else { return nil }
+                let hours = totalSeconds / 3600
+                let revenue = Double(amount) / 100
+                return (summary, revenue / hours)
+            }
+            return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
+        }()
+        let durationTop3: [(SessionSummary, TimeInterval)] = {
+            let items = filteredSessions.compactMap { summary -> (SessionSummary, TimeInterval)? in
+                let totalSeconds = sessionDurations(for: summary).total
+                guard totalSeconds > 0 else { return nil }
+                return (summary, totalSeconds)
+            }
+            return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
+        }()
         return VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $statsRange) {
                 ForEach(StatsRange.allCases, id: \.self) { range in
@@ -668,6 +709,43 @@ struct ContentView: View {
             Text("RPH \(rphText)")
             Text("平均选片率（按单） \(avgSelectRateText)（全要 \(allTakeShareText)）")
             Text("选片率（按张） \(weightedPickRateText)")
+            Divider()
+            Text("Top 3")
+                .font(.headline)
+            Text("收入")
+                .font(.subheadline)
+            if revenueTop3.isEmpty {
+                Text("暂无足够数据")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(revenueTop3.enumerated()), id: \.offset) { _, item in
+                    Text("\(sessionLabel(item.0))  \(formatAmount(cents: item.1))")
+                }
+            }
+            Text("RPH")
+                .font(.subheadline)
+            if rphTop3.isEmpty {
+                Text("暂无足够数据")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(rphTop3.enumerated()), id: \.offset) { _, item in
+                    let rphLine = String(format: "RPH ¥%.0f/小时", item.1)
+                    Text("\(sessionLabel(item.0))  \(rphLine)")
+                }
+            }
+            Text("用时")
+                .font(.subheadline)
+            if durationTop3.isEmpty {
+                Text("暂无足够数据")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(durationTop3.enumerated()), id: \.offset) { _, item in
+                    Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
