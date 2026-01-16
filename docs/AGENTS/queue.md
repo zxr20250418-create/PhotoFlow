@@ -204,6 +204,56 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
+## ACTIVE — TC-IOS-SESSION-QUICK-LAST-V1
+Status: ACTIVE
+ID: TC-IOS-SESSION-QUICK-LAST-V1
+Title: 一键补记/改记最近一单
+AssignedTo: Executor
+
+Goal:
+- 提供一个“入口很浅”的快捷操作，能立刻补记/改记最近一单，减少漏填。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Definitions:
+- 最近一单：当前 shift（上班→下班）范围内 effectiveEnd 最大的 session；effectiveEnd = endedAt ?? now。
+- 若当前 shiftStart 不存在（未上班）：改为“今天”内 effectiveEnd 最大的 session。
+- 若范围内无 session：改记最近一单置灰/隐藏，补记仍可用。
+
+Requirements:
+- 入口：底部中间主按钮长按菜单新增：
+  - 补记最近一单
+  - 改记最近一单（无最近一单则置灰/隐藏）
+- 补记最近一单：弹出 sheet 表单（startAt/endAt/selectingStart/amount/shotCount/selectedCount/reviewNote）。
+- 改记最近一单：同一 sheet，预填最近一单数据（时间 override 优先）。
+- 保存后立即反映到 Home/Stats/Top3/上班时间线。
+
+Acceptance:
+- 长按主按钮出现“补记最近一单/改记最近一单”。
+- 补记保存后：Home/Stats/时间线都出现并计入。
+- 改记保存后：统计立即更新。
+- 重启后仍存在（持久化 OK）。
+- `bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+
+Manual Verification:
+- A：长按主按钮出现“补记最近一单/改记最近一单”。
+- B：补记保存后，Home/Stats/时间线都出现并计入。
+- C：改记保存后，统计立即更新。
+- D：重启后仍存在（持久化 OK）。
+- E：ios_safe PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
 ## DONE — TC-IOS-SESSION-BACKFILL-FIXTIME-V1
 Status: DONE (merged in PR #103)
 ID: TC-IOS-SESSION-BACKFILL-FIXTIME-V1
