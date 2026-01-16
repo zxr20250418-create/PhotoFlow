@@ -371,8 +371,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-SESSION-DELETE-VOID-V1
-Status: ACTIVE
+## DONE — TC-IOS-SESSION-DELETE-VOID-V1
+Status: DONE (merged in PR #113)
 ID: TC-IOS-SESSION-DELETE-VOID-V1
 Title: 删除 + 作废（对所有单）
 AssignedTo: Executor
