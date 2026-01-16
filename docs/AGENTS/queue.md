@@ -204,6 +204,51 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
+## ACTIVE — TC-IOS-HOME-HEADER-CLEANUP-V1
+Status: ACTIVE
+ID: TC-IOS-HOME-HEADER-CLEANUP-V1
+Title: Home 固定区 UI 优化（收入卡精简 + 备忘折叠）
+AssignedTo: Executor
+
+Goal:
+- 今日收入卡只显示三项，并支持可选显示本月/本年收入。
+- 备忘使用折叠卡方案 A：主页预览两行，编辑时弹出 sheet。
+- 顶部固定区不随滚动，时间线列表可滚动。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Requirements:
+- 今日收入卡默认显示三项：今日收入 / 今日单数 / 今日总时长。
+- 可选显示：本月收入 / 本年收入（默认隐藏；卡内小按钮展开后可切换）。
+- 备忘折叠卡：默认两行预览 + 编辑按钮；编辑弹出 sheet 保存后回到两行预览。
+- 仅会话时间线列表可滚动；固定区不滚动。
+
+Acceptance:
+- A：今日收入卡只显示三项（默认态）。
+- B：本月/本年收入可隐藏/显示（默认隐藏）。
+- C：备忘两行预览 + 编辑 sheet 保存生效，重启仍保留。
+- D：时间线可滚动，顶部固定区不随滚动，底部按钮可点。
+- E：`bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+
+Manual Verification:
+- A：Home 顶部今日收入卡只显示 今日收入/单数/总时长。
+- B：本月收入、本年收入可隐藏/显示（默认隐藏；展开后可开关）。
+- C：备忘默认两行预览；编辑保存后回到预览，重启仍保留。
+- D：会话时间线可滚动；顶部固定区不随滚动；底部按钮可点。
+- E：ios_safe PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
 ## DONE — TC-IOS-SESSION-QUICK-LAST-V1
 Status: DONE (merged in PR #120)
 ID: TC-IOS-SESSION-QUICK-LAST-V1
