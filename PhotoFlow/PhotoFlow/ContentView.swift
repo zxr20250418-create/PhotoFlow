@@ -574,6 +574,29 @@ struct ContentView: View {
         let id: String
     }
 
+    private enum QuickEditorMode: Identifiable {
+        case create
+        case edit(String)
+
+        var id: String {
+            switch self {
+            case .create:
+                return "quick-create"
+            case .edit(let sessionId):
+                return "quick-edit-\(sessionId)"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .create:
+                return "补记最近一单"
+            case .edit:
+                return "改记最近一单"
+            }
+        }
+    }
+
     private enum StatsRange: String, CaseIterable {
         case today
         case week
@@ -620,6 +643,7 @@ struct ContentView: View {
     @State private var draftManualSelectedCount = ""
     @State private var draftManualReviewNote = ""
     @State private var isManualSessionPresented = false
+    @State private var quickEditorMode: QuickEditorMode?
     @State private var draftOverrideShootingStart = Date()
     @State private var draftOverrideSelectingStart = Date()
     @State private var draftOverrideEndedAt = Date()
@@ -707,6 +731,9 @@ struct ContentView: View {
         .sheet(isPresented: $isManualSessionPresented) {
             manualSessionEditor
         }
+        .sheet(item: $quickEditorMode) { mode in
+            quickSessionEditor(mode: mode)
+        }
         .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
@@ -754,6 +781,54 @@ struct ContentView: View {
 
     private func effectiveSessionSortKey(for summary: SessionSummary) -> Date {
         effectiveSessionStartTime(for: summary) ?? Date.distantPast
+    }
+
+    private func effectiveSessionEndTime(for summary: SessionSummary) -> Date {
+        let times = effectiveTimes(for: summary)
+        return times.endedAt ?? now
+    }
+
+    private var latestQuickEditSession: SessionSummary? {
+        let isoCal = Calendar(identifier: .iso8601)
+        let shiftWindowStart = shiftStart
+        let shiftWindowEnd = shiftEnd ?? now
+        return effectiveSessionSummaries
+            .filter { summary in
+                let end = effectiveSessionEndTime(for: summary)
+                if let shiftWindowStart {
+                    return end >= shiftWindowStart && end <= shiftWindowEnd
+                }
+                return isoCal.isDateInToday(end)
+            }
+            .max { effectiveSessionEndTime(for: $0) < effectiveSessionEndTime(for: $1) }
+    }
+
+    private func openQuickBackfill() {
+        let end = now
+        let start = now.addingTimeInterval(-30 * 60)
+        draftManualShootingStart = start
+        draftManualEndedAt = end
+        draftManualSelectingEnabled = false
+        draftManualSelectingStart = start
+        draftManualAmount = ""
+        draftManualShotCount = ""
+        draftManualSelectedCount = ""
+        draftManualReviewNote = ""
+        quickEditorMode = .create
+    }
+
+    private func openQuickEdit(for summary: SessionSummary) {
+        let times = effectiveTimes(for: summary)
+        draftManualShootingStart = times.shootingStart ?? now
+        draftManualEndedAt = times.endedAt ?? now
+        draftManualSelectingEnabled = times.selectingStart != nil
+        draftManualSelectingStart = times.selectingStart ?? draftManualShootingStart
+        let meta = metaStore.meta(for: summary.id)
+        draftManualAmount = meta.amountCents.map(amountText(from:)) ?? ""
+        draftManualShotCount = meta.shotCount.map(String.init) ?? ""
+        draftManualSelectedCount = meta.selectedCount.map(String.init) ?? ""
+        draftManualReviewNote = meta.reviewNote ?? ""
+        quickEditorMode = .edit(summary.id)
     }
 
     private var homeView: some View {
@@ -1117,19 +1192,25 @@ struct ContentView: View {
         isManualSessionPresented = true
     }
 
-    private func saveManualSession() {
-        let start = draftManualShootingStart
-        let end = draftManualEndedAt
+    private func validateManualTimes(start: Date, end: Date, selectingEnabled: Bool, selecting: Date) -> Bool {
         guard start < end else {
             activeAlert = .validation("拍摄开始需早于结束时间")
-            return
+            return false
         }
-        if draftManualSelectingEnabled {
-            let selecting = draftManualSelectingStart
+        if selectingEnabled {
             guard selecting >= start && selecting <= end else {
                 activeAlert = .validation("选片开始需在拍摄开始与结束之间")
-                return
+                return false
             }
+        }
+        return true
+    }
+
+    private func upsertManualSession() -> String? {
+        let start = draftManualShootingStart
+        let end = draftManualEndedAt
+        guard validateManualTimes(start: start, end: end, selectingEnabled: draftManualSelectingEnabled, selecting: draftManualSelectingStart) else {
+            return nil
         }
         let sessionId = makeManualSessionId(startedAt: start)
         let manual = ManualSession(
@@ -1146,7 +1227,40 @@ struct ContentView: View {
             reviewNote: normalizedNote(from: draftManualReviewNote)
         )
         metaStore.update(meta, for: sessionId)
+        return sessionId
+    }
+
+    private func saveManualSession() {
+        guard upsertManualSession() != nil else { return }
         isManualSessionPresented = false
+    }
+
+    private func saveQuickCreate() {
+        guard upsertManualSession() != nil else { return }
+        quickEditorMode = nil
+    }
+
+    private func saveQuickEdit(sessionId: String) {
+        let start = draftManualShootingStart
+        let end = draftManualEndedAt
+        guard validateManualTimes(start: start, end: end, selectingEnabled: draftManualSelectingEnabled, selecting: draftManualSelectingStart) else {
+            return
+        }
+        let overrideValue = SessionTimeOverride(
+            shootingStart: start,
+            selectingStart: draftManualSelectingEnabled ? draftManualSelectingStart : nil,
+            endedAt: end,
+            updatedAt: now
+        )
+        timeOverrideStore.update(overrideValue, for: sessionId)
+        let meta = SessionMeta(
+            amountCents: parseAmountCents(from: draftManualAmount),
+            shotCount: parseInt(from: draftManualShotCount),
+            selectedCount: parseInt(from: draftManualSelectedCount),
+            reviewNote: normalizedNote(from: draftManualReviewNote)
+        )
+        metaStore.update(meta, for: sessionId)
+        quickEditorMode = nil
     }
 
     private var manualSessionEditor: some View {
@@ -1186,6 +1300,63 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func quickSessionEditor(mode: QuickEditorMode) -> some View {
+        NavigationStack {
+            Form {
+                Section("时间") {
+                    DatePicker("拍摄开始", selection: $draftManualShootingStart, displayedComponents: [.date, .hourAndMinute])
+                    DatePicker("结束", selection: $draftManualEndedAt, displayedComponents: [.date, .hourAndMinute])
+                    Toggle("有选片开始", isOn: $draftManualSelectingEnabled)
+                    if draftManualSelectingEnabled {
+                        DatePicker("选片开始", selection: $draftManualSelectingStart, displayedComponents: [.date, .hourAndMinute])
+                    }
+                }
+                Section("结算") {
+                    TextField("金额", text: $draftManualAmount)
+                        .keyboardType(.decimalPad)
+                    TextField("拍摄张数", text: $draftManualShotCount)
+                        .keyboardType(.numberPad)
+                    TextField("选片张数", text: $draftManualSelectedCount)
+                        .keyboardType(.numberPad)
+                }
+                Section("复盘备注") {
+                    noteEditor(text: $draftManualReviewNote, placeholder: "客户/卡点/下次动作（一句话）")
+                        .frame(minHeight: 100)
+                }
+            }
+            .navigationTitle(mode.title)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        quickEditorMode = nil
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        switch mode {
+                        case .create:
+                            saveQuickCreate()
+                        case .edit(let sessionId):
+                            saveQuickEdit(sessionId: sessionId)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func noteEditor(text: Binding<String>, placeholder: String) -> some View {
+        ZStack(alignment: .topLeading) {
+            if text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(placeholder)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+                    .padding(.leading, 5)
+            }
+            TextEditor(text: text)
         }
     }
 
@@ -2021,13 +2192,7 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .contextMenu {
-                    Button("拍摄") { performStageAction(.shooting) }
-                        .disabled(!canStartShooting)
-                    Button("选片") { performStageAction(.selecting) }
-                        .disabled(!canStartSelecting)
-                    Button("结束") { performStageAction(.ended) }
-                        .disabled(!canEndSession)
-                    Button("下班", role: .destructive) { setDuty(false) }
+                    mainButtonContextMenu
                 }
             )
         }
@@ -2039,7 +2204,36 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .contextMenu {
+                mainButtonContextMenu
+            }
         )
+    }
+
+    @ViewBuilder
+    private var mainButtonContextMenu: some View {
+        if syncStore.isOnDuty {
+            Button("拍摄") { performStageAction(.shooting) }
+                .disabled(!canStartShooting)
+            Button("选片") { performStageAction(.selecting) }
+                .disabled(!canStartSelecting)
+            Button("结束") { performStageAction(.ended) }
+                .disabled(!canEndSession)
+        }
+        Button("补记最近一单") {
+            openQuickBackfill()
+        }
+        if let summary = latestQuickEditSession {
+            Button("改记最近一单") {
+                openQuickEdit(for: summary)
+            }
+        } else {
+            Button("改记最近一单") {}
+                .disabled(true)
+        }
+        if syncStore.isOnDuty {
+            Button("下班", role: .destructive) { setDuty(false) }
+        }
     }
 
     private var canStartShooting: Bool {
