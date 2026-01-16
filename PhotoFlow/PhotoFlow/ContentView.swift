@@ -2464,12 +2464,17 @@ private struct ShiftCalendarView: View {
 
     var body: some View {
         let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: monthCursor)) ?? monthCursor
+        let yearStart = calendar.date(from: calendar.dateComponents([.year], from: monthStart)) ?? monthStart
         let days = monthDays(start: monthStart)
+        let yearDays = yearDays(start: yearStart)
         let leading = leadingBlankCount(monthStart: monthStart)
         let incomeByDay = dailyIncome()
         let monthIncome = days.reduce(0) { $0 + (incomeByDay[shiftRecordStore.dayKey(for: $1)] ?? 0) }
-        let hasIncome = days.contains { incomeByDay[shiftRecordStore.dayKey(for: $0)] != nil }
+        let hasMonthIncome = days.contains { incomeByDay[shiftRecordStore.dayKey(for: $0)] != nil }
         let monthShift = days.reduce(0) { $0 + shiftInfo(for: $1).duration }
+        let yearIncome = yearDays.reduce(0) { $0 + (incomeByDay[shiftRecordStore.dayKey(for: $1)] ?? 0) }
+        let hasYearIncome = yearDays.contains { incomeByDay[shiftRecordStore.dayKey(for: $0)] != nil }
+        let yearShift = yearDays.reduce(0) { $0 + shiftInfo(for: $1).duration }
 
         return NavigationStack {
             ScrollView {
@@ -2491,6 +2496,11 @@ private struct ShiftCalendarView: View {
                         }
                     }
 
+                    let yearIncomeText = hasYearIncome ? formatAmount(yearIncome) : "--"
+                    Text("本年总收入 \(yearIncomeText) · 本年上班时长 \(formatHours(yearShift))")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
                     let weekdaySymbols = weekdayHeaders()
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 7), spacing: 8) {
                         ForEach(weekdaySymbols, id: \.self) { symbol in
@@ -2506,10 +2516,13 @@ private struct ShiftCalendarView: View {
 
                         ForEach(days, id: \.self) { day in
                             let key = shiftRecordStore.dayKey(for: day)
-                            let income = incomeByDay[key]
+                            let income = incomeByDay[key] ?? 0
                             let shift = shiftInfo(for: day)
                             let isSelected = selectedDay.map { calendar.isDate($0, inSameDayAs: day) } ?? false
-                            let incomeText = income.map(formatAmount) ?? "--"
+                            let incomeText = income > 0 ? formatAmount(income) : nil
+                            let shiftText = shift.duration > 0 ? formatHours(shift.duration) : nil
+                            let placeholderIncome = formatAmount(0)
+                            let placeholderShift = formatHours(0)
                             Button {
                                 selectedDay = calendar.startOfDay(for: day)
                             } label: {
@@ -2525,12 +2538,30 @@ private struct ShiftCalendarView: View {
                                                 .frame(width: 6, height: 6)
                                         }
                                     }
-                                    Text("收入 \(incomeText)")
-                                        .font(.caption2)
-                                        .lineLimit(1)
-                                    Text("上班时长 \(shift.display)")
-                                        .font(.caption2)
-                                        .lineLimit(1)
+                                    Group {
+                                        if let incomeText {
+                                            Text(incomeText)
+                                        } else {
+                                            Text(placeholderIncome).hidden()
+                                        }
+                                    }
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    Group {
+                                        if let shiftText {
+                                            Text(shiftText)
+                                        } else {
+                                            Text(placeholderShift).hidden()
+                                        }
+                                    }
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .padding(6)
                                 .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
@@ -2541,7 +2572,7 @@ private struct ShiftCalendarView: View {
                         }
                     }
 
-                    let monthIncomeText = hasIncome ? formatAmount(monthIncome) : "--"
+                    let monthIncomeText = hasMonthIncome ? formatAmount(monthIncome) : "--"
                     Text("本月收入 \(monthIncomeText) · 本月上班时长 \(formatHours(monthShift))")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -2635,6 +2666,11 @@ private struct ShiftCalendarView: View {
 
     private func monthDays(start: Date) -> [Date] {
         guard let range = calendar.range(of: .day, in: .month, for: start) else { return [] }
+        return range.compactMap { calendar.date(byAdding: .day, value: $0 - 1, to: start) }
+    }
+
+    private func yearDays(start: Date) -> [Date] {
+        guard let range = calendar.range(of: .day, in: .year, for: start) else { return [] }
         return range.compactMap { calendar.date(byAdding: .day, value: $0 - 1, to: start) }
     }
 
