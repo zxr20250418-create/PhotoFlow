@@ -204,8 +204,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-SESSION-QUICK-LAST-V1
-Status: ACTIVE
+## DONE — TC-IOS-SESSION-QUICK-LAST-V1
+Status: DONE (merged in PR #120)
 ID: TC-IOS-SESSION-QUICK-LAST-V1
 Title: 一键补记/改记最近一单
 AssignedTo: Executor
