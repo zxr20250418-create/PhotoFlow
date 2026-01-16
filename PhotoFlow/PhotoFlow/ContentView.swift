@@ -2245,6 +2245,9 @@ private struct ShiftCalendarView: View {
         let yearDays = yearDays(start: yearStart)
         let leading = leadingBlankCount(monthStart: monthStart)
         let incomeByDay = dailyIncome()
+        let monthIncome = days.reduce(0) { $0 + (incomeByDay[shiftRecordStore.dayKey(for: $1)] ?? 0) }
+        let hasMonthIncome = days.contains { incomeByDay[shiftRecordStore.dayKey(for: $0)] != nil }
+        let monthShift = days.reduce(0) { $0 + shiftInfo(for: $1).duration }
         let yearIncome = yearDays.reduce(0) { $0 + (incomeByDay[shiftRecordStore.dayKey(for: $1)] ?? 0) }
         let hasYearIncome = yearDays.contains { incomeByDay[shiftRecordStore.dayKey(for: $0)] != nil }
         let yearShift = yearDays.reduce(0) { $0 + shiftInfo(for: $1).duration }
@@ -2268,6 +2271,11 @@ private struct ShiftCalendarView: View {
                             Image(systemName: "chevron.right")
                         }
                     }
+
+                    let yearIncomeText = hasYearIncome ? formatAmount(yearIncome) : "--"
+                    Text("本年总收入 \(yearIncomeText) · 本年上班时长 \(formatHours(yearShift))")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
 
                     let weekdaySymbols = weekdayHeaders()
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 7), spacing: 8) {
@@ -2340,8 +2348,8 @@ private struct ShiftCalendarView: View {
                         }
                     }
 
-                    let yearIncomeText = hasYearIncome ? formatAmount(yearIncome) : "--"
-                    Text("本年总收入 \(yearIncomeText) · 本年上班时长 \(formatHours(yearShift))")
+                    let monthIncomeText = hasMonthIncome ? formatAmount(monthIncome) : "--"
+                    Text("本月收入 \(monthIncomeText) · 本月上班时长 \(formatHours(monthShift))")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
