@@ -1551,6 +1551,111 @@ struct ContentView: View {
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
+        let sessionHeaderText: (SessionSummary) -> String = { summary in
+            let order = orderById[summary.id]
+            let orderText = order.map { "第\($0)单" } ?? "第?单"
+            let timeText = effectiveSessionStartTime(for: summary).map(formatSessionTime) ?? "--"
+            return "\(orderText) \(timeText)"
+        }
+        let lowestRph: (summary: SessionSummary, rph: Double, amountCents: Int, totalSeconds: TimeInterval)? = {
+            let items = filteredSessions.compactMap { summary -> (SessionSummary, Double, Int, TimeInterval)? in
+                let meta = metaStore.meta(for: summary.id)
+                guard let amount = meta.amountCents else { return nil }
+                let totalSeconds = sessionDurations(for: summary).total
+                guard totalSeconds > 0 else { return nil }
+                let hours = totalSeconds / 3600
+                guard hours > 0 else { return nil }
+                let revenue = Double(amount) / 100
+                return (summary, revenue / hours, amount, totalSeconds)
+            }
+            return items.min { $0.1 < $1.1 }
+        }()
+        let longestSession: (summary: SessionSummary, totalSeconds: TimeInterval, amountCents: Int?)? = {
+            let items = filteredSessions.compactMap { summary -> (SessionSummary, TimeInterval, Int?)? in
+                let totalSeconds = sessionDurations(for: summary).total
+                guard totalSeconds > 0 else { return nil }
+                let amount = metaStore.meta(for: summary.id).amountCents
+                return (summary, totalSeconds, amount)
+            }
+            return items.max { $0.1 < $1.1 }
+        }()
+        let allTakeMaxShot: (summary: SessionSummary, shotCount: Int, amountCents: Int?)? = {
+            let items = filteredSessions.compactMap { summary -> (SessionSummary, Int, Int?)? in
+                let meta = metaStore.meta(for: summary.id)
+                guard let shot = meta.shotCount, shot > 0,
+                      let selected = meta.selectedCount else { return nil }
+                if selected > shot { return nil }
+                guard selected == shot else { return nil }
+                return (summary, shot, meta.amountCents)
+            }
+            return items.max { $0.1 < $1.1 }
+        }()
+        let longestIdleGap: (date: Date, start: Date, end: Date, duration: TimeInterval)? = {
+            let isoCal = Calendar(identifier: .iso8601)
+            let formatter = DateFormatter()
+            formatter.calendar = isoCal
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = isoCal.timeZone
+            formatter.dateFormat = "yyyy-MM-dd"
+            let inRange: (Date) -> Bool = { day in
+                switch statsRange {
+                case .today:
+                    return isoCal.isDateInToday(day)
+                case .week:
+                    guard let interval = isoCal.dateInterval(of: .weekOfYear, for: now) else { return false }
+                    return interval.contains(day)
+                case .month:
+                    guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
+                    return interval.contains(day)
+                }
+            }
+            var best: (Date, Date, Date, TimeInterval)?
+            for (key, record) in shiftRecordStore.records {
+                guard let day = formatter.date(from: key),
+                      inRange(day),
+                      let startAt = record.startAt else { continue }
+                let dayStart = isoCal.startOfDay(for: day)
+                let dayEnd = isoCal.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
+                let shiftStart = max(startAt, dayStart)
+                let shiftEnd = min(record.endAt ?? now, dayEnd)
+                guard shiftEnd > shiftStart else { continue }
+                let raw = filteredSessions.compactMap { summary -> (Date, Date)? in
+                    let times = effectiveTimes(for: summary)
+                    guard let start = times.shootingStart else { return nil }
+                    let end = times.endedAt ?? now
+                    let clippedStart = max(start, shiftStart)
+                    let clippedEnd = min(end, shiftEnd)
+                    return clippedEnd > clippedStart ? (clippedStart, clippedEnd) : nil
+                }
+                let sorted = raw.sorted { $0.0 < $1.0 }
+                var merged: [(Date, Date)] = []
+                for interval in sorted {
+                    if let last = merged.last, interval.0 <= last.1 {
+                        let newEnd = max(last.1, interval.1)
+                        merged[merged.count - 1].1 = newEnd
+                    } else {
+                        merged.append(interval)
+                    }
+                }
+                var cursor = shiftStart
+                for work in merged {
+                    if work.0 > cursor {
+                        let gap = work.0.timeIntervalSince(cursor)
+                        if best == nil || gap > best!.3 {
+                            best = (day, cursor, work.0, gap)
+                        }
+                    }
+                    cursor = max(cursor, work.1)
+                }
+                if cursor < shiftEnd {
+                    let gap = shiftEnd.timeIntervalSince(cursor)
+                    if best == nil || gap > best!.3 {
+                        best = (day, cursor, shiftEnd, gap)
+                    }
+                }
+            }
+            return best.map { ($0.0, $0.1, $0.2, $0.3) }
+        }()
         let dataQuality = dataQualityReport(for: filteredSessions, sessionLabel: sessionLabel)
         let shiftWindow: (start: Date, end: Date)? = {
             guard let start = shiftStart else { return nil }
@@ -1756,6 +1861,67 @@ struct ContentView: View {
                 ForEach(Array(durationTop3.enumerated()), id: \.offset) { _, item in
                     Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
                 }
+            }
+            Divider()
+            Text("Bottom1（最大损耗源）")
+                .font(.headline)
+            if let lowestRph {
+                let summary = lowestRph.summary
+                let order = orderById[summary.id] ?? 0
+                let header = sessionHeaderText(summary)
+                let rphLine = String(format: "RPH ¥%.0f/小时", lowestRph.rph)
+                NavigationLink {
+                    sessionDetailView(summary: summary, order: order)
+                } label: {
+                    Text("\(header) · \(rphLine) · \(formatAmount(cents: lowestRph.amountCents)) · 用时 \(format(lowestRph.totalSeconds))")
+                }
+            } else {
+                Text("最低RPH：无")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let longestSession {
+                let summary = longestSession.summary
+                let order = orderById[summary.id] ?? 0
+                let header = sessionHeaderText(summary)
+                let amountText = longestSession.amountCents.map { formatAmount(cents: $0) }
+                let suffix = amountText.map { " · \($0)" } ?? ""
+                NavigationLink {
+                    sessionDetailView(summary: summary, order: order)
+                } label: {
+                    Text("\(header) · 用时 \(format(longestSession.totalSeconds))\(suffix)")
+                }
+            } else {
+                Text("最耗时：无")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let allTakeMaxShot {
+                let summary = allTakeMaxShot.summary
+                let order = orderById[summary.id] ?? 0
+                let header = sessionHeaderText(summary)
+                let amountText = allTakeMaxShot.amountCents.map { formatAmount(cents: $0) }
+                let suffix = amountText.map { " · \($0)" } ?? ""
+                NavigationLink {
+                    sessionDetailView(summary: summary, order: order)
+                } label: {
+                    Text("\(header) · 全要 · 拍\(allTakeMaxShot.shotCount)张\(suffix)")
+                }
+            } else {
+                Text("全要：无")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let longestIdleGap {
+                let dateText = reviewDateText(longestIdleGap.date)
+                let startText = formatSessionTime(longestIdleGap.start)
+                let endText = formatSessionTime(longestIdleGap.end)
+                let minutes = Int((longestIdleGap.duration / 60).rounded())
+                Text("\(dateText) \(startText)–\(endText) · 空余 \(minutes)m")
+            } else {
+                Text("空余：无")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Divider()
             Text("数据质量")
