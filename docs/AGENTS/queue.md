@@ -204,8 +204,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-HOME-HEADER-CLEANUP-V1
-Status: ACTIVE
+## DONE — TC-IOS-HOME-HEADER-CLEANUP-V1
+Status: DONE (merged in PR #123)
 ID: TC-IOS-HOME-HEADER-CLEANUP-V1
 Title: Home 固定区 UI 优化（收入卡精简 + 备忘折叠）
 AssignedTo: Executor
