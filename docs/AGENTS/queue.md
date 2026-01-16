@@ -415,8 +415,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-STATS-BOTTOM1-V1
-Status: ACTIVE
+## DONE — TC-IOS-STATS-BOTTOM1-V1
+Status: DONE (merged in PR #117)
 ID: TC-IOS-STATS-BOTTOM1-V1
 Title: Bottom1（最大损耗源）
 AssignedTo: Executor
