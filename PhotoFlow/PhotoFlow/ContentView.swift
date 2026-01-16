@@ -2282,10 +2282,11 @@ private struct ShiftCalendarView: View {
 
                         ForEach(days, id: \.self) { day in
                             let key = shiftRecordStore.dayKey(for: day)
-                            let income = incomeByDay[key]
+                            let income = incomeByDay[key] ?? 0
                             let shift = shiftInfo(for: day)
                             let isSelected = selectedDay.map { calendar.isDate($0, inSameDayAs: day) } ?? false
-                            let incomeText = income.map(formatAmount) ?? "--"
+                            let incomeText = income > 0 ? formatAmount(income) : nil
+                            let shiftText = shift.duration > 0 ? formatHours(shift.duration) : nil
                             Button {
                                 selectedDay = calendar.startOfDay(for: day)
                             } label: {
@@ -2301,12 +2302,20 @@ private struct ShiftCalendarView: View {
                                                 .frame(width: 6, height: 6)
                                         }
                                     }
-                                    Text("收入 \(incomeText)")
-                                        .font(.caption2)
-                                        .lineLimit(1)
-                                    Text("上班时长 \(shift.display)")
-                                        .font(.caption2)
-                                        .lineLimit(1)
+                                    if let incomeText {
+                                        Text(incomeText)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .monospacedDigit()
+                                            .lineLimit(1)
+                                    }
+                                    if let shiftText {
+                                        Text(shiftText)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .monospacedDigit()
+                                            .lineLimit(1)
+                                    }
                                 }
                                 .padding(6)
                                 .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
