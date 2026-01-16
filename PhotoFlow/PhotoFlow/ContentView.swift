@@ -289,6 +289,11 @@ final class ManualSessionStore: ObservableObject {
         sessions[id]
     }
 
+    func remove(_ id: String) {
+        sessions.removeValue(forKey: id)
+        save()
+    }
+
     private func load() {
         guard let data = defaults.data(forKey: storageKey),
               let decoded = try? JSONDecoder().decode([String: ManualSession].self, from: data) else {
@@ -386,6 +391,112 @@ final class ShiftRecordStore: ObservableObject {
     private func save() {
         guard let data = try? JSONEncoder().encode(records) else { return }
         defaults.set(data, forKey: storageKey)
+    }
+}
+
+@MainActor
+final class DailyMemoStore: ObservableObject {
+    @Published private(set) var memos: [String: String] = [:]
+    private let storageKey = "pf_daily_memos_v1"
+    private let defaults = UserDefaults.standard
+    private let formatter: DateFormatter
+
+    init() {
+        let calendar = Calendar(identifier: .iso8601)
+        formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        load()
+    }
+
+    func dayKey(for date: Date) -> String {
+        formatter.string(from: date)
+    }
+
+    func memo(for key: String) -> String {
+        memos[key] ?? ""
+    }
+
+    func setMemo(_ memo: String, for key: String) {
+        let trimmed = memo.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            memos.removeValue(forKey: key)
+        } else {
+            memos[key] = memo
+        }
+        save()
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return
+        }
+        memos = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(memos) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}
+
+@MainActor
+final class SessionVisibilityStore: ObservableObject {
+    @Published private(set) var voidedIds: Set<String> = []
+    @Published private(set) var deletedIds: Set<String> = []
+    private let voidedKey = "pf_session_voided_v1"
+    private let deletedKey = "pf_session_deleted_v1"
+    private let defaults = UserDefaults.standard
+
+    init() {
+        load()
+    }
+
+    func isVoided(_ id: String) -> Bool {
+        voidedIds.contains(id)
+    }
+
+    func isDeleted(_ id: String) -> Bool {
+        deletedIds.contains(id)
+    }
+
+    func setVoided(_ id: String, isVoided: Bool) {
+        guard !deletedIds.contains(id) else { return }
+        if isVoided {
+            voidedIds.insert(id)
+        } else {
+            voidedIds.remove(id)
+        }
+        save()
+    }
+
+    func markDeleted(_ id: String) {
+        deletedIds.insert(id)
+        voidedIds.remove(id)
+        save()
+    }
+
+    private func load() {
+        if let data = defaults.data(forKey: voidedKey),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            voidedIds = Set(decoded)
+        }
+        if let data = defaults.data(forKey: deletedKey),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            deletedIds = Set(decoded)
+        }
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(Array(voidedIds)) {
+            defaults.set(data, forKey: voidedKey)
+        }
+        if let data = try? JSONEncoder().encode(Array(deletedIds)) {
+            defaults.set(data, forKey: deletedKey)
+        }
     }
 }
 
@@ -490,8 +601,12 @@ struct ContentView: View {
     @StateObject private var timeOverrideStore: SessionTimeOverrideStore
     @StateObject private var manualSessionStore: ManualSessionStore
     @StateObject private var shiftRecordStore: ShiftRecordStore
+    @StateObject private var dailyMemoStore: DailyMemoStore
+    @StateObject private var sessionVisibilityStore: SessionVisibilityStore
     @State private var editingSession: EditingSession?
     @State private var timeEditingSession: TimeEditingSession?
+    @State private var deleteCandidateId: String?
+    @State private var memoDraft = ""
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
     @State private var draftSelected = ""
@@ -530,6 +645,8 @@ struct ContentView: View {
         _manualSessionStore = StateObject(wrappedValue: ManualSessionStore())
         let shiftStore = ShiftRecordStore()
         _shiftRecordStore = StateObject(wrappedValue: shiftStore)
+        _dailyMemoStore = StateObject(wrappedValue: DailyMemoStore())
+        _sessionVisibilityStore = StateObject(wrappedValue: SessionVisibilityStore())
         let defaults = UserDefaults.standard
         let start = defaults.object(forKey: "pf_shift_start") as? Date
         let end = defaults.object(forKey: "pf_shift_end") as? Date
@@ -610,7 +727,9 @@ struct ContentView: View {
                 endedAt: manual.endedAt
             )
         }
-        return byId.values.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        return byId.values
+            .filter { isSessionVisible($0.id) }
+            .sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
     }
 
     private func effectiveTimes(for summary: SessionSummary) -> SessionTimes {
@@ -639,122 +758,193 @@ struct ContentView: View {
 
     private var homeView: some View {
         return NavigationStack {
-            VStack(spacing: 16) {
-            todayBanner
+            VStack(spacing: 12) {
+                homeFixedHeader
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("会话时间线")
-                    .font(.headline)
-                if effectiveSessionSummaries.isEmpty {
-                    Text("暂无记录")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    let displaySessions = Array(effectiveSessionSummaries.reversed())
-                    ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
-                        let total = displaySessions.count
-                        let order = total - displayIndex
-                        let card = VStack(alignment: .leading, spacing: 4) {
-                            HStack(alignment: .firstTextBaseline) {
-                                HStack(spacing: 6) {
-                                    Text("第\(order)单")
-                                        .font(.subheadline)
-                                        .fontWeight(.semibold)
-                                    if let startTime = effectiveSessionStartTime(for: summary) {
-                                        Text(formatSessionTime(startTime))
-                                            .font(.footnote)
-                                            .foregroundStyle(.secondary)
-                                            .monospacedDigit()
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        Text("会话时间线")
+                            .font(.headline)
+                        if effectiveSessionSummaries.isEmpty {
+                            Text("暂无记录")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            let displaySessions = Array(effectiveSessionSummaries.reversed())
+                            ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
+                                let total = displaySessions.count
+                                let order = total - displayIndex
+                                let card = VStack(alignment: .leading, spacing: 4) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        HStack(spacing: 6) {
+                                            Text("第\(order)单")
+                                                .font(.subheadline)
+                                                .fontWeight(.semibold)
+                                            if let startTime = effectiveSessionStartTime(for: summary) {
+                                                Text(formatSessionTime(startTime))
+                                                    .font(.footnote)
+                                                    .foregroundStyle(.secondary)
+                                                    .monospacedDigit()
+                                            }
+                                        }
+                                        Spacer(minLength: 8)
+                                        VStack(alignment: .trailing, spacing: 2) {
+                                            Text(amountText(for: summary))
+                                                .font(.headline)
+                                                .monospacedDigit()
+                                            Text(rphText(for: summary))
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .monospacedDigit()
+                                        }
                                     }
-                                }
-                                Spacer(minLength: 8)
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text(amountText(for: summary))
-                                        .font(.headline)
-                                        .monospacedDigit()
-                                    Text(rphText(for: summary))
-                                        .font(.caption2)
+                                    Text(sessionDurationSummary(for: summary))
+                                        .font(.footnote)
                                         .foregroundStyle(.secondary)
                                         .monospacedDigit()
+                                        .lineLimit(1)
+                                    if let metaText = metaSummary(for: summary.id) {
+                                        Text(metaText)
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    if let notePreview = metaNotePreview(for: summary.id) {
+                                        Text(notePreview)
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                }
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.thinMaterial)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                ZStack(alignment: .topTrailing) {
+                                    NavigationLink {
+                                        sessionDetailView(summary: summary, order: order)
+                                    } label: {
+                                        card
+                                    }
+                                    .buttonStyle(.plain)
+                                    Button(action: { startEditingMeta(for: summary.id) }) {
+                                        Image(systemName: "pencil")
+                                            .font(.caption)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                                    .padding(6)
                                 }
                             }
-                            Text(sessionDurationSummary(for: summary))
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .lineLimit(1)
-                            if let metaText = metaSummary(for: summary.id) {
-                                Text(metaText)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                            if let notePreview = metaNotePreview(for: summary.id) {
-                                Text(notePreview)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
                         }
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.thinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        ZStack(alignment: .topTrailing) {
-                            NavigationLink {
-                                sessionDetailView(summary: summary, order: order)
-                            } label: {
-                                card
-                            }
-                            .buttonStyle(.plain)
-                            Button(action: { startEditingMeta(for: summary.id) }) {
-                                Image(systemName: "pencil")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                            .padding(6)
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
 #if DEBUG
-            Button(action: { showDebugPanel.toggle() }) {
-                Text("Debug")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 8)
-            .opacity(0.4)
+                        Button(action: { showDebugPanel.toggle() }) {
+                            Text("Debug")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 8)
+                        .opacity(0.4)
 
-            if showDebugPanel {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("lastSentPayload")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(syncStore.debugLastSentPayload)
-                        .font(.caption2)
-                        .textSelection(.enabled)
+                        if showDebugPanel {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("lastSentPayload")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text(syncStore.debugLastSentPayload)
+                                    .font(.caption2)
+                                    .textSelection(.enabled)
 
-                    Text("sessionStatus")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(syncStore.debugSessionStatus)
-                        .font(.caption2)
-                        .textSelection(.enabled)
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.thinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
+                                Text("sessionStatus")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text(syncStore.debugSessionStatus)
+                                    .font(.caption2)
+                                    .textSelection(.enabled)
+                            }
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.thinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
 #endif
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding()
         }
+    }
+
+    private static let homeDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .iso8601)
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy年M月d日 EEEE"
+        return formatter
+    }()
+
+    private var homeFixedHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(Self.homeDateFormatter.string(from: now))
+                .font(.headline)
+            todayBanner
+            memoEditor
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var memoEditor: some View {
+        let dayKey = dailyMemoStore.dayKey(for: now)
+        let placeholder = "备忘：客户/卡点/今天只做一件事…"
+        return ZStack(alignment: .topLeading) {
+            if memoDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(placeholder)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+                    .padding(.leading, 6)
+            }
+            TextEditor(text: $memoDraft)
+                .font(.footnote)
+                .frame(minHeight: 80)
+                .scrollContentBackground(.hidden)
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onAppear {
+            memoDraft = dailyMemoStore.memo(for: dayKey)
+        }
+        .onChange(of: dayKey) { _, newKey in
+            memoDraft = dailyMemoStore.memo(for: newKey)
+        }
+        .onChange(of: memoDraft) { _, newValue in
+            dailyMemoStore.setMemo(newValue, for: dayKey)
+        }
+    }
+
+    private func isSessionVisible(_ id: String) -> Bool {
+        !sessionVisibilityStore.isDeleted(id) && !sessionVisibilityStore.isVoided(id)
+    }
+
+    private func toggleVoided(for id: String) {
+        let isVoided = sessionVisibilityStore.isVoided(id)
+        sessionVisibilityStore.setVoided(id, isVoided: !isVoided)
+    }
+
+    private func deleteSession(id: String) {
+        if let index = sessionSummaries.firstIndex(where: { $0.id == id }),
+           sessionSummaries[index].endedAt == nil {
+            resetSession()
+        }
+        sessionVisibilityStore.markDeleted(id)
+        metaStore.update(SessionMeta(), for: id)
+        timeOverrideStore.clear(for: id)
+        manualSessionStore.remove(id)
+        sessionSummaries.removeAll { $0.id == id }
     }
 
     private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
@@ -765,6 +955,15 @@ struct ContentView: View {
         let amountText = meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
         let rphLine = rphText(for: summary)
         let hasOverride = timeOverrideStore.override(for: summary.id) != nil
+        let isVoided = sessionVisibilityStore.isVoided(summary.id)
+        let deleteBinding = Binding<Bool>(
+            get: { deleteCandidateId == summary.id },
+            set: { isPresented in
+                if !isPresented {
+                    deleteCandidateId = nil
+                }
+            }
+        )
         let shot = meta.shotCount
         let selected = meta.selectedCount
         let pickRateText: String = {
@@ -863,11 +1062,36 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .disabled(note.isEmpty)
                 }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("本单操作")
+                        .font(.headline)
+                    HStack(spacing: 12) {
+                        Button(isVoided ? "恢复" : "作废") {
+                            toggleVoided(for: summary.id)
+                        }
+                        .buttonStyle(.bordered)
+                        Button("删除") {
+                            deleteCandidateId = summary.id
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
         .navigationTitle("单子详情")
+        .confirmationDialog("删除本单？", isPresented: deleteBinding, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                deleteSession(id: summary.id)
+                deleteCandidateId = nil
+            }
+            Button("取消", role: .cancel) {
+                deleteCandidateId = nil
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button("更正时间") {

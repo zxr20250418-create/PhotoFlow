@@ -308,7 +308,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-SHIFT-CALENDAR-V1
+## DONE — TC-IOS-SHIFT-CALENDAR-V1
+Status: DONE (merged in PR #109)
 ID: TC-IOS-SHIFT-CALENDAR-V1
 Title: 月历记录（每日收入 + 上班时长）& 上下班时间可补记/更正
 AssignedTo: Executor
@@ -348,6 +349,65 @@ Manual Verification:
 - C：编辑某天上班/下班时间后，上班时长与本月汇总联动更新。
 - D：忘点下班时可补下班。
 - E：ios_safe PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
+## DONE — TC-IOS-HOME-FIXED-HEADER-MEMO-V1
+Status: DONE (merged in PR #111)
+ID: TC-IOS-HOME-FIXED-HEADER-MEMO-V1
+Title: Home 顶部固定区（日期+今日收入+当日备忘）
+AssignedTo: Executor
+
+Goal:
+- Home 顶部固定显示日期+今日收入+当日备忘输入框；会话时间线仅下方滚动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
+## DONE — TC-IOS-SESSION-DELETE-VOID-V1
+Status: DONE (merged in PR #113)
+ID: TC-IOS-SESSION-DELETE-VOID-V1
+Title: 删除 + 作废（对所有单）
+AssignedTo: Executor
+
+Goal:
+- 在 SessionDetailView 支持作废/恢复与删除单子，并对所有统计/展示生效。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Requirements:
+- 作废/恢复（可逆）：作废后该单不计入任何统计/展示；恢复后全部恢复。
+- 删除（不可逆）：从 Home/Stats/Top3/上班时间线/备注汇总等彻底移除，并清理该 sessionId 的关联数据。
+- 适配所有单：自动记录、补记/手动新增、时间更正后的单。
+- 持久化：voidedSessionIds / deletedSessionIds（UserDefaults JSON）。
+- 全局过滤：所有 session 列表与统计统一先排除 deleted/voided。
+- 删除清理：清掉 meta、时间更正 override、manual/backfill 数据。
+- 删除需二次确认；作废/恢复无需确认。
+
+Acceptance:
+- 作废后：该单从所有列表/统计消失；恢复后全部回来。
+- 删除后：永久消失且相关 meta/更正/补记数据被清理。
+- 重启后仍生效（持久化 OK）。
+- `bash scripts/ios_safe.sh --clean-deriveddata` PASS；0 配置文件改动。
+
+Manual Verification:
+- A：作废/恢复能影响 Home/Stats/Top3/上班时间线等所有统计与列表。
+- B：删除后永久移除并清理关联数据。
+- C：重启后仍生效。
+- D：ios_safe PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
