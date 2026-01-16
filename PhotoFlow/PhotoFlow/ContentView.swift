@@ -289,6 +289,11 @@ final class ManualSessionStore: ObservableObject {
         sessions[id]
     }
 
+    func remove(_ id: String) {
+        sessions.removeValue(forKey: id)
+        save()
+    }
+
     private func load() {
         guard let data = defaults.data(forKey: storageKey),
               let decoded = try? JSONDecoder().decode([String: ManualSession].self, from: data) else {
@@ -438,6 +443,63 @@ final class DailyMemoStore: ObservableObject {
     }
 }
 
+@MainActor
+final class SessionVisibilityStore: ObservableObject {
+    @Published private(set) var voidedIds: Set<String> = []
+    @Published private(set) var deletedIds: Set<String> = []
+    private let voidedKey = "pf_session_voided_v1"
+    private let deletedKey = "pf_session_deleted_v1"
+    private let defaults = UserDefaults.standard
+
+    init() {
+        load()
+    }
+
+    func isVoided(_ id: String) -> Bool {
+        voidedIds.contains(id)
+    }
+
+    func isDeleted(_ id: String) -> Bool {
+        deletedIds.contains(id)
+    }
+
+    func setVoided(_ id: String, isVoided: Bool) {
+        guard !deletedIds.contains(id) else { return }
+        if isVoided {
+            voidedIds.insert(id)
+        } else {
+            voidedIds.remove(id)
+        }
+        save()
+    }
+
+    func markDeleted(_ id: String) {
+        deletedIds.insert(id)
+        voidedIds.remove(id)
+        save()
+    }
+
+    private func load() {
+        if let data = defaults.data(forKey: voidedKey),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            voidedIds = Set(decoded)
+        }
+        if let data = defaults.data(forKey: deletedKey),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            deletedIds = Set(decoded)
+        }
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(Array(voidedIds)) {
+            defaults.set(data, forKey: voidedKey)
+        }
+        if let data = try? JSONEncoder().encode(Array(deletedIds)) {
+            defaults.set(data, forKey: deletedKey)
+        }
+    }
+}
+
 struct ContentView: View {
     enum Stage {
         case idle
@@ -540,8 +602,10 @@ struct ContentView: View {
     @StateObject private var manualSessionStore: ManualSessionStore
     @StateObject private var shiftRecordStore: ShiftRecordStore
     @StateObject private var dailyMemoStore: DailyMemoStore
+    @StateObject private var sessionVisibilityStore: SessionVisibilityStore
     @State private var editingSession: EditingSession?
     @State private var timeEditingSession: TimeEditingSession?
+    @State private var deleteCandidateId: String?
     @State private var memoDraft = ""
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
@@ -582,6 +646,7 @@ struct ContentView: View {
         let shiftStore = ShiftRecordStore()
         _shiftRecordStore = StateObject(wrappedValue: shiftStore)
         _dailyMemoStore = StateObject(wrappedValue: DailyMemoStore())
+        _sessionVisibilityStore = StateObject(wrappedValue: SessionVisibilityStore())
         let defaults = UserDefaults.standard
         let start = defaults.object(forKey: "pf_shift_start") as? Date
         let end = defaults.object(forKey: "pf_shift_end") as? Date
@@ -662,7 +727,9 @@ struct ContentView: View {
                 endedAt: manual.endedAt
             )
         }
-        return byId.values.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        return byId.values
+            .filter { isSessionVisible($0.id) }
+            .sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
     }
 
     private func effectiveTimes(for summary: SessionSummary) -> SessionTimes {
@@ -859,6 +926,27 @@ struct ContentView: View {
         }
     }
 
+    private func isSessionVisible(_ id: String) -> Bool {
+        !sessionVisibilityStore.isDeleted(id) && !sessionVisibilityStore.isVoided(id)
+    }
+
+    private func toggleVoided(for id: String) {
+        let isVoided = sessionVisibilityStore.isVoided(id)
+        sessionVisibilityStore.setVoided(id, isVoided: !isVoided)
+    }
+
+    private func deleteSession(id: String) {
+        if let index = sessionSummaries.firstIndex(where: { $0.id == id }),
+           sessionSummaries[index].endedAt == nil {
+            resetSession()
+        }
+        sessionVisibilityStore.markDeleted(id)
+        metaStore.update(SessionMeta(), for: id)
+        timeOverrideStore.clear(for: id)
+        manualSessionStore.remove(id)
+        sessionSummaries.removeAll { $0.id == id }
+    }
+
     private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
         let meta = metaStore.meta(for: summary.id)
         let times = effectiveTimes(for: summary)
@@ -867,6 +955,15 @@ struct ContentView: View {
         let amountText = meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
         let rphLine = rphText(for: summary)
         let hasOverride = timeOverrideStore.override(for: summary.id) != nil
+        let isVoided = sessionVisibilityStore.isVoided(summary.id)
+        let deleteBinding = Binding<Bool>(
+            get: { deleteCandidateId == summary.id },
+            set: { isPresented in
+                if !isPresented {
+                    deleteCandidateId = nil
+                }
+            }
+        )
         let shot = meta.shotCount
         let selected = meta.selectedCount
         let pickRateText: String = {
@@ -965,11 +1062,36 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .disabled(note.isEmpty)
                 }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("本单操作")
+                        .font(.headline)
+                    HStack(spacing: 12) {
+                        Button(isVoided ? "恢复" : "作废") {
+                            toggleVoided(for: summary.id)
+                        }
+                        .buttonStyle(.bordered)
+                        Button("删除") {
+                            deleteCandidateId = summary.id
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
         .navigationTitle("单子详情")
+        .confirmationDialog("删除本单？", isPresented: deleteBinding, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                deleteSession(id: summary.id)
+                deleteCandidateId = nil
+            }
+            Button("取消", role: .cancel) {
+                deleteCandidateId = nil
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button("更正时间") {
