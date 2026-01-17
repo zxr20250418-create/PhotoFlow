@@ -614,6 +614,68 @@ struct ContentView: View {
         }
     }
 
+    private struct StatsSnapshot {
+        var range: StatsRange
+        var count: Int
+        var totals: (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval)
+        var avgText: String
+        var shareText: String
+        var revenueText: String
+        var avgRevenueText: String
+        var shotText: String
+        var selectedText: String
+        var selectRateText: String
+        var rphText: String
+        var avgSelectRateText: String
+        var allTakeShareText: String
+        var weightedPickRateText: String
+        var reviewDigestText: String
+        var orderById: [String: Int]
+        var sessionStartById: [String: Date]
+        var revenueTop3: [(SessionSummary, Int)]
+        var rphTop3: [(SessionSummary, Double)]
+        var durationTop3: [(SessionSummary, TimeInterval)]
+        var lowestRph: (SessionSummary, Double, Int, TimeInterval)?
+        var longestSession: (SessionSummary, TimeInterval, Int?)?
+        var allTakeMaxShot: (SessionSummary, Int, Int?)?
+        var longestIdleGap: (Date, Date, Date, TimeInterval)?
+        var dataQualityMissing: [DataQualityItem]
+        var dataQualityAnomaly: [DataQualityItem]
+        var shiftWindow: (start: Date, end: Date)?
+        var shiftTotals: (work: TimeInterval, idle: TimeInterval, utilization: String, segments: [(TimeInterval, Bool)])
+
+        static let empty = StatsSnapshot(
+            range: .today,
+            count: 0,
+            totals: (0, 0, 0),
+            avgText: "--",
+            shareText: "--",
+            revenueText: "--",
+            avgRevenueText: "--",
+            shotText: "--",
+            selectedText: "--",
+            selectRateText: "--",
+            rphText: "--",
+            avgSelectRateText: "--",
+            allTakeShareText: "--",
+            weightedPickRateText: "--",
+            reviewDigestText: "",
+            orderById: [:],
+            sessionStartById: [:],
+            revenueTop3: [],
+            rphTop3: [],
+            durationTop3: [],
+            lowestRph: nil,
+            longestSession: nil,
+            allTakeMaxShot: nil,
+            longestIdleGap: nil,
+            dataQualityMissing: [],
+            dataQualityAnomaly: [],
+            shiftWindow: nil,
+            shiftTotals: (0, 0, "--", [])
+        )
+    }
+
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
@@ -635,6 +697,8 @@ struct ContentView: View {
     @State private var showIncomeOptions = false
     @AppStorage("pf_home_show_month_income") private var showMonthIncome = false
     @AppStorage("pf_home_show_year_income") private var showYearIncome = false
+    @State private var monthIncomeText: String?
+    @State private var yearIncomeText: String?
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
     @State private var draftSelected = ""
@@ -656,6 +720,8 @@ struct ContentView: View {
     @State private var draftOverrideEndedEnabled = false
     @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
+    @State private var statsSnapshot: StatsSnapshot = .empty
+    @State private var isStatsLoading = false
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
     @State private var isReviewDigestPresented = false
@@ -1583,24 +1649,6 @@ struct ContentView: View {
         }
         let count = todaySessions.count
         let amountText = formatAmount(cents: metaTotals.hasAmount ? metaTotals.amountCents : 0)
-        let monthIncomeCents: Int? = showMonthIncome ? {
-            guard let interval = isoCal.dateInterval(of: .month, for: now) else { return nil }
-            return effectiveSessionSummaries.reduce(0) { partial, summary in
-                guard let shootingStart = effectiveTimes(for: summary).shootingStart,
-                      interval.contains(shootingStart),
-                      let amount = metaStore.meta(for: summary.id).amountCents else { return partial }
-                return partial + amount
-            }
-        }() : nil
-        let yearIncomeCents: Int? = showYearIncome ? {
-            guard let interval = isoCal.dateInterval(of: .year, for: now) else { return nil }
-            return effectiveSessionSummaries.reduce(0) { partial, summary in
-                guard let shootingStart = effectiveTimes(for: summary).shootingStart,
-                      interval.contains(shootingStart),
-                      let amount = metaStore.meta(for: summary.id).amountCents else { return partial }
-                return partial + amount
-            }
-        }() : nil
         return Button(action: { selectedTab = .stats }) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1632,14 +1680,14 @@ struct ContentView: View {
                     Toggle("显示本月收入", isOn: $showMonthIncome)
                     Toggle("显示本年收入", isOn: $showYearIncome)
                 }
-                if let monthIncomeCents, showMonthIncome {
-                    Text("本月收入 \(formatAmount(cents: monthIncomeCents))")
+                if let monthIncomeText, showMonthIncome {
+                    Text("本月收入 \(monthIncomeText)")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
-                if let yearIncomeCents, showYearIncome {
-                    Text("本年收入 \(formatAmount(cents: yearIncomeCents))")
+                if let yearIncomeText, showYearIncome {
+                    Text("本年收入 \(yearIncomeText)")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
@@ -1651,9 +1699,325 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
+        .task(id: showMonthIncome) {
+            if showMonthIncome {
+                guard let interval = isoCal.dateInterval(of: .month, for: now) else {
+                    monthIncomeText = nil
+                    return
+                }
+                let total = effectiveSessionSummaries.reduce(0) { partial, summary in
+                    guard let shootingStart = effectiveTimes(for: summary).shootingStart,
+                          interval.contains(shootingStart),
+                          let amount = metaStore.meta(for: summary.id).amountCents else { return partial }
+                    return partial + amount
+                }
+                monthIncomeText = formatAmount(cents: total)
+            } else {
+                monthIncomeText = nil
+            }
+        }
+        .task(id: showYearIncome) {
+            if showYearIncome {
+                guard let interval = isoCal.dateInterval(of: .year, for: now) else {
+                    yearIncomeText = nil
+                    return
+                }
+                let total = effectiveSessionSummaries.reduce(0) { partial, summary in
+                    guard let shootingStart = effectiveTimes(for: summary).shootingStart,
+                          interval.contains(shootingStart),
+                          let amount = metaStore.meta(for: summary.id).amountCents else { return partial }
+                    return partial + amount
+                }
+                yearIncomeText = formatAmount(cents: total)
+            } else {
+                yearIncomeText = nil
+            }
+        }
     }
 
     private var statsView: some View {
+        Group {
+            if selectedTab != .stats {
+                EmptyView()
+            } else {
+                statsContent(snapshot: statsSnapshot)
+                    .task(id: statsRange) {
+                        refreshStatsSnapshot()
+                    }
+                    .task(id: selectedTab) {
+                        if selectedTab == .stats {
+                            refreshStatsSnapshot()
+                        }
+                    }
+            }
+        }
+    }
+
+    private func refreshStatsSnapshot() {
+        guard !isStatsLoading else { return }
+        isStatsLoading = true
+        statsSnapshot = buildStatsSnapshot()
+        isStatsLoading = false
+    }
+
+    private func statsContent(snapshot: StatsSnapshot) -> some View {
+        let prefix = snapshot.range.title
+        let orderById = snapshot.orderById
+        let sessionLabel: (SessionSummary) -> String = { summary in
+            let orderText = orderById[summary.id].map { "第\($0)单" } ?? "第?单"
+            let timeText = snapshot.sessionStartById[summary.id].map(formatSessionTime) ?? "--"
+            return "\(orderText) \(timeText)"
+        }
+        let sessionHeaderText: (SessionSummary) -> String = { summary in
+            let orderText = orderById[summary.id].map { "第\($0)单" } ?? "第?单"
+            let timeText = snapshot.sessionStartById[summary.id].map(formatSessionTime) ?? "--"
+            return "\(orderText) \(timeText)"
+        }
+        let shiftWindow = snapshot.shiftWindow
+        let shiftTotals = snapshot.shiftTotals
+        let dataQualityMissing = snapshot.dataQualityMissing
+        let dataQualityAnomaly = snapshot.dataQualityAnomaly
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 8) {
+                if isStatsLoading {
+                    ProgressView("统计加载中…")
+                }
+                Picker("", selection: $statsRange) {
+                    ForEach(StatsRange.allCases, id: \.self) { range in
+                        Text(range.title).tag(range)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Button("记录（月历）") {
+                    isShiftCalendarPresented = true
+                }
+                .buttonStyle(.bordered)
+
+                Text("上班时间线")
+                    .font(.headline)
+                if statsRange != .today {
+                    Text("仅今日显示")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let shiftWindow {
+                    let shiftStartText = formatSessionTime(shiftWindow.start)
+                    let shiftEndText = shiftEnd == nil ? "进行中" : formatSessionTime(shiftWindow.end)
+                    Text("上班 \(shiftStartText) · 下班 \(shiftEndText)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("工作 \(format(shiftTotals.work)) · 空余 \(format(shiftTotals.idle)) · 利用率 \(shiftTotals.utilization)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                    GeometryReader { proxy in
+                        HStack(spacing: 0) {
+                            ForEach(Array(shiftTotals.segments.enumerated()), id: \.offset) { _, segment in
+                                let width = proxy.size.width * segment.0 / max(1, shiftWindow.end.timeIntervalSince(shiftWindow.start))
+                                Rectangle()
+                                    .fill(segment.1 ? Color.primary : Color.secondary.opacity(0.25))
+                                    .frame(width: width)
+                            }
+                        }
+                        .frame(height: 12)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .frame(height: 12)
+                } else {
+                    Text("暂无上班记录")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if statsRange == .today {
+                    Button("补记一单") {
+                        startManualSessionDraft()
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Text("仅今日可补记")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("今日复盘备注")
+                    .font(.headline)
+                Button("查看/复制") {
+                    isReviewDigestPresented = true
+                }
+                .buttonStyle(.bordered)
+                .sheet(isPresented: $isReviewDigestPresented) {
+                    NavigationStack {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ScrollView {
+                                Text(snapshot.reviewDigestText)
+                                    .font(.footnote)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .textSelection(.enabled)
+                            }
+                            HStack(spacing: 12) {
+                                Button("复制") {
+                                    UIPasteboard.general.string = snapshot.reviewDigestText
+                                }
+                                ShareLink(item: snapshot.reviewDigestText) {
+                                    Text("分享")
+                                }
+                            }
+                        }
+                        .padding()
+                        .navigationTitle("今日复盘备注")
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("关闭") {
+                                    isReviewDigestPresented = false
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider()
+
+                Text("\(prefix)单数 \(snapshot.count)")
+                Text("\(prefix)总时长 \(format(snapshot.totals.total))")
+                Text("\(prefix)拍摄时长 \(format(snapshot.totals.shooting))")
+                Text("\(prefix)选片时长 \(format(snapshot.totals.selecting))")
+                Text("\(prefix)平均每单总时长 \(snapshot.avgText)")
+                Text("\(prefix)选片占比 \(snapshot.shareText)")
+                Divider()
+                Text("经营汇总")
+                    .font(.headline)
+                Text("收入合计 \(snapshot.revenueText)")
+                Text("平均客单价 \(snapshot.avgRevenueText)")
+                Text("拍摄张数合计 \(snapshot.shotText)")
+                Text("选片张数合计 \(snapshot.selectedText)")
+                Text("选片率 \(snapshot.selectRateText)")
+                Text("RPH \(snapshot.rphText)")
+                Text("平均选片率（按单） \(snapshot.avgSelectRateText)（全要 \(snapshot.allTakeShareText)）")
+                Text("选片率（按张） \(snapshot.weightedPickRateText)")
+                Divider()
+                Text("Top 3")
+                    .font(.headline)
+                Text("收入")
+                    .font(.subheadline)
+                if snapshot.revenueTop3.isEmpty {
+                    Text("暂无足够数据")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(snapshot.revenueTop3.enumerated()), id: \.offset) { _, item in
+                        Text("\(sessionLabel(item.0))  \(formatAmount(cents: item.1))")
+                    }
+                }
+                Text("RPH")
+                    .font(.subheadline)
+                if snapshot.rphTop3.isEmpty {
+                    Text("暂无足够数据")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(snapshot.rphTop3.enumerated()), id: \.offset) { _, item in
+                        let rphLine = String(format: "RPH ¥%.0f/小时", item.1)
+                        Text("\(sessionLabel(item.0))  \(rphLine)")
+                    }
+                }
+                Text("用时")
+                    .font(.subheadline)
+                if snapshot.durationTop3.isEmpty {
+                    Text("暂无足够数据")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(snapshot.durationTop3.enumerated()), id: \.offset) { _, item in
+                        Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
+                    }
+                }
+                Divider()
+                Text("Bottom1（最大损耗源）")
+                    .font(.headline)
+                if let lowestRph = snapshot.lowestRph {
+                    let summary = lowestRph.0
+                    let order = orderById[summary.id] ?? 0
+                    let header = sessionHeaderText(summary)
+                    let rphLine = String(format: "RPH ¥%.0f/小时", lowestRph.1)
+                    NavigationLink {
+                        sessionDetailView(summary: summary, order: order)
+                    } label: {
+                        Text("\(header) · \(rphLine) · \(formatAmount(cents: lowestRph.2)) · 用时 \(format(lowestRph.3))")
+                    }
+                } else {
+                    Text("最低RPH：无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let longestSession = snapshot.longestSession {
+                    let summary = longestSession.0
+                    let order = orderById[summary.id] ?? 0
+                    let header = sessionHeaderText(summary)
+                    let amountText = longestSession.2.map { formatAmount(cents: $0) }
+                    let suffix = amountText.map { " · \($0)" } ?? ""
+                    NavigationLink {
+                        sessionDetailView(summary: summary, order: order)
+                    } label: {
+                        Text("\(header) · 用时 \(format(longestSession.1))\(suffix)")
+                    }
+                } else {
+                    Text("最耗时：无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let allTakeMaxShot = snapshot.allTakeMaxShot {
+                    let summary = allTakeMaxShot.0
+                    let order = orderById[summary.id] ?? 0
+                    let header = sessionHeaderText(summary)
+                    let amountText = allTakeMaxShot.2.map { formatAmount(cents: $0) }
+                    let suffix = amountText.map { " · \($0)" } ?? ""
+                    NavigationLink {
+                        sessionDetailView(summary: summary, order: order)
+                    } label: {
+                        Text("\(header) · 全要 · 拍\(allTakeMaxShot.1)张\(suffix)")
+                    }
+                } else {
+                    Text("全要：无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let longestIdleGap = snapshot.longestIdleGap {
+                    let dateText = reviewDateText(longestIdleGap.0)
+                    let startText = formatSessionTime(longestIdleGap.1)
+                    let endText = formatSessionTime(longestIdleGap.2)
+                    let minutes = Int((longestIdleGap.3 / 60).rounded())
+                    Text("\(dateText) \(startText)–\(endText) · 空余 \(minutes)m")
+                } else {
+                    Text("空余：无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Divider()
+                Text("数据质量")
+                    .font(.headline)
+                Text("缺失 \(dataQualityMissing.count) · 异常 \(dataQualityAnomaly.count)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("查看") {
+                    isDataQualityPresented = true
+                }
+                .buttonStyle(.bordered)
+                .disabled(dataQualityMissing.isEmpty && dataQualityAnomaly.isEmpty)
+                .sheet(isPresented: $isDataQualityPresented) {
+                    dataQualityListView(
+                        missing: dataQualityMissing,
+                        anomaly: dataQualityAnomaly,
+                        orderById: orderById
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+        }
+        .sheet(isPresented: $isShiftCalendarPresented) {
+            shiftCalendarView
+        }
+    }
+
+    private func buildStatsSnapshot() -> StatsSnapshot {
         let isoCal = Calendar(identifier: .iso8601)
         let filteredSessions = effectiveSessionSummaries.filter { summary in
             guard let shootingStart = effectiveTimes(for: summary).shootingStart else { return false }
@@ -1679,7 +2043,6 @@ struct ContentView: View {
         let count = filteredSessions.count
         let avgTotal = count > 0 ? totals.total / Double(count) : nil
         let selectShare = totals.total > 0 ? totals.selecting / totals.total : nil
-        let prefix = statsRange.title
         let avgText = avgTotal.map { format($0) } ?? "--"
         let shareText = selectShare.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
         let bizTotals = filteredSessions.reduce(into: (amountCents: 0, hasAmount: false, shot: 0, hasShot: false, selected: 0, hasSelected: false)) { result, summary in
@@ -1752,6 +2115,9 @@ struct ContentView: View {
         }()
         let reviewDigestText = dailyReviewDigestText()
         let orderById = Dictionary(uniqueKeysWithValues: effectiveSessionSummaries.enumerated().map { ($0.element.id, $0.offset + 1) })
+        let sessionStartById = Dictionary(uniqueKeysWithValues: effectiveSessionSummaries.map {
+            ($0.id, effectiveSessionStartTime(for: $0) ?? effectiveSessionSortKey(for: $0))
+        })
         let sessionLabel: (SessionSummary) -> String = { summary in
             var parts: [String] = []
             if let order = orderById[summary.id] {
@@ -1759,9 +2125,8 @@ struct ContentView: View {
             } else {
                 parts.append("第?单")
             }
-            if let start = effectiveSessionStartTime(for: summary) {
-                parts.append(formatSessionTime(start))
-            }
+            let timeValue = sessionStartById[summary.id] ?? now
+            parts.append(formatSessionTime(timeValue))
             return parts.joined(separator: " ")
         }
         let revenueTop3: [(SessionSummary, Int)] = {
@@ -1792,12 +2157,6 @@ struct ContentView: View {
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
-        let sessionHeaderText: (SessionSummary) -> String = { summary in
-            let order = orderById[summary.id]
-            let orderText = order.map { "第\($0)单" } ?? "第?单"
-            let timeText = effectiveSessionStartTime(for: summary).map(formatSessionTime) ?? "--"
-            return "\(orderText) \(timeText)"
-        }
         let lowestRph: (summary: SessionSummary, rph: Double, amountCents: Int, totalSeconds: TimeInterval)? = {
             let items = filteredSessions.compactMap { summary -> (SessionSummary, Double, Int, TimeInterval)? in
                 let meta = metaStore.meta(for: summary.id)
@@ -1832,7 +2191,6 @@ struct ContentView: View {
             return items.max { $0.1 < $1.1 }
         }()
         let longestIdleGap: (date: Date, start: Date, end: Date, duration: TimeInterval)? = {
-            let isoCal = Calendar(identifier: .iso8601)
             let formatter = DateFormatter()
             formatter.calendar = isoCal
             formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -1954,241 +2312,36 @@ struct ContentView: View {
             let barSegments = segments.map { ($0.1.timeIntervalSince($0.0), $0.2) }
             return (workTotal, idleTotal, utilization, barSegments)
         }()
-        return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 8) {
-            Picker("", selection: $statsRange) {
-                ForEach(StatsRange.allCases, id: \.self) { range in
-                    Text(range.title).tag(range)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Button("记录（月历）") {
-                isShiftCalendarPresented = true
-            }
-            .buttonStyle(.bordered)
-
-            Text("上班时间线")
-                .font(.headline)
-            if statsRange != .today {
-                Text("仅今日显示")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else if let shiftWindow {
-                let shiftStartText = formatSessionTime(shiftWindow.start)
-                let shiftEndText = shiftEnd == nil ? "进行中" : formatSessionTime(shiftWindow.end)
-                Text("上班 \(shiftStartText) · 下班 \(shiftEndText)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text("工作 \(format(shiftTotals.work)) · 空余 \(format(shiftTotals.idle)) · 利用率 \(shiftTotals.utilization)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                GeometryReader { proxy in
-                    HStack(spacing: 0) {
-                        ForEach(Array(shiftTotals.segments.enumerated()), id: \.offset) { _, segment in
-                            let width = proxy.size.width * segment.0 / max(1, shiftWindow.end.timeIntervalSince(shiftWindow.start))
-                            Rectangle()
-                                .fill(segment.1 ? Color.primary : Color.secondary.opacity(0.25))
-                                .frame(width: width)
-                        }
-                    }
-                    .frame(height: 12)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .frame(height: 12)
-            } else {
-                Text("暂无上班记录")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if statsRange == .today {
-                Button("补记一单") {
-                    startManualSessionDraft()
-                }
-                .buttonStyle(.bordered)
-            } else {
-                Text("仅今日可补记")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Text("今日复盘备注")
-                .font(.headline)
-            Button("查看/复制") {
-                isReviewDigestPresented = true
-            }
-            .buttonStyle(.bordered)
-            .sheet(isPresented: $isReviewDigestPresented) {
-                NavigationStack {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ScrollView {
-                            Text(reviewDigestText)
-                                .font(.footnote)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                        HStack(spacing: 12) {
-                            Button("复制") {
-                                UIPasteboard.general.string = reviewDigestText
-                            }
-                            ShareLink(item: reviewDigestText) {
-                                Text("分享")
-                            }
-                        }
-                    }
-                    .padding()
-                    .navigationTitle("今日复盘备注")
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("关闭") {
-                                isReviewDigestPresented = false
-                            }
-                        }
-                    }
-                }
-            }
-            Divider()
-
-            Text("\(prefix)单数 \(count)")
-            Text("\(prefix)总时长 \(format(totals.total))")
-            Text("\(prefix)拍摄时长 \(format(totals.shooting))")
-            Text("\(prefix)选片时长 \(format(totals.selecting))")
-            Text("\(prefix)平均每单总时长 \(avgText)")
-            Text("\(prefix)选片占比 \(shareText)")
-            Divider()
-            Text("经营汇总")
-                .font(.headline)
-            Text("收入合计 \(revenueText)")
-            Text("平均客单价 \(avgRevenueText)")
-            Text("拍摄张数合计 \(shotText)")
-            Text("选片张数合计 \(selectedText)")
-            Text("选片率 \(selectRateText)")
-            Text("RPH \(rphText)")
-            Text("平均选片率（按单） \(avgSelectRateText)（全要 \(allTakeShareText)）")
-            Text("选片率（按张） \(weightedPickRateText)")
-            Divider()
-            Text("Top 3")
-                .font(.headline)
-            Text("收入")
-                .font(.subheadline)
-            if revenueTop3.isEmpty {
-                Text("暂无足够数据")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(Array(revenueTop3.enumerated()), id: \.offset) { _, item in
-                    Text("\(sessionLabel(item.0))  \(formatAmount(cents: item.1))")
-                }
-            }
-            Text("RPH")
-                .font(.subheadline)
-            if rphTop3.isEmpty {
-                Text("暂无足够数据")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(Array(rphTop3.enumerated()), id: \.offset) { _, item in
-                    let rphLine = String(format: "RPH ¥%.0f/小时", item.1)
-                    Text("\(sessionLabel(item.0))  \(rphLine)")
-                }
-            }
-            Text("用时")
-                .font(.subheadline)
-            if durationTop3.isEmpty {
-                Text("暂无足够数据")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(Array(durationTop3.enumerated()), id: \.offset) { _, item in
-                    Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
-                }
-            }
-            Divider()
-            Text("Bottom1（最大损耗源）")
-                .font(.headline)
-            if let lowestRph {
-                let summary = lowestRph.summary
-                let order = orderById[summary.id] ?? 0
-                let header = sessionHeaderText(summary)
-                let rphLine = String(format: "RPH ¥%.0f/小时", lowestRph.rph)
-                NavigationLink {
-                    sessionDetailView(summary: summary, order: order)
-                } label: {
-                    Text("\(header) · \(rphLine) · \(formatAmount(cents: lowestRph.amountCents)) · 用时 \(format(lowestRph.totalSeconds))")
-                }
-            } else {
-                Text("最低RPH：无")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let longestSession {
-                let summary = longestSession.summary
-                let order = orderById[summary.id] ?? 0
-                let header = sessionHeaderText(summary)
-                let amountText = longestSession.amountCents.map { formatAmount(cents: $0) }
-                let suffix = amountText.map { " · \($0)" } ?? ""
-                NavigationLink {
-                    sessionDetailView(summary: summary, order: order)
-                } label: {
-                    Text("\(header) · 用时 \(format(longestSession.totalSeconds))\(suffix)")
-                }
-            } else {
-                Text("最耗时：无")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let allTakeMaxShot {
-                let summary = allTakeMaxShot.summary
-                let order = orderById[summary.id] ?? 0
-                let header = sessionHeaderText(summary)
-                let amountText = allTakeMaxShot.amountCents.map { formatAmount(cents: $0) }
-                let suffix = amountText.map { " · \($0)" } ?? ""
-                NavigationLink {
-                    sessionDetailView(summary: summary, order: order)
-                } label: {
-                    Text("\(header) · 全要 · 拍\(allTakeMaxShot.shotCount)张\(suffix)")
-                }
-            } else {
-                Text("全要：无")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let longestIdleGap {
-                let dateText = reviewDateText(longestIdleGap.date)
-                let startText = formatSessionTime(longestIdleGap.start)
-                let endText = formatSessionTime(longestIdleGap.end)
-                let minutes = Int((longestIdleGap.duration / 60).rounded())
-                Text("\(dateText) \(startText)–\(endText) · 空余 \(minutes)m")
-            } else {
-                Text("空余：无")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Divider()
-            Text("数据质量")
-                .font(.headline)
-            Text("缺失 \(dataQuality.missing.count) · 异常 \(dataQuality.anomaly.count)")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Button("查看") {
-                isDataQualityPresented = true
-            }
-            .buttonStyle(.bordered)
-            .disabled(dataQuality.missing.isEmpty && dataQuality.anomaly.isEmpty)
-            .sheet(isPresented: $isDataQualityPresented) {
-                dataQualityListView(
-                    missing: dataQuality.missing,
-                    anomaly: dataQuality.anomaly,
-                    orderById: orderById
-                )
-            }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-        }
-        .sheet(isPresented: $isShiftCalendarPresented) {
-            shiftCalendarView
-        }
+        return StatsSnapshot(
+            range: statsRange,
+            count: count,
+            totals: totals,
+            avgText: avgText,
+            shareText: shareText,
+            revenueText: revenueText,
+            avgRevenueText: avgRevenueText,
+            shotText: shotText,
+            selectedText: selectedText,
+            selectRateText: selectRateText,
+            rphText: rphText,
+            avgSelectRateText: avgSelectRateText,
+            allTakeShareText: allTakeShareText,
+            weightedPickRateText: weightedPickRateText,
+            reviewDigestText: reviewDigestText,
+            orderById: orderById,
+            sessionStartById: sessionStartById,
+            revenueTop3: revenueTop3,
+            rphTop3: rphTop3,
+            durationTop3: durationTop3,
+            lowestRph: lowestRph.map { ($0.summary, $0.rph, $0.amountCents, $0.totalSeconds) },
+            longestSession: longestSession.map { ($0.summary, $0.totalSeconds, $0.amountCents) },
+            allTakeMaxShot: allTakeMaxShot.map { ($0.summary, $0.shotCount, $0.amountCents) },
+            longestIdleGap: longestIdleGap.map { ($0.date, $0.start, $0.end, $0.duration) },
+            dataQualityMissing: dataQuality.missing,
+            dataQualityAnomaly: dataQuality.anomaly,
+            shiftWindow: shiftWindow,
+            shiftTotals: shiftTotals
+        )
     }
 
     private var bottomBar: some View {
