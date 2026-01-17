@@ -204,8 +204,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-HOME-HEADER-CLEANUP-V1
-Status: ACTIVE
+## DONE — TC-IOS-HOME-HEADER-CLEANUP-V1
+Status: DONE (merged in PR #132)
 ID: TC-IOS-HOME-HEADER-CLEANUP-V1
 Title: Home 固定区 UI 优化（收入卡精简 + 备忘折叠）
 AssignedTo: Executor
@@ -242,6 +242,47 @@ Manual Verification:
 - C：备忘默认两行预览；编辑保存后回到预览，重启仍保留。
 - D：会话时间线可滚动；顶部固定区不随滚动；底部按钮可点。
 - E：ios_safe PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
+## ACTIVE — TC-WATCH-UI-V1
+Status: ACTIVE
+ID: TC-WATCH-UI-V1
+Title: Watch 端 UI 重做 v1（更顺手/更清晰/可诊断）
+AssignedTo: Executor
+
+Goal:
+- Watch 主屏操作顺手、阶段清晰、可诊断 lastSync。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlowWatch Watch App/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata --allow-watch-swift`。
+
+Requirements:
+- 主屏：阶段大标题 + 主按钮（下一步动作）+ 两行时长 + lastSyncAt（淡）。
+- 未上班：主按钮为“上班”，仍显示 lastSyncAt。
+- 长按主按钮菜单：立即同步、下班（上班中时）、补记最近一单（可先占位）。
+- 时长基于时间戳计算；点亮/进入前台先 pull latest 再渲染。
+
+Acceptance:
+- A：阶段/按钮符合预期，操作顺手。
+- B：lastSyncAt 刷新，“立即同步”可用。
+- C：锁屏点亮后不显示旧阶段。
+- D：`bash scripts/ios_safe.sh --clean-deriveddata --allow-watch-swift` PASS；0 配置文件改动。
+
+Manual Verification:
+- A：watch 主屏阶段/按钮符合预期，操作顺手。
+- B：lastSyncAt 能刷新；“立即同步”可用。
+- C：锁屏点亮后不会显示旧阶段。
+- D：ios_safe PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
