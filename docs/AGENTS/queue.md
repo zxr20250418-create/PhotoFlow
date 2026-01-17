@@ -249,8 +249,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-WATCH-UI-V1
-Status: ACTIVE
+## DONE — TC-WATCH-UI-V1
+Status: DONE (merged in PR #134)
 ID: TC-WATCH-UI-V1
 Title: Watch 端 UI 重做 v1（更顺手/更清晰/可诊断）
 AssignedTo: Executor
@@ -283,6 +283,51 @@ Manual Verification:
 - B：lastSyncAt 能刷新；“立即同步”可用。
 - C：锁屏点亮后不会显示旧阶段。
 - D：ios_safe PASS；0 配置文件改动。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
+## ACTIVE — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+Status: ACTIVE
+ID: TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+Title: Widget/Complication 计时实时走（不再卡 00:00）
+AssignedTo: Executor
+
+Goal:
+- iOS 小组件与 watch complication 计时使用时间戳动态展示，阶段切换后能刷新。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlowWidget/**/*.swift
+- PhotoFlow/PhotoFlowWatchWidget/**/*.swift
+- PhotoFlow/PhotoFlow/ContentView.swift（仅触发 reload）
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata --allow-watch-swift`。
+
+Requirements:
+- 读取 App Group canonical state（stage + stageStartAt + revision）。
+- 动态计时显示（timerInterval/relative 文本）；无 startAt 时显示占位。
+- 状态变更时 reload timeline（WidgetCenter）。
+- 不做重计算（不遍历 sessions）。
+
+Acceptance:
+- A：iOS 小组件计时会变化（不再卡 00:00）。
+- B：complication 计时会变化。
+- C：阶段切换后合理时间内刷新到新阶段并从新 startAt 计时。
+- D：锁屏/后台再亮起仍正确。
+- E：`bash scripts/ios_safe.sh --clean-deriveddata --allow-watch-swift` PASS；0 配置文件改动。
+
+Manual Verification:
+- A：iOS 小组件计时会变化（不再卡 00:00）。
+- B：complication 计时会变化。
+- C：阶段切换后合理时间内刷新到新阶段并从新 startAt 计时。
+- D：锁屏/后台再亮起仍正确。
+- E：ios_safe PASS；0 配置文件改动。
 
 StopCondition:
 - PR opened to main（不合并）
