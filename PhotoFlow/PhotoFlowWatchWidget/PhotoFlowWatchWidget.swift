@@ -59,19 +59,13 @@ private enum WidgetStateStore {
 
     static func debugSummary(now: Date = Date()) -> String {
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
-            return [
-                "suiteOK=false rawStage=nil",
-                "rawStartType=nil rawStartValue=nil",
-                "epoch=0"
-            ].joined(separator: "\n")
+            return "NO nil e=0"
         }
         let rawStage = defaults.string(forKey: "pf_canonical_stage")
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
-        let parsed = readSeconds(rawStart)
-        let line1 = "suiteOK=true rawStage=\(rawStage ?? "nil")"
-        let line2 = "rawStartType=\(rawStartTypeLabel(rawStart)) rawStartValue=\(rawStartValueLabel(rawStart))"
-        let line3 = "epoch=\(Int(parsed ?? 0))"
-        return [line1, line2, line3].joined(separator: "\n")
+        let parsed = readSeconds(rawStart) ?? 0
+        let shortStage = shortStageLabel(normalizedStage(rawStage))
+        return "OK \(shortStage) e=\(Int(parsed))"
     }
 
     static func readSeconds(_ value: Any?) -> Double? {
@@ -95,6 +89,19 @@ private enum WidgetStateStore {
             return value / 1000
         }
         return value
+    }
+
+    private static func shortStageLabel(_ stage: String) -> String {
+        switch stage {
+        case stageSelecting:
+            return "sel"
+        case stageShooting:
+            return "sho"
+        case stageStopped:
+            return "stp"
+        default:
+            return stage.isEmpty ? "nil" : stage
+        }
     }
 
     private static func rawStartTypeLabel(_ value: Any?) -> String {
@@ -248,9 +255,10 @@ struct PhotoFlowWidgetView: View {
         let normalizedStage = WidgetStateStore.normalizedStage(entry.stage)
         let isRunningStage = normalizedStage == WidgetStateStore.stageShooting
             || normalizedStage == WidgetStateStore.stageSelecting
+        let epoch = entry.startedAt?.timeIntervalSince1970 ?? 0
         return Group {
-            if isRunningStage, let startedAt = entry.startedAt {
-                Text(timerInterval: startedAt...startedAt.addingTimeInterval(24 * 60 * 60), countsDown: false)
+            if isRunningStage, epoch > 0, let startedAt = entry.startedAt {
+                Text(startedAt, style: .timer)
             } else if let startedAt = entry.startedAt {
                 Text(staticDurationText(from: startedAt, to: entry.lastUpdated))
             } else {
@@ -298,7 +306,7 @@ struct PhotoFlowWidgetView: View {
                     Text(debugLine)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                        .lineLimit(1)
                         .minimumScaleFactor(0.6)
 #endif
                 }
