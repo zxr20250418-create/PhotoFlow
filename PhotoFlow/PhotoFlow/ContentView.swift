@@ -738,7 +738,6 @@ struct ContentView: View {
     @State private var showIncomeOptions = false
     @AppStorage("pf_home_show_month_income") private var showMonthIncome = false
     @AppStorage("pf_home_show_year_income") private var showYearIncome = false
-    @AppStorage("pf_safe_mode") private var safeModeEnabled = false
     @State private var monthIncomeText: String?
     @State private var yearIncomeText: String?
     @State private var draftAmount = ""
@@ -793,73 +792,64 @@ struct ContentView: View {
     }
 
     var body: some View {
-        Group {
-            if isSafeModeEnabled {
-                SafeModeView(
-                    onClear: clearLocalDataAndExit,
-                    onExitSafeMode: { safeModeEnabled = false }
-                )
+        ZStack {
+            if selectedTab == .home {
+                homeView
             } else {
-                ZStack {
-                    if selectedTab == .home {
-                        homeView
-                    } else {
-                        statsView
+                statsView
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            bottomBar
+        }
+        .alert(item: $activeAlert) { alert in
+            Alert(title: Text(alert.message))
+        }
+        .sheet(item: $editingSession) { session in
+            NavigationStack {
+                Form {
+                    Section {
+                        TextField("金额", text: $draftAmount)
+                            .keyboardType(.decimalPad)
+                        TextField("拍摄张数", text: $draftShotCount)
+                            .keyboardType(.numberPad)
+                        TextField("选片张数", text: $draftSelected)
+                            .keyboardType(.numberPad)
+                    }
+                    Section("复盘备注") {
+                        TextEditor(text: $draftReviewNote)
+                            .frame(minHeight: 100)
                     }
                 }
-                .safeAreaInset(edge: .bottom) {
-                    bottomBar
-                }
-                .alert(item: $activeAlert) { alert in
-                    Alert(title: Text(alert.message))
-                }
-                .sheet(item: $editingSession) { session in
-                    NavigationStack {
-                        Form {
-                            Section {
-                                TextField("金额", text: $draftAmount)
-                                    .keyboardType(.decimalPad)
-                                TextField("拍摄张数", text: $draftShotCount)
-                                    .keyboardType(.numberPad)
-                                TextField("选片张数", text: $draftSelected)
-                                    .keyboardType(.numberPad)
-                            }
-                            Section("复盘备注") {
-                                TextEditor(text: $draftReviewNote)
-                                    .frame(minHeight: 100)
-                            }
-                        }
-                        .navigationTitle("编辑指标")
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("取消") {
-                                    editingSession = nil
-                                }
-                            }
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("保存") {
-                                    saveMeta(for: session.id)
-                                    editingSession = nil
-                                }
-                            }
+                .navigationTitle("编辑指标")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") {
+                            editingSession = nil
                         }
                     }
-                }
-                .sheet(item: $timeEditingSession) { session in
-                    timeOverrideEditor(sessionId: session.id)
-                }
-                .sheet(isPresented: $isManualSessionPresented) {
-                    manualSessionEditor
-                }
-                .sheet(item: $quickEditorMode) { mode in
-                    quickSessionEditor(mode: mode)
-                }
-                .onReceive(ticker) { now = $0 }
-                .onReceive(syncStore.$incomingEvent) { event in
-                    guard let event = event else { return }
-                    applySessionEvent(event)
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            saveMeta(for: session.id)
+                            editingSession = nil
+                        }
+                    }
                 }
             }
+        }
+        .sheet(item: $timeEditingSession) { session in
+            timeOverrideEditor(sessionId: session.id)
+        }
+        .sheet(isPresented: $isManualSessionPresented) {
+            manualSessionEditor
+        }
+        .sheet(item: $quickEditorMode) { mode in
+            quickSessionEditor(mode: mode)
+        }
+        .onReceive(ticker) { now = $0 }
+        .onReceive(syncStore.$incomingEvent) { event in
+            guard let event = event else { return }
+            applySessionEvent(event)
         }
     }
 
@@ -1083,10 +1073,6 @@ struct ContentView: View {
         return formatter
     }()
 
-    private var isSafeModeEnabled: Bool {
-        safeModeEnabled || ProcessInfo.processInfo.environment["PF_SAFE_MODE"] == "1"
-    }
-
     private var homeFixedHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(Self.homeDateFormatter.string(from: now))
@@ -1175,28 +1161,6 @@ struct ContentView: View {
         sessionSummaries.removeAll { $0.id == id }
     }
 
-    private func clearLocalDataAndExit() {
-        clearLocalData()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            exit(0)
-        }
-    }
-
-    private func clearLocalData() {
-        let defaults = UserDefaults.standard
-        if let bundleId = Bundle.main.bundleIdentifier {
-            defaults.removePersistentDomain(forName: bundleId)
-        }
-        defaults.synchronize()
-
-        let manager = FileManager.default
-        if let docs = manager.urls(for: .documentDirectory, in: .userDomainMask).first,
-           let urls = try? manager.contentsOfDirectory(at: docs, includingPropertiesForKeys: nil) {
-            for url in urls {
-                try? manager.removeItem(at: url)
-            }
-        }
-    }
 
     private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
         let meta = metaStore.meta(for: summary.id)
@@ -3403,43 +3367,6 @@ private struct ShiftCalendarView: View {
     private struct EditingDay: Identifiable {
         let id = UUID()
         let date: Date
-    }
-}
-
-private struct SafeModeView: View {
-    let onClear: () -> Void
-    let onExitSafeMode: () -> Void
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("已进入安全模式")
-                .font(.title2)
-                .fontWeight(.semibold)
-            Text("请先清空本地数据，再重新打开应用。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Button(role: .destructive) {
-                onClear()
-            } label: {
-                Text("清空本地数据并退出")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            Button {
-                onExitSafeMode()
-            } label: {
-                Text("退出安全模式")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            Text("若设置了 PF_SAFE_MODE=1，请移除后再重启。")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
     }
 }
 
