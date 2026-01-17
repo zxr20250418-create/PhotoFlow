@@ -103,10 +103,12 @@ private enum WidgetStateStore {
         WidgetCenter.shared.reloadAllTimelines()
     }
 
-    static func writeLastReloadAt(_ date: Date = Date()) {
-        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+    static func writeLastReloadAt(_ date: Date = Date()) -> Double? {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return nil }
         defaults.set(date.timeIntervalSince1970, forKey: keyCanonicalLastReloadAt)
         WidgetCenter.shared.reloadAllTimelines()
+        let reread = defaults.double(forKey: keyCanonicalLastReloadAt)
+        return reread > 0 ? reread : nil
     }
 
     static func readGroupStage() -> String {
@@ -117,6 +119,7 @@ private enum WidgetStateStore {
     static func debugSummary() -> String {
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
             return [
+                "gid=\(appGroupId)",
                 "suiteOK=false rawStage=nil",
                 "rawStartType=nil rawStartValue=nil",
                 "epoch=0"
@@ -125,10 +128,11 @@ private enum WidgetStateStore {
         let rawStage = defaults.string(forKey: keyCanonicalStage)
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
         let parsed = parseEpoch(rawStart)
-        let line1 = "suiteOK=true rawStage=\(rawStage ?? "nil")"
-        let line2 = "rawStartType=\(rawStartTypeLabel(rawStart)) rawStartValue=\(rawStartValueLabel(rawStart))"
-        let line3 = "epoch=\(Int(parsed ?? 0))"
-        return [line1, line2, line3].joined(separator: "\n")
+        let line1 = "gid=\(appGroupId)"
+        let line2 = "suiteOK=true rawStage=\(rawStage ?? "nil")"
+        let line3 = "rawStartType=\(rawStartTypeLabel(rawStart)) rawStartValue=\(rawStartValueLabel(rawStart))"
+        let line4 = "epoch=\(Int(parsed ?? 0))"
+        return [line1, line2, line3, line4].joined(separator: "\n")
     }
 
     private static func rawStartTypeLabel(_ value: Any?) -> String {
@@ -612,6 +616,7 @@ struct ContentView: View {
 #endif
 #if DEBUG
     @State private var showDebugPanel = false
+    @State private var lastReloadLocal: Date?
 #endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
@@ -644,7 +649,11 @@ struct ContentView: View {
                     syncStore.requestLatestState()
                 }
                 Button("刷新表盘") {
-                    WidgetStateStore.writeLastReloadAt()
+                    if let reread = WidgetStateStore.writeLastReloadAt() {
+                        lastReloadLocal = Date(timeIntervalSince1970: reread)
+                    } else {
+                        lastReloadLocal = nil
+                    }
                 }
                 if syncStore.isOnDuty {
                     Button("下班", role: .destructive) {
@@ -663,8 +672,11 @@ struct ContentView: View {
                 Text("uiStage=\(uiStageDebugValue) groupStage=\(WidgetStateStore.readGroupStage())")
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
+                Text("lrLocal \(formatSyncTime(lastReloadLocal))")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
                 Text(WidgetStateStore.debugSummary())
-                    .lineLimit(3)
+                    .lineLimit(4)
                     .minimumScaleFactor(0.6)
 #endif
             }

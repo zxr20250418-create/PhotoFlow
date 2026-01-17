@@ -66,15 +66,18 @@ private enum WidgetStateStore {
 
     static func debugSummary(now: Date = Date()) -> String {
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
-            return "NO nil e=0 lr=--:--:--"
+            return "NO nil e=0 lr=--:--:-- hasLR=0\nGID=\(appGroupId)"
         }
         let rawStage = defaults.string(forKey: "pf_canonical_stage")
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
         let parsed = readSeconds(rawStart) ?? 0
         let shortStage = shortStageLabel(normalizedStage(rawStage))
+        let hasLR = defaults.object(forKey: keyCanonicalLastReloadAt) != nil
         let lastReloadSeconds = readSeconds(defaults.object(forKey: keyCanonicalLastReloadAt))
         let lrText = lastReloadSeconds.map { formatTime(seconds: $0) } ?? "--:--:--"
-        return "OK \(shortStage) e=\(Int(parsed)) lr=\(lrText)"
+        let line1 = "OK \(shortStage) e=\(Int(parsed)) lr=\(lrText) hasLR=\(hasLR ? 1 : 0)"
+        let line2 = "GID=\(appGroupId)"
+        return [line1, line2].joined(separator: "\n")
     }
 
     static func readSeconds(_ value: Any?) -> Double? {
@@ -240,9 +243,9 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
 
     private func refreshPolicy(for entry: PhotoFlowWidgetEntry) -> TimelineReloadPolicy {
         if entry.isRunning, entry.startedAt != nil {
-            return .after(Date().addingTimeInterval(30))
+            return .after(Date().addingTimeInterval(5))
         }
-        return .after(Date().addingTimeInterval(15 * 60))
+        return .after(Date().addingTimeInterval(60))
     }
 }
 
@@ -339,7 +342,7 @@ struct PhotoFlowWidgetView: View {
                     Text(debugLine)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(2)
                         .minimumScaleFactor(0.6)
 #endif
                 }
