@@ -6,6 +6,8 @@ if ! git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
   base_ref="main"
 fi
 
+allow_watch_swift="${ALLOW_WATCH_SWIFT:-0}"
+
 changed_files="$( { \
   git diff --name-only "$base_ref"...HEAD; \
   git diff --name-only --cached; \
@@ -17,7 +19,12 @@ declare -a forbidden=()
 while IFS= read -r file; do
   [ -z "$file" ] && continue
   case "$file" in
-    "PhotoFlow/PhotoFlowWatch Watch App/"*|\
+    "PhotoFlow/PhotoFlowWatch Watch App/"*)
+      if [ "$allow_watch_swift" = "1" ] && [[ "$file" == *.swift ]]; then
+        continue
+      fi
+      forbidden+=("$file")
+      ;;
     "PhotoFlow/PhotoFlowWatchWidget/"*|\
     *.entitlements|\
     *.plist|\
