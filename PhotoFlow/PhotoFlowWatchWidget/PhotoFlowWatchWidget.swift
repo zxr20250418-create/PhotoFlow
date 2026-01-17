@@ -10,6 +10,7 @@ private enum WidgetStateKeys {
     static let keyCanonicalLastStageStartAt = "pf_canonical_lastStageStartAt"
     static let keyCanonicalLastEndedAt = "pf_canonical_lastEndedAt"
     static let keyCanonicalLastReloadAt = "pf_canonical_lastReloadAt"
+    static let keyCanonicalProbe = "pf_probe"
 }
 
 private enum WidgetStateStore {
@@ -26,6 +27,7 @@ private enum WidgetStateStore {
     static let keyCanonicalLastStageStartAt = WidgetStateKeys.keyCanonicalLastStageStartAt
     static let keyCanonicalLastEndedAt = WidgetStateKeys.keyCanonicalLastEndedAt
     static let keyCanonicalLastReloadAt = WidgetStateKeys.keyCanonicalLastReloadAt
+    static let keyCanonicalProbe = WidgetStateKeys.keyCanonicalProbe
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -76,18 +78,16 @@ private enum WidgetStateStore {
     }
 
     static func debugSummary(now: Date = Date()) -> String {
-        let gidSuffix = String(appGroupId.suffix(8))
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
-            return "suiteOK=0 hasLR=0 st=nil e=0 lr=--:--:-- gid=\(gidSuffix)"
+            return "ok=0 p=0 lr=0 st=nil e=0"
         }
         let rawStage = defaults.string(forKey: keyCanonicalStage)
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
         let parsed = readSeconds(rawStart) ?? 0
         let shortStage = shortStageLabel(normalizedStage(rawStage))
         let hasLR = defaults.object(forKey: keyCanonicalLastReloadAt) != nil
-        let lastReloadSeconds = readSeconds(defaults.object(forKey: keyCanonicalLastReloadAt))
-        let lrText = lastReloadSeconds.map { formatTime(seconds: $0) } ?? "--:--:--"
-        return "suiteOK=1 hasLR=\(hasLR ? 1 : 0) st=\(shortStage) e=\(Int(parsed)) lr=\(lrText) gid=\(gidSuffix)"
+        let probe = defaults.integer(forKey: keyCanonicalProbe)
+        return "ok=1 p=\(probe) lr=\(hasLR ? 1 : 0) st=\(shortStage) e=\(Int(parsed))"
     }
 
     static func readSeconds(_ value: Any?) -> Double? {
@@ -352,8 +352,8 @@ struct PhotoFlowWidgetView: View {
                     Text(debugLine)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.6)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
 #endif
                 }
 #if os(watchOS)

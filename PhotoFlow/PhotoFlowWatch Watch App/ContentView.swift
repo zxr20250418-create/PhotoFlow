@@ -22,6 +22,7 @@ private enum WidgetStateKeys {
     static let keyCanonicalLastStageStartAt = "pf_canonical_lastStageStartAt"
     static let keyCanonicalLastEndedAt = "pf_canonical_lastEndedAt"
     static let keyCanonicalLastReloadAt = "pf_canonical_lastReloadAt"
+    static let keyCanonicalProbe = "pf_probe"
 }
 
 private enum WidgetStateStore {
@@ -38,6 +39,7 @@ private enum WidgetStateStore {
     static let keyCanonicalLastStageStartAt = WidgetStateKeys.keyCanonicalLastStageStartAt
     static let keyCanonicalLastEndedAt = WidgetStateKeys.keyCanonicalLastEndedAt
     static let keyCanonicalLastReloadAt = WidgetStateKeys.keyCanonicalLastReloadAt
+    static let keyCanonicalProbe = WidgetStateKeys.keyCanonicalProbe
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -111,6 +113,9 @@ private enum WidgetStateStore {
         } else {
             defaults.removeObject(forKey: keyCanonicalLastEndedAt)
         }
+        defaults.set(Date().timeIntervalSince1970, forKey: keyCanonicalLastReloadAt)
+        defaults.set(1, forKey: keyCanonicalProbe)
+        _ = defaults.object(forKey: keyCanonicalLastReloadAt) != nil
         WidgetCenter.shared.reloadAllTimelines()
     }
 
@@ -126,6 +131,11 @@ private enum WidgetStateStore {
     static func readGroupStage() -> String {
         guard let defaults = UserDefaults(suiteName: appGroupId) else { return "nil" }
         return defaults.string(forKey: keyCanonicalStage) ?? "nil"
+    }
+
+    static func readHasLastReloadAt() -> Bool {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return false }
+        return defaults.object(forKey: keyCanonicalLastReloadAt) != nil
     }
 
     static func debugSummary() -> String {
@@ -797,7 +807,8 @@ struct ContentView: View {
     private var shortDebugLine: String {
         let uiShort = shortStage(uiStageDebugValue)
         let groupShort = shortStage(WidgetStateStore.readGroupStage())
-        return "ui=\(uiShort) grp=\(groupShort) LR=\(lastReloadLocalHas ? 1 : 0) gid=\(gidSuffix)"
+        let lr = WidgetStateStore.readHasLastReloadAt() ? 1 : 0
+        return "ui=\(uiShort) grp=\(groupShort) LR=\(lr)"
     }
 
     private func shortStage(_ raw: String) -> String {
@@ -813,10 +824,6 @@ struct ContentView: View {
         default:
             return "nil"
         }
-    }
-
-    private var gidSuffix: String {
-        String(WidgetStateKeys.appGroupId.suffix(8))
     }
 
     private var connectionStatusText: String {
