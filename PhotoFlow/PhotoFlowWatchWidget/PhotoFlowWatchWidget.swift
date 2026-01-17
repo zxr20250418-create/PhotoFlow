@@ -46,15 +46,41 @@ private enum WidgetStateStore {
         guard let defaults = UserDefaults(suiteName: appGroupId) else { return nil }
         guard let stageValue = defaults.string(forKey: keyCanonicalStage) else { return nil }
         let stage = normalizedStage(stageValue)
-        let startSeconds = defaults.object(forKey: keyCanonicalStageStartAt) as? Double
-        let updatedSeconds = defaults.object(forKey: keyCanonicalUpdatedAt) as? Double
-        let revision = defaults.object(forKey: keyCanonicalRevision) as? Int64
+        let startSeconds = readSeconds(defaults.object(forKey: keyCanonicalStageStartAt))
+        let updatedSeconds = readSeconds(defaults.object(forKey: keyCanonicalUpdatedAt))
+        let revision = readInt64(defaults.object(forKey: keyCanonicalRevision))
         return (
             stage: stage,
             stageStartAt: startSeconds.map { Date(timeIntervalSince1970: $0) },
             updatedAt: updatedSeconds.map { Date(timeIntervalSince1970: $0) } ?? now,
             revision: revision ?? Int64((updatedSeconds ?? now.timeIntervalSince1970) * 1000)
         )
+    }
+
+    static func readSeconds(_ value: Any?) -> Double? {
+        if let seconds = value as? Double {
+            return seconds
+        }
+        if let seconds = value as? Int {
+            return Double(seconds)
+        }
+        if let seconds = value as? Int64 {
+            return Double(seconds)
+        }
+        return nil
+    }
+
+    static func readInt64(_ value: Any?) -> Int64? {
+        if let num = value as? Int64 {
+            return num
+        }
+        if let num = value as? Int {
+            return Int64(num)
+        }
+        if let num = value as? Double {
+            return Int64(num)
+        }
+        return nil
     }
 }
 
@@ -163,11 +189,20 @@ struct PhotoFlowWidgetView: View {
         Group {
             if entry.isRunning, let startedAt = entry.startedAt {
                 Text(timerInterval: startedAt...startedAt.addingTimeInterval(24 * 60 * 60), countsDown: false)
+            } else if let startedAt = entry.startedAt {
+                Text(staticDurationText(from: startedAt, to: entry.lastUpdated))
             } else {
                 Text("--")
             }
         }
         .font(font.monospacedDigit())
+    }
+
+    private func staticDurationText(from start: Date, to end: Date) -> String {
+        let totalSeconds = max(0, Int(end.timeIntervalSince(start)))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
     }
 
     var body: some View {

@@ -51,7 +51,8 @@ private enum WidgetStateStore {
         defaults.set(state.updatedAt.timeIntervalSince1970, forKey: keyCanonicalUpdatedAt)
         defaults.set(state.revision, forKey: keyCanonicalRevision)
         if let stageStartAt = stageStartAt(for: state) {
-            defaults.set(stageStartAt.timeIntervalSince1970, forKey: keyCanonicalStageStartAt)
+            let stageStartAtSeconds = stageStartAt.timeIntervalSince1970
+            defaults.set(stageStartAtSeconds, forKey: keyCanonicalStageStartAt)
         } else {
             defaults.removeObject(forKey: keyCanonicalStageStartAt)
         }
@@ -65,7 +66,7 @@ private enum WidgetStateStore {
         case stageShooting:
             return state.shootingStart ?? state.updatedAt
         default:
-            return nil
+            return state.shootingStart ?? state.selectingStart ?? state.endedAt
         }
     }
 }

@@ -37,7 +37,8 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             defaults.set(state.updatedAt.timeIntervalSince1970, forKey: keyUpdatedAt)
             defaults.set(state.revision, forKey: keyRevision)
             if let stageStartAt = stageStartAt(for: state) {
-                defaults.set(stageStartAt.timeIntervalSince1970, forKey: keyStageStartAt)
+                let stageStartAtSeconds = stageStartAt.timeIntervalSince1970
+                defaults.set(stageStartAtSeconds, forKey: keyStageStartAt)
             } else {
                 defaults.removeObject(forKey: keyStageStartAt)
             }
@@ -51,7 +52,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             case StageSyncKey.stageShooting:
                 return state.shootingStart ?? state.updatedAt
             default:
-                return nil
+                return state.shootingStart ?? state.selectingStart ?? state.endedAt
             }
         }
     }
