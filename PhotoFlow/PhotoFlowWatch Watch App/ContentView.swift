@@ -24,6 +24,8 @@ private enum WidgetStateStore {
     static let keyCanonicalStageStartAt = "pf_canonical_stageStartAt"
     static let keyCanonicalUpdatedAt = "pf_canonical_updatedAt"
     static let keyCanonicalRevision = "pf_canonical_revision"
+    static let keyCanonicalLastStageStartAt = "pf_canonical_lastStageStartAt"
+    static let keyCanonicalLastEndedAt = "pf_canonical_lastEndedAt"
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -47,7 +49,16 @@ private enum WidgetStateStore {
 
     static func writeCanonicalState(from state: WatchSyncStore.CanonicalState) {
         let stageStart = stageStartAt(for: state)
-        writeCanonical(stage: state.stage, stageStartAt: stageStart, updatedAt: state.updatedAt, revision: state.revision)
+        let lastStageStartAt = state.selectingStart ?? state.shootingStart
+        let lastEndedAt = state.endedAt
+        writeCanonical(
+            stage: state.stage,
+            stageStartAt: stageStart,
+            lastStageStartAt: lastStageStartAt,
+            lastEndedAt: lastEndedAt,
+            updatedAt: state.updatedAt,
+            revision: state.revision
+        )
     }
 
     private static func stageStartAt(for state: WatchSyncStore.CanonicalState) -> Date? {
@@ -57,11 +68,18 @@ private enum WidgetStateStore {
         case stageShooting:
             return state.shootingStart ?? state.updatedAt
         default:
-            return state.shootingStart ?? state.selectingStart ?? state.endedAt
+            return nil
         }
     }
 
-    static func writeCanonical(stage: String, stageStartAt: Date?, updatedAt: Date, revision: Int64) {
+    static func writeCanonical(
+        stage: String,
+        stageStartAt: Date?,
+        lastStageStartAt: Date?,
+        lastEndedAt: Date?,
+        updatedAt: Date,
+        revision: Int64
+    ) {
         guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
         defaults.set(stage, forKey: keyCanonicalStage)
         defaults.set(updatedAt.timeIntervalSince1970, forKey: keyCanonicalUpdatedAt)
@@ -70,6 +88,16 @@ private enum WidgetStateStore {
             defaults.set(stageStartAt.timeIntervalSince1970, forKey: keyCanonicalStageStartAt)
         } else {
             defaults.removeObject(forKey: keyCanonicalStageStartAt)
+        }
+        if let lastStageStartAt {
+            defaults.set(lastStageStartAt.timeIntervalSince1970, forKey: keyCanonicalLastStageStartAt)
+        } else {
+            defaults.removeObject(forKey: keyCanonicalLastStageStartAt)
+        }
+        if let lastEndedAt {
+            defaults.set(lastEndedAt.timeIntervalSince1970, forKey: keyCanonicalLastEndedAt)
+        } else {
+            defaults.removeObject(forKey: keyCanonicalLastEndedAt)
         }
         WidgetCenter.shared.reloadAllTimelines()
     }
@@ -855,11 +883,15 @@ struct ContentView: View {
         case WidgetStateStore.stageShooting:
             stageStartAt = session.shootingStart ?? updatedAt
         default:
-            stageStartAt = session.selectingStart ?? session.shootingStart ?? session.endedAt
+            stageStartAt = nil
         }
+        let lastStageStartAt = session.selectingStart ?? session.shootingStart
+        let lastEndedAt = session.endedAt
         WidgetStateStore.writeCanonical(
             stage: stageValue,
             stageStartAt: stageStartAt,
+            lastStageStartAt: lastStageStartAt,
+            lastEndedAt: lastEndedAt,
             updatedAt: updatedAt,
             revision: revision
         )

@@ -30,6 +30,8 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         static let keyStageStartAt = "pf_canonical_stageStartAt"
         static let keyUpdatedAt = "pf_canonical_updatedAt"
         static let keyRevision = "pf_canonical_revision"
+        static let keyLastStageStartAt = "pf_canonical_lastStageStartAt"
+        static let keyLastEndedAt = "pf_canonical_lastEndedAt"
 
         static func write(from state: WatchSyncStore.CanonicalState) {
             guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
@@ -42,6 +44,16 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             } else {
                 defaults.removeObject(forKey: keyStageStartAt)
             }
+            if let lastStageStartAt = state.selectingStart ?? state.shootingStart {
+                defaults.set(lastStageStartAt.timeIntervalSince1970, forKey: keyLastStageStartAt)
+            } else {
+                defaults.removeObject(forKey: keyLastStageStartAt)
+            }
+            if let lastEndedAt = state.endedAt {
+                defaults.set(lastEndedAt.timeIntervalSince1970, forKey: keyLastEndedAt)
+            } else {
+                defaults.removeObject(forKey: keyLastEndedAt)
+            }
             WidgetCenter.shared.reloadAllTimelines()
         }
 
@@ -52,7 +64,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             case StageSyncKey.stageShooting:
                 return state.shootingStart ?? state.updatedAt
             default:
-                return state.shootingStart ?? state.selectingStart ?? state.endedAt
+                return nil
             }
         }
     }

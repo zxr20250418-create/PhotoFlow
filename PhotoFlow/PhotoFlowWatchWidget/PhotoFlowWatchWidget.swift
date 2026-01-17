@@ -12,6 +12,8 @@ private enum WidgetStateStore {
     static let keyCanonicalStageStartAt = "pf_canonical_stageStartAt"
     static let keyCanonicalUpdatedAt = "pf_canonical_updatedAt"
     static let keyCanonicalRevision = "pf_canonical_revision"
+    static let keyCanonicalLastStageStartAt = "pf_canonical_lastStageStartAt"
+    static let keyCanonicalLastEndedAt = "pf_canonical_lastEndedAt"
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -42,16 +44,20 @@ private enum WidgetStateStore {
         return (isRunning, startedAt, lastUpdatedAt, stage)
     }
 
-    static func readCanonicalState(now: Date = Date()) -> (stage: String, stageStartAt: Date?, updatedAt: Date, revision: Int64)? {
+    static func readCanonicalState(now: Date = Date()) -> (stage: String, stageStartAt: Date?, lastStageStartAt: Date?, lastEndedAt: Date?, updatedAt: Date, revision: Int64)? {
         guard let defaults = UserDefaults(suiteName: appGroupId) else { return nil }
         guard let stageValue = defaults.string(forKey: "pf_canonical_stage") else { return nil }
         let stage = normalizedStage(stageValue)
         let startSeconds = readSeconds(defaults.object(forKey: keyCanonicalStageStartAt))
+        let lastStageSeconds = readSeconds(defaults.object(forKey: keyCanonicalLastStageStartAt))
+        let lastEndedSeconds = readSeconds(defaults.object(forKey: keyCanonicalLastEndedAt))
         let updatedSeconds = readSeconds(defaults.object(forKey: keyCanonicalUpdatedAt))
         let revision = readInt64(defaults.object(forKey: keyCanonicalRevision))
         return (
             stage: stage,
             stageStartAt: startSeconds.map { Date(timeIntervalSince1970: $0) },
+            lastStageStartAt: lastStageSeconds.map { Date(timeIntervalSince1970: $0) },
+            lastEndedAt: lastEndedSeconds.map { Date(timeIntervalSince1970: $0) },
             updatedAt: updatedSeconds.map { Date(timeIntervalSince1970: $0) } ?? now,
             revision: revision ?? Int64((updatedSeconds ?? now.timeIntervalSince1970) * 1000)
         )
@@ -154,6 +160,8 @@ struct PhotoFlowWidgetEntry: TimelineEntry {
     let date: Date
     let isRunning: Bool
     let startedAt: Date?
+    let lastStageStartAt: Date?
+    let lastEndedAt: Date?
     let lastUpdated: Date
     let stage: String
 }
@@ -177,6 +185,8 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
             date: Date(),
             isRunning: isRunning,
             startedAt: isRunning ? Date() : nil,
+            lastStageStartAt: nil,
+            lastEndedAt: nil,
             lastUpdated: Date(),
             stage: stage
         )
@@ -193,6 +203,8 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
                 date: now,
                 isRunning: isRunning,
                 startedAt: canonical.stageStartAt,
+                lastStageStartAt: canonical.lastStageStartAt,
+                lastEndedAt: canonical.lastEndedAt,
                 lastUpdated: canonical.updatedAt,
                 stage: canonical.stage
             )
@@ -202,6 +214,8 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
             date: now,
             isRunning: state.isRunning,
             startedAt: state.startedAt,
+            lastStageStartAt: nil,
+            lastEndedAt: nil,
             lastUpdated: state.lastUpdatedAt,
             stage: state.stage
         )
@@ -259,6 +273,8 @@ struct PhotoFlowWidgetView: View {
         return Group {
             if isRunningStage, epoch > 0, let startedAt = entry.startedAt {
                 Text(startedAt, style: .timer)
+            } else if let lastStart = entry.lastStageStartAt, let lastEnd = entry.lastEndedAt {
+                Text(staticDurationText(from: lastStart, to: lastEnd))
             } else if let startedAt = entry.startedAt {
                 Text(staticDurationText(from: startedAt, to: entry.lastUpdated))
             } else {
@@ -368,6 +384,8 @@ struct PhotoFlowWatchWidgetBundle: WidgetBundle {
         date: Date(),
         isRunning: true,
         startedAt: Date(),
+        lastStageStartAt: nil,
+        lastEndedAt: nil,
         lastUpdated: Date(),
         stage: WidgetStateStore.stageShooting
     )
@@ -380,6 +398,8 @@ struct PhotoFlowWatchWidgetBundle: WidgetBundle {
         date: Date(),
         isRunning: false,
         startedAt: nil,
+        lastStageStartAt: Date().addingTimeInterval(-300),
+        lastEndedAt: Date(),
         lastUpdated: Date(),
         stage: WidgetStateStore.stageStopped
     )
@@ -393,6 +413,8 @@ struct PhotoFlowWatchWidgetBundle: WidgetBundle {
         date: Date(),
         isRunning: true,
         startedAt: Date(),
+        lastStageStartAt: nil,
+        lastEndedAt: nil,
         lastUpdated: Date(),
         stage: WidgetStateStore.stageSelecting
     )
