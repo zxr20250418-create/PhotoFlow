@@ -58,16 +58,26 @@ private enum WidgetStateStore {
     }
 
     static func readSeconds(_ value: Any?) -> Double? {
+        if let date = value as? Date {
+            return date.timeIntervalSince1970
+        }
         if let seconds = value as? Double {
-            return seconds
+            return normalizeEpoch(seconds)
         }
         if let seconds = value as? Int {
-            return Double(seconds)
+            return normalizeEpoch(Double(seconds))
         }
         if let seconds = value as? Int64 {
-            return Double(seconds)
+            return normalizeEpoch(Double(seconds))
         }
         return nil
+    }
+
+    private static func normalizeEpoch(_ value: Double) -> Double {
+        if value > 100_000_000_000 {
+            return value / 1000
+        }
+        return value
     }
 
     static func readInt64(_ value: Any?) -> Int64? {
@@ -186,8 +196,11 @@ struct PhotoFlowWidgetView: View {
     }
 
     private func elapsedTextView(font: Font) -> some View {
-        Group {
-            if entry.isRunning, let startedAt = entry.startedAt {
+        let normalizedStage = WidgetStateStore.normalizedStage(entry.stage)
+        let isRunningStage = normalizedStage == WidgetStateStore.stageShooting
+            || normalizedStage == WidgetStateStore.stageSelecting
+        return Group {
+            if isRunningStage, let startedAt = entry.startedAt {
                 Text(timerInterval: startedAt...startedAt.addingTimeInterval(24 * 60 * 60), countsDown: false)
             } else if let startedAt = entry.startedAt {
                 Text(staticDurationText(from: startedAt, to: entry.lastUpdated))
@@ -204,6 +217,15 @@ struct PhotoFlowWidgetView: View {
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
     }
+
+#if DEBUG
+    private var debugLine: String {
+        let stage = entry.stage.isEmpty ? "nil" : entry.stage
+        let startedAtText = entry.startedAt == nil ? "nil" : "ok"
+        let epoch = Int(entry.startedAt?.timeIntervalSince1970 ?? 0)
+        return "raw=\(stage) start=\(startedAtText) ts=\(epoch)"
+    }
+#endif
 
     var body: some View {
         Group {
@@ -226,6 +248,11 @@ struct PhotoFlowWidgetView: View {
                     Text(updatedText)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+#if DEBUG
+                    Text(debugLine)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+#endif
                 }
 #if os(watchOS)
             case .accessoryCorner:
