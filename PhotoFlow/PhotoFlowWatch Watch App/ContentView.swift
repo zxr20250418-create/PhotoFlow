@@ -46,17 +46,8 @@ private enum WidgetStateStore {
     }
 
     static func writeCanonicalState(from state: WatchSyncStore.CanonicalState) {
-        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
-        defaults.set(state.stage, forKey: keyCanonicalStage)
-        defaults.set(state.updatedAt.timeIntervalSince1970, forKey: keyCanonicalUpdatedAt)
-        defaults.set(state.revision, forKey: keyCanonicalRevision)
-        if let stageStartAt = stageStartAt(for: state) {
-            let stageStartAtSeconds = stageStartAt.timeIntervalSince1970
-            defaults.set(stageStartAtSeconds, forKey: keyCanonicalStageStartAt)
-        } else {
-            defaults.removeObject(forKey: keyCanonicalStageStartAt)
-        }
-        WidgetCenter.shared.reloadAllTimelines()
+        let stageStart = stageStartAt(for: state)
+        writeCanonical(stage: state.stage, stageStartAt: stageStart, updatedAt: state.updatedAt, revision: state.revision)
     }
 
     private static func stageStartAt(for state: WatchSyncStore.CanonicalState) -> Date? {
@@ -68,6 +59,24 @@ private enum WidgetStateStore {
         default:
             return state.shootingStart ?? state.selectingStart ?? state.endedAt
         }
+    }
+
+    static func writeCanonical(stage: String, stageStartAt: Date?, updatedAt: Date, revision: Int64) {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+        defaults.set(stage, forKey: keyCanonicalStage)
+        defaults.set(updatedAt.timeIntervalSince1970, forKey: keyCanonicalUpdatedAt)
+        defaults.set(revision, forKey: keyCanonicalRevision)
+        if let stageStartAt {
+            defaults.set(stageStartAt.timeIntervalSince1970, forKey: keyCanonicalStageStartAt)
+        } else {
+            defaults.removeObject(forKey: keyCanonicalStageStartAt)
+        }
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    static func readGroupStage() -> String {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return "nil" }
+        return defaults.string(forKey: keyCanonicalStage) ?? "nil"
     }
 
     static func debugSummary() -> String {
@@ -613,6 +622,9 @@ struct ContentView: View {
                 Text("当前阶段 \(format(durations.currentStage))")
                 Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
 #if DEBUG
+                Text("uiStage=\(uiStageDebugValue) groupStage=\(WidgetStateStore.readGroupStage())")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
                 Text(WidgetStateStore.debugSummary())
                     .lineLimit(3)
                     .minimumScaleFactor(0.6)
@@ -684,6 +696,19 @@ struct ContentView: View {
         }
     }
 
+    private var uiStageDebugValue: String {
+        switch stage {
+        case .shooting:
+            return WidgetStateStore.stageShooting
+        case .selecting:
+            return WidgetStateStore.stageSelecting
+        case .ended:
+            return WidgetStateStore.stageStopped
+        case .idle:
+            return "idle"
+        }
+    }
+
     private var connectionStatusText: String {
         guard syncStore.sessionActivationState == .activated else {
             return "未连接"
@@ -719,24 +744,24 @@ struct ContentView: View {
             session.shootingStart = now
             sessionId = makeSessionId(startedAt: now)
             let state = makeCanonicalState(stage: WidgetStateStore.stageShooting, now: now)
-            WidgetStateStore.writeCanonicalState(from: state)
             syncStore.sendCanonicalState(state)
+            writeCanonicalToAppGroup(stage: WidgetStateStore.stageShooting, updatedAt: now, revision: state.revision)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
             playStageHaptic()
         case .shooting:
             stage = .selecting
             session.selectingStart = now
             let state = makeCanonicalState(stage: WidgetStateStore.stageSelecting, now: now)
-            WidgetStateStore.writeCanonicalState(from: state)
             syncStore.sendCanonicalState(state)
+            writeCanonicalToAppGroup(stage: WidgetStateStore.stageSelecting, updatedAt: now, revision: state.revision)
             updateWidgetState(isRunning: true, startedAt: session.shootingStart, stage: WidgetStateStore.stageSelecting)
             playStageHaptic()
         case .selecting:
             stage = .ended
             session.endedAt = now
             let state = makeCanonicalState(stage: WidgetStateStore.stageStopped, now: now)
-            WidgetStateStore.writeCanonicalState(from: state)
             syncStore.sendCanonicalState(state)
+            writeCanonicalToAppGroup(stage: WidgetStateStore.stageStopped, updatedAt: now, revision: state.revision)
             updateWidgetState(isRunning: false, startedAt: nil, stage: WidgetStateStore.stageStopped)
             playStageHaptic()
         case .ended:
@@ -745,8 +770,8 @@ struct ContentView: View {
             stage = .shooting
             sessionId = makeSessionId(startedAt: now)
             let state = makeCanonicalState(stage: WidgetStateStore.stageShooting, now: now)
-            WidgetStateStore.writeCanonicalState(from: state)
             syncStore.sendCanonicalState(state)
+            writeCanonicalToAppGroup(stage: WidgetStateStore.stageShooting, updatedAt: now, revision: state.revision)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
             playStageHaptic()
         }
@@ -822,6 +847,24 @@ struct ContentView: View {
         WidgetCenter.shared.reloadAllTimelines()
     }
 
+    private func writeCanonicalToAppGroup(stage stageValue: String, updatedAt: Date, revision: Int64) {
+        let stageStartAt: Date?
+        switch stageValue {
+        case WidgetStateStore.stageSelecting:
+            stageStartAt = session.selectingStart ?? updatedAt
+        case WidgetStateStore.stageShooting:
+            stageStartAt = session.shootingStart ?? updatedAt
+        default:
+            stageStartAt = session.selectingStart ?? session.shootingStart ?? session.endedAt
+        }
+        WidgetStateStore.writeCanonical(
+            stage: stageValue,
+            stageStartAt: stageStartAt,
+            updatedAt: updatedAt,
+            revision: revision
+        )
+    }
+
     @MainActor
     private func applyIncomingState(_ state: WatchSyncStore.CanonicalState) {
         let stageValue = state.stage
@@ -857,6 +900,7 @@ struct ContentView: View {
             stage: stageValue,
             lastUpdatedAt: state.updatedAt
         )
+        writeCanonicalToAppGroup(stage: stageValue, updatedAt: state.updatedAt, revision: state.revision)
         print("Applied watch state stage=\(stageValue)")
     }
 

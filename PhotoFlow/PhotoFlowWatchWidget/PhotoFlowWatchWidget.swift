@@ -44,7 +44,7 @@ private enum WidgetStateStore {
 
     static func readCanonicalState(now: Date = Date()) -> (stage: String, stageStartAt: Date?, updatedAt: Date, revision: Int64)? {
         guard let defaults = UserDefaults(suiteName: appGroupId) else { return nil }
-        guard let stageValue = defaults.string(forKey: keyCanonicalStage) else { return nil }
+        guard let stageValue = defaults.string(forKey: "pf_canonical_stage") else { return nil }
         let stage = normalizedStage(stageValue)
         let startSeconds = readSeconds(defaults.object(forKey: keyCanonicalStageStartAt))
         let updatedSeconds = readSeconds(defaults.object(forKey: keyCanonicalUpdatedAt))
@@ -65,7 +65,7 @@ private enum WidgetStateStore {
                 "epoch=0"
             ].joined(separator: "\n")
         }
-        let rawStage = defaults.string(forKey: keyCanonicalStage)
+        let rawStage = defaults.string(forKey: "pf_canonical_stage")
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
         let parsed = readSeconds(rawStart)
         let line1 = "suiteOK=true rawStage=\(rawStage ?? "nil")"
