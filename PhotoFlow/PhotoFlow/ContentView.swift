@@ -32,6 +32,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         static let keyRevision = "pf_canonical_revision"
         static let keyLastStageStartAt = "pf_canonical_lastStageStartAt"
         static let keyLastEndedAt = "pf_canonical_lastEndedAt"
+        static let keyCanonicalLastReloadAt = "pf_canonical_lastReloadAt"
 
         static func write(from state: WatchSyncStore.CanonicalState) {
             guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
@@ -54,6 +55,12 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             } else {
                 defaults.removeObject(forKey: keyLastEndedAt)
             }
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+
+        static func writeLastReloadAt(_ date: Date = Date()) {
+            guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+            defaults.set(date.timeIntervalSince1970, forKey: keyCanonicalLastReloadAt)
             WidgetCenter.shared.reloadAllTimelines()
         }
 

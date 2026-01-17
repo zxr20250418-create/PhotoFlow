@@ -26,6 +26,7 @@ private enum WidgetStateStore {
     static let keyCanonicalRevision = "pf_canonical_revision"
     static let keyCanonicalLastStageStartAt = "pf_canonical_lastStageStartAt"
     static let keyCanonicalLastEndedAt = "pf_canonical_lastEndedAt"
+    static let keyCanonicalLastReloadAt = "pf_canonical_lastReloadAt"
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -99,6 +100,12 @@ private enum WidgetStateStore {
         } else {
             defaults.removeObject(forKey: keyCanonicalLastEndedAt)
         }
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    static func writeLastReloadAt(_ date: Date = Date()) {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+        defaults.set(date.timeIntervalSince1970, forKey: keyCanonicalLastReloadAt)
         WidgetCenter.shared.reloadAllTimelines()
     }
 
@@ -635,6 +642,9 @@ struct ContentView: View {
             .contextMenu {
                 Button("立即同步") {
                     syncStore.requestLatestState()
+                }
+                Button("刷新表盘") {
+                    WidgetStateStore.writeLastReloadAt()
                 }
                 if syncStore.isOnDuty {
                     Button("下班", role: .destructive) {

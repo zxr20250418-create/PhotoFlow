@@ -14,6 +14,7 @@ private enum WidgetStateStore {
     static let keyCanonicalRevision = "pf_canonical_revision"
     static let keyCanonicalLastStageStartAt = "pf_canonical_lastStageStartAt"
     static let keyCanonicalLastEndedAt = "pf_canonical_lastEndedAt"
+    static let keyCanonicalLastReloadAt = "pf_canonical_lastReloadAt"
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -65,13 +66,15 @@ private enum WidgetStateStore {
 
     static func debugSummary(now: Date = Date()) -> String {
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
-            return "NO nil e=0"
+            return "NO nil e=0 lr=--:--:--"
         }
         let rawStage = defaults.string(forKey: "pf_canonical_stage")
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
         let parsed = readSeconds(rawStart) ?? 0
         let shortStage = shortStageLabel(normalizedStage(rawStage))
-        return "OK \(shortStage) e=\(Int(parsed))"
+        let lastReloadSeconds = readSeconds(defaults.object(forKey: keyCanonicalLastReloadAt))
+        let lrText = lastReloadSeconds.map { formatTime(seconds: $0) } ?? "--:--:--"
+        return "OK \(shortStage) e=\(Int(parsed)) lr=\(lrText)"
     }
 
     static func readSeconds(_ value: Any?) -> Double? {
@@ -108,6 +111,13 @@ private enum WidgetStateStore {
         default:
             return stage.isEmpty ? "nil" : stage
         }
+    }
+
+    private static func formatTime(seconds: Double) -> String {
+        let date = Date(timeIntervalSince1970: seconds)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "H:mm:ss"
+        return formatter.string(from: date)
     }
 
     private static func rawStartTypeLabel(_ value: Any?) -> String {
@@ -177,7 +187,7 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<PhotoFlowWidgetEntry>) -> Void) {
         let entry = entryFromStore()
-        completion(Timeline(entries: [entry], policy: .after(nextRefreshDate(from: entry))))
+        completion(Timeline(entries: [entry], policy: refreshPolicy(for: entry)))
     }
 
     private func sampleEntry(isRunning: Bool, stage: String) -> PhotoFlowWidgetEntry {
@@ -226,6 +236,13 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
             return entry.date.addingTimeInterval(45)
         }
         return entry.date.addingTimeInterval(12 * 60)
+    }
+
+    private func refreshPolicy(for entry: PhotoFlowWidgetEntry) -> TimelineReloadPolicy {
+        if entry.isRunning, entry.startedAt != nil {
+            return .after(Date().addingTimeInterval(30))
+        }
+        return .after(Date().addingTimeInterval(15 * 60))
     }
 }
 
