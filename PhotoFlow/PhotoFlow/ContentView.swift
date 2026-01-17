@@ -195,7 +195,7 @@ final class SessionMetaStore: ObservableObject {
     private let defaults = UserDefaults.standard
 
     init() {
-        loadAsync()
+        load()
     }
 
     func meta(for id: String) -> SessionMeta {
@@ -211,18 +211,12 @@ final class SessionMetaStore: ObservableObject {
         save()
     }
 
-    private func loadAsync() {
-        let defaults = defaults
-        let storageKey = storageKey
-        DispatchQueue.global(qos: .utility).async {
-            guard let data = defaults.data(forKey: storageKey),
-                  let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) else {
-                return
-            }
-            DispatchQueue.main.async {
-                self.metas = decoded
-            }
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) else {
+            return
         }
+        metas = decoded
     }
 
     private func save() {
@@ -238,7 +232,7 @@ final class SessionTimeOverrideStore: ObservableObject {
     private let defaults = UserDefaults.standard
 
     init() {
-        loadAsync()
+        load()
     }
 
     func override(for id: String) -> SessionTimeOverride? {
@@ -255,18 +249,12 @@ final class SessionTimeOverrideStore: ObservableObject {
         save()
     }
 
-    private func loadAsync() {
-        let defaults = defaults
-        let storageKey = storageKey
-        DispatchQueue.global(qos: .utility).async {
-            guard let data = defaults.data(forKey: storageKey),
-                  let decoded = try? JSONDecoder().decode([String: SessionTimeOverride].self, from: data) else {
-                return
-            }
-            DispatchQueue.main.async {
-                self.overrides = decoded
-            }
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: SessionTimeOverride].self, from: data) else {
+            return
         }
+        overrides = decoded
     }
 
     private func save() {
@@ -289,7 +277,7 @@ final class ManualSessionStore: ObservableObject {
     private let defaults = UserDefaults.standard
 
     init() {
-        loadAsync()
+        load()
     }
 
     func upsert(_ session: ManualSession) {
@@ -306,18 +294,12 @@ final class ManualSessionStore: ObservableObject {
         save()
     }
 
-    private func loadAsync() {
-        let defaults = defaults
-        let storageKey = storageKey
-        DispatchQueue.global(qos: .utility).async {
-            guard let data = defaults.data(forKey: storageKey),
-                  let decoded = try? JSONDecoder().decode([String: ManualSession].self, from: data) else {
-                return
-            }
-            DispatchQueue.main.async {
-                self.sessions = decoded
-            }
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: ManualSession].self, from: data) else {
+            return
         }
+        sessions = decoded
     }
 
     private func save() {
@@ -350,7 +332,7 @@ final class ShiftRecordStore: ObservableObject {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
-        loadAsync()
+        load()
     }
 
     func dayKey(for date: Date) -> String {
@@ -398,18 +380,12 @@ final class ShiftRecordStore: ObservableObject {
         upsert(record, for: key)
     }
 
-    private func loadAsync() {
-        let defaults = defaults
-        let storageKey = storageKey
-        DispatchQueue.global(qos: .utility).async {
-            guard let data = defaults.data(forKey: storageKey),
-                  let decoded = try? JSONDecoder().decode([String: ShiftRecord].self, from: data) else {
-                return
-            }
-            DispatchQueue.main.async {
-                self.records = decoded
-            }
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: ShiftRecord].self, from: data) else {
+            return
         }
+        records = decoded
     }
 
     private func save() {
@@ -432,7 +408,7 @@ final class DailyMemoStore: ObservableObject {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
-        loadAsync()
+        load()
     }
 
     func dayKey(for date: Date) -> String {
@@ -453,18 +429,12 @@ final class DailyMemoStore: ObservableObject {
         save()
     }
 
-    private func loadAsync() {
-        let defaults = defaults
-        let storageKey = storageKey
-        DispatchQueue.global(qos: .utility).async {
-            guard let data = defaults.data(forKey: storageKey),
-                  let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
-                return
-            }
-            DispatchQueue.main.async {
-                self.memos = decoded
-            }
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return
         }
+        memos = decoded
     }
 
     private func save() {
@@ -482,7 +452,7 @@ final class SessionVisibilityStore: ObservableObject {
     private let defaults = UserDefaults.standard
 
     init() {
-        loadAsync()
+        load()
     }
 
     func isVoided(_ id: String) -> Bool {
@@ -509,25 +479,14 @@ final class SessionVisibilityStore: ObservableObject {
         save()
     }
 
-    private func loadAsync() {
-        let defaults = defaults
-        let voidedKey = voidedKey
-        let deletedKey = deletedKey
-        DispatchQueue.global(qos: .utility).async {
-            var voided: Set<String> = []
-            var deleted: Set<String> = []
-            if let data = defaults.data(forKey: voidedKey),
-               let decoded = try? JSONDecoder().decode([String].self, from: data) {
-                voided = Set(decoded)
-            }
-            if let data = defaults.data(forKey: deletedKey),
-               let decoded = try? JSONDecoder().decode([String].self, from: data) {
-                deleted = Set(decoded)
-            }
-            DispatchQueue.main.async {
-                self.voidedIds = voided
-                self.deletedIds = deleted
-            }
+    private func load() {
+        if let data = defaults.data(forKey: voidedKey),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            voidedIds = Set(decoded)
+        }
+        if let data = defaults.data(forKey: deletedKey),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            deletedIds = Set(decoded)
         }
     }
 
@@ -615,29 +574,6 @@ struct ContentView: View {
         let id: String
     }
 
-    private enum QuickEditorMode: Identifiable {
-        case create
-        case edit(String)
-
-        var id: String {
-            switch self {
-            case .create:
-                return "quick-create"
-            case .edit(let sessionId):
-                return "quick-edit-\(sessionId)"
-            }
-        }
-
-        var title: String {
-            switch self {
-            case .create:
-                return "补记最近一单"
-            case .edit:
-                return "改记最近一单"
-            }
-        }
-    }
-
     private enum StatsRange: String, CaseIterable {
         case today
         case week
@@ -653,68 +589,6 @@ struct ContentView: View {
                 return "本月"
             }
         }
-    }
-
-    private struct StatsSnapshot {
-        var range: StatsRange
-        var count: Int
-        var totals: (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval)
-        var avgText: String
-        var shareText: String
-        var revenueText: String
-        var avgRevenueText: String
-        var shotText: String
-        var selectedText: String
-        var selectRateText: String
-        var rphText: String
-        var avgSelectRateText: String
-        var allTakeShareText: String
-        var weightedPickRateText: String
-        var reviewDigestText: String
-        var orderById: [String: Int]
-        var sessionStartById: [String: Date]
-        var revenueTop3: [(SessionSummary, Int)]
-        var rphTop3: [(SessionSummary, Double)]
-        var durationTop3: [(SessionSummary, TimeInterval)]
-        var lowestRph: (SessionSummary, Double, Int, TimeInterval)?
-        var longestSession: (SessionSummary, TimeInterval, Int?)?
-        var allTakeMaxShot: (SessionSummary, Int, Int?)?
-        var longestIdleGap: (Date, Date, Date, TimeInterval)?
-        var dataQualityMissing: [DataQualityItem]
-        var dataQualityAnomaly: [DataQualityItem]
-        var shiftWindow: (start: Date, end: Date)?
-        var shiftTotals: (work: TimeInterval, idle: TimeInterval, utilization: String, segments: [(TimeInterval, Bool)])
-
-        static let empty = StatsSnapshot(
-            range: .today,
-            count: 0,
-            totals: (0, 0, 0),
-            avgText: "--",
-            shareText: "--",
-            revenueText: "--",
-            avgRevenueText: "--",
-            shotText: "--",
-            selectedText: "--",
-            selectRateText: "--",
-            rphText: "--",
-            avgSelectRateText: "--",
-            allTakeShareText: "--",
-            weightedPickRateText: "--",
-            reviewDigestText: "",
-            orderById: [:],
-            sessionStartById: [:],
-            revenueTop3: [],
-            rphTop3: [],
-            durationTop3: [],
-            lowestRph: nil,
-            longestSession: nil,
-            allTakeMaxShot: nil,
-            longestIdleGap: nil,
-            dataQualityMissing: [],
-            dataQualityAnomaly: [],
-            shiftWindow: nil,
-            shiftTotals: (0, 0, "--", [])
-        )
     }
 
     @State private var stage: Stage = .idle
@@ -733,14 +607,6 @@ struct ContentView: View {
     @State private var timeEditingSession: TimeEditingSession?
     @State private var deleteCandidateId: String?
     @State private var memoDraft = ""
-    @State private var memoEditDraft = ""
-    @State private var isMemoEditorPresented = false
-    @State private var showIncomeOptions = false
-    @AppStorage("pf_home_show_month_income") private var showMonthIncome = false
-    @AppStorage("pf_home_show_year_income") private var showYearIncome = false
-    @AppStorage("pf_safe_mode") private var safeModeEnabled = false
-    @State private var monthIncomeText: String?
-    @State private var yearIncomeText: String?
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
     @State private var draftSelected = ""
@@ -754,7 +620,6 @@ struct ContentView: View {
     @State private var draftManualSelectedCount = ""
     @State private var draftManualReviewNote = ""
     @State private var isManualSessionPresented = false
-    @State private var quickEditorMode: QuickEditorMode?
     @State private var draftOverrideShootingStart = Date()
     @State private var draftOverrideSelectingStart = Date()
     @State private var draftOverrideEndedAt = Date()
@@ -762,8 +627,6 @@ struct ContentView: View {
     @State private var draftOverrideEndedEnabled = false
     @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
-    @State private var statsSnapshot: StatsSnapshot = .empty
-    @State private var isStatsLoading = false
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
     @State private var isReviewDigestPresented = false
@@ -793,73 +656,61 @@ struct ContentView: View {
     }
 
     var body: some View {
-        Group {
-            if isSafeModeEnabled {
-                SafeModeView(
-                    onClear: clearLocalDataAndExit,
-                    onExitSafeMode: { safeModeEnabled = false }
-                )
+        ZStack {
+            if selectedTab == .home {
+                homeView
             } else {
-                ZStack {
-                    if selectedTab == .home {
-                        homeView
-                    } else {
-                        statsView
+                statsView
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            bottomBar
+        }
+        .alert(item: $activeAlert) { alert in
+            Alert(title: Text(alert.message))
+        }
+        .sheet(item: $editingSession) { session in
+            NavigationStack {
+                Form {
+                    Section {
+                        TextField("金额", text: $draftAmount)
+                            .keyboardType(.decimalPad)
+                        TextField("拍摄张数", text: $draftShotCount)
+                            .keyboardType(.numberPad)
+                        TextField("选片张数", text: $draftSelected)
+                            .keyboardType(.numberPad)
+                    }
+                    Section("复盘备注") {
+                        TextEditor(text: $draftReviewNote)
+                            .frame(minHeight: 100)
                     }
                 }
-                .safeAreaInset(edge: .bottom) {
-                    bottomBar
-                }
-                .alert(item: $activeAlert) { alert in
-                    Alert(title: Text(alert.message))
-                }
-                .sheet(item: $editingSession) { session in
-                    NavigationStack {
-                        Form {
-                            Section {
-                                TextField("金额", text: $draftAmount)
-                                    .keyboardType(.decimalPad)
-                                TextField("拍摄张数", text: $draftShotCount)
-                                    .keyboardType(.numberPad)
-                                TextField("选片张数", text: $draftSelected)
-                                    .keyboardType(.numberPad)
-                            }
-                            Section("复盘备注") {
-                                TextEditor(text: $draftReviewNote)
-                                    .frame(minHeight: 100)
-                            }
-                        }
-                        .navigationTitle("编辑指标")
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("取消") {
-                                    editingSession = nil
-                                }
-                            }
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("保存") {
-                                    saveMeta(for: session.id)
-                                    editingSession = nil
-                                }
-                            }
+                .navigationTitle("编辑指标")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") {
+                            editingSession = nil
                         }
                     }
-                }
-                .sheet(item: $timeEditingSession) { session in
-                    timeOverrideEditor(sessionId: session.id)
-                }
-                .sheet(isPresented: $isManualSessionPresented) {
-                    manualSessionEditor
-                }
-                .sheet(item: $quickEditorMode) { mode in
-                    quickSessionEditor(mode: mode)
-                }
-                .onReceive(ticker) { now = $0 }
-                .onReceive(syncStore.$incomingEvent) { event in
-                    guard let event = event else { return }
-                    applySessionEvent(event)
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            saveMeta(for: session.id)
+                            editingSession = nil
+                        }
+                    }
                 }
             }
+        }
+        .sheet(item: $timeEditingSession) { session in
+            timeOverrideEditor(sessionId: session.id)
+        }
+        .sheet(isPresented: $isManualSessionPresented) {
+            manualSessionEditor
+        }
+        .onReceive(ticker) { now = $0 }
+        .onReceive(syncStore.$incomingEvent) { event in
+            guard let event = event else { return }
+            applySessionEvent(event)
         }
     }
 
@@ -903,54 +754,6 @@ struct ContentView: View {
 
     private func effectiveSessionSortKey(for summary: SessionSummary) -> Date {
         effectiveSessionStartTime(for: summary) ?? Date.distantPast
-    }
-
-    private func effectiveSessionEndTime(for summary: SessionSummary) -> Date {
-        let times = effectiveTimes(for: summary)
-        return times.endedAt ?? now
-    }
-
-    private var latestQuickEditSession: SessionSummary? {
-        let isoCal = Calendar(identifier: .iso8601)
-        let shiftWindowStart = shiftStart
-        let shiftWindowEnd = shiftEnd ?? now
-        return effectiveSessionSummaries
-            .filter { summary in
-                let end = effectiveSessionEndTime(for: summary)
-                if let shiftWindowStart {
-                    return end >= shiftWindowStart && end <= shiftWindowEnd
-                }
-                return isoCal.isDateInToday(end)
-            }
-            .max { effectiveSessionEndTime(for: $0) < effectiveSessionEndTime(for: $1) }
-    }
-
-    private func openQuickBackfill() {
-        let end = now
-        let start = now.addingTimeInterval(-30 * 60)
-        draftManualShootingStart = start
-        draftManualEndedAt = end
-        draftManualSelectingEnabled = false
-        draftManualSelectingStart = start
-        draftManualAmount = ""
-        draftManualShotCount = ""
-        draftManualSelectedCount = ""
-        draftManualReviewNote = ""
-        quickEditorMode = .create
-    }
-
-    private func openQuickEdit(for summary: SessionSummary) {
-        let times = effectiveTimes(for: summary)
-        draftManualShootingStart = times.shootingStart ?? now
-        draftManualEndedAt = times.endedAt ?? now
-        draftManualSelectingEnabled = times.selectingStart != nil
-        draftManualSelectingStart = times.selectingStart ?? draftManualShootingStart
-        let meta = metaStore.meta(for: summary.id)
-        draftManualAmount = meta.amountCents.map(amountText(from:)) ?? ""
-        draftManualShotCount = meta.shotCount.map(String.init) ?? ""
-        draftManualSelectedCount = meta.selectedCount.map(String.init) ?? ""
-        draftManualReviewNote = meta.reviewNote ?? ""
-        quickEditorMode = .edit(summary.id)
     }
 
     private var homeView: some View {
@@ -1083,10 +886,6 @@ struct ContentView: View {
         return formatter
     }()
 
-    private var isSafeModeEnabled: Bool {
-        safeModeEnabled || ProcessInfo.processInfo.environment["PF_SAFE_MODE"] == "1"
-    }
-
     private var homeFixedHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(Self.homeDateFormatter.string(from: now))
@@ -1100,25 +899,20 @@ struct ContentView: View {
     private var memoEditor: some View {
         let dayKey = dailyMemoStore.dayKey(for: now)
         let placeholder = "备忘：客户/卡点/今天只做一件事…"
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("当日备忘")
-                    .font(.subheadline)
+        return ZStack(alignment: .topLeading) {
+            if memoDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(placeholder)
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Button("编辑") {
-                    memoEditDraft = memoDraft
-                    isMemoEditorPresented = true
-                }
-                .font(.footnote)
+                    .padding(.top, 8)
+                    .padding(.leading, 6)
             }
-            Text(memoDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? placeholder : memoDraft)
+            TextEditor(text: $memoDraft)
                 .font(.footnote)
-                .foregroundStyle(memoDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .secondary : .primary)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 80)
+                .scrollContentBackground(.hidden)
         }
-        .padding(10)
+        .padding(8)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .onAppear {
@@ -1127,30 +921,8 @@ struct ContentView: View {
         .onChange(of: dayKey) { _, newKey in
             memoDraft = dailyMemoStore.memo(for: newKey)
         }
-        .sheet(isPresented: $isMemoEditorPresented) {
-            NavigationStack {
-                Form {
-                    Section("备忘") {
-                        TextEditor(text: $memoEditDraft)
-                            .frame(minHeight: 160)
-                    }
-                }
-                .navigationTitle("编辑备忘")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("取消") {
-                            isMemoEditorPresented = false
-                        }
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("保存") {
-                            dailyMemoStore.setMemo(memoEditDraft, for: dayKey)
-                            memoDraft = memoEditDraft
-                            isMemoEditorPresented = false
-                        }
-                    }
-                }
-            }
+        .onChange(of: memoDraft) { _, newValue in
+            dailyMemoStore.setMemo(newValue, for: dayKey)
         }
     }
 
@@ -1173,29 +945,6 @@ struct ContentView: View {
         timeOverrideStore.clear(for: id)
         manualSessionStore.remove(id)
         sessionSummaries.removeAll { $0.id == id }
-    }
-
-    private func clearLocalDataAndExit() {
-        clearLocalData()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            exit(0)
-        }
-    }
-
-    private func clearLocalData() {
-        let defaults = UserDefaults.standard
-        if let bundleId = Bundle.main.bundleIdentifier {
-            defaults.removePersistentDomain(forName: bundleId)
-        }
-        defaults.synchronize()
-
-        let manager = FileManager.default
-        if let docs = manager.urls(for: .documentDirectory, in: .userDomainMask).first,
-           let urls = try? manager.contentsOfDirectory(at: docs, includingPropertiesForKeys: nil) {
-            for url in urls {
-                try? manager.removeItem(at: url)
-            }
-        }
     }
 
     private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
@@ -1368,25 +1117,19 @@ struct ContentView: View {
         isManualSessionPresented = true
     }
 
-    private func validateManualTimes(start: Date, end: Date, selectingEnabled: Bool, selecting: Date) -> Bool {
-        guard start < end else {
-            activeAlert = .validation("拍摄开始需早于结束时间")
-            return false
-        }
-        if selectingEnabled {
-            guard selecting >= start && selecting <= end else {
-                activeAlert = .validation("选片开始需在拍摄开始与结束之间")
-                return false
-            }
-        }
-        return true
-    }
-
-    private func upsertManualSession() -> String? {
+    private func saveManualSession() {
         let start = draftManualShootingStart
         let end = draftManualEndedAt
-        guard validateManualTimes(start: start, end: end, selectingEnabled: draftManualSelectingEnabled, selecting: draftManualSelectingStart) else {
-            return nil
+        guard start < end else {
+            activeAlert = .validation("拍摄开始需早于结束时间")
+            return
+        }
+        if draftManualSelectingEnabled {
+            let selecting = draftManualSelectingStart
+            guard selecting >= start && selecting <= end else {
+                activeAlert = .validation("选片开始需在拍摄开始与结束之间")
+                return
+            }
         }
         let sessionId = makeManualSessionId(startedAt: start)
         let manual = ManualSession(
@@ -1403,40 +1146,7 @@ struct ContentView: View {
             reviewNote: normalizedNote(from: draftManualReviewNote)
         )
         metaStore.update(meta, for: sessionId)
-        return sessionId
-    }
-
-    private func saveManualSession() {
-        guard upsertManualSession() != nil else { return }
         isManualSessionPresented = false
-    }
-
-    private func saveQuickCreate() {
-        guard upsertManualSession() != nil else { return }
-        quickEditorMode = nil
-    }
-
-    private func saveQuickEdit(sessionId: String) {
-        let start = draftManualShootingStart
-        let end = draftManualEndedAt
-        guard validateManualTimes(start: start, end: end, selectingEnabled: draftManualSelectingEnabled, selecting: draftManualSelectingStart) else {
-            return
-        }
-        let overrideValue = SessionTimeOverride(
-            shootingStart: start,
-            selectingStart: draftManualSelectingEnabled ? draftManualSelectingStart : nil,
-            endedAt: end,
-            updatedAt: now
-        )
-        timeOverrideStore.update(overrideValue, for: sessionId)
-        let meta = SessionMeta(
-            amountCents: parseAmountCents(from: draftManualAmount),
-            shotCount: parseInt(from: draftManualShotCount),
-            selectedCount: parseInt(from: draftManualSelectedCount),
-            reviewNote: normalizedNote(from: draftManualReviewNote)
-        )
-        metaStore.update(meta, for: sessionId)
-        quickEditorMode = nil
     }
 
     private var manualSessionEditor: some View {
@@ -1476,63 +1186,6 @@ struct ContentView: View {
                     }
                 }
             }
-        }
-    }
-
-    private func quickSessionEditor(mode: QuickEditorMode) -> some View {
-        NavigationStack {
-            Form {
-                Section("时间") {
-                    DatePicker("拍摄开始", selection: $draftManualShootingStart, displayedComponents: [.date, .hourAndMinute])
-                    DatePicker("结束", selection: $draftManualEndedAt, displayedComponents: [.date, .hourAndMinute])
-                    Toggle("有选片开始", isOn: $draftManualSelectingEnabled)
-                    if draftManualSelectingEnabled {
-                        DatePicker("选片开始", selection: $draftManualSelectingStart, displayedComponents: [.date, .hourAndMinute])
-                    }
-                }
-                Section("结算") {
-                    TextField("金额", text: $draftManualAmount)
-                        .keyboardType(.decimalPad)
-                    TextField("拍摄张数", text: $draftManualShotCount)
-                        .keyboardType(.numberPad)
-                    TextField("选片张数", text: $draftManualSelectedCount)
-                        .keyboardType(.numberPad)
-                }
-                Section("复盘备注") {
-                    noteEditor(text: $draftManualReviewNote, placeholder: "客户/卡点/下次动作（一句话）")
-                        .frame(minHeight: 100)
-                }
-            }
-            .navigationTitle(mode.title)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") {
-                        quickEditorMode = nil
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
-                        switch mode {
-                        case .create:
-                            saveQuickCreate()
-                        case .edit(let sessionId):
-                            saveQuickEdit(sessionId: sessionId)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func noteEditor(text: Binding<String>, placeholder: String) -> some View {
-        ZStack(alignment: .topLeading) {
-            if text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(placeholder)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 8)
-                    .padding(.leading, 5)
-            }
-            TextEditor(text: text)
         }
     }
 
@@ -1726,7 +1379,10 @@ struct ContentView: View {
             }
         }
         let count = todaySessions.count
-        let amountText = formatAmount(cents: metaTotals.hasAmount ? metaTotals.amountCents : 0)
+        let amountText = metaTotals.hasAmount ? formatAmount(cents: metaTotals.amountCents) : "--"
+        let rateText = (metaTotals.hasShot && metaTotals.hasSelected && metaTotals.shot > 0)
+            ? "\(Int((Double(metaTotals.selected) / Double(metaTotals.shot) * 100).rounded()))%"
+            : "--"
         return Button(action: { selectedTab = .stats }) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1734,42 +1390,19 @@ struct ContentView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
-                    HStack(spacing: 6) {
-                        Text(amountText)
-                            .font(.title2)
-                            .fontWeight(.bold)
-                            .monospacedDigit()
-                        Button(action: { showIncomeOptions.toggle() }) {
-                            Image(systemName: showIncomeOptions ? "chevron.up" : "chevron.down")
-                        }
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .buttonStyle(.plain)
-                    }
-                }
-                HStack(spacing: 12) {
-                    Text("今日单数 \(count)")
-                    Text("今日总时长 \(format(totals.total))")
-                }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                if showIncomeOptions {
-                    Toggle("显示本月收入", isOn: $showMonthIncome)
-                    Toggle("显示本年收入", isOn: $showYearIncome)
-                }
-                if let monthIncomeText, showMonthIncome {
-                    Text("本月收入 \(monthIncomeText)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    Text(amountText)
+                        .font(.title2)
+                        .fontWeight(.bold)
                         .monospacedDigit()
                 }
-                if let yearIncomeText, showYearIncome {
-                    Text("本年收入 \(yearIncomeText)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
+                Text("\(count)单 · 总 \(format(totals.total))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Text("拍 \(format(totals.shooting)) · 选 \(format(totals.selecting)) · 拍 \(metaTotals.hasShot ? "\(metaTotals.shot)张" : "--") · 选 \(metaTotals.hasSelected ? "\(metaTotals.selected)张" : "--") · 选片率 \(rateText)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1777,325 +1410,9 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
-        .task(id: showMonthIncome) {
-            if showMonthIncome {
-                guard let interval = isoCal.dateInterval(of: .month, for: now) else {
-                    monthIncomeText = nil
-                    return
-                }
-                let total = effectiveSessionSummaries.reduce(0) { partial, summary in
-                    guard let shootingStart = effectiveTimes(for: summary).shootingStart,
-                          interval.contains(shootingStart),
-                          let amount = metaStore.meta(for: summary.id).amountCents else { return partial }
-                    return partial + amount
-                }
-                monthIncomeText = formatAmount(cents: total)
-            } else {
-                monthIncomeText = nil
-            }
-        }
-        .task(id: showYearIncome) {
-            if showYearIncome {
-                guard let interval = isoCal.dateInterval(of: .year, for: now) else {
-                    yearIncomeText = nil
-                    return
-                }
-                let total = effectiveSessionSummaries.reduce(0) { partial, summary in
-                    guard let shootingStart = effectiveTimes(for: summary).shootingStart,
-                          interval.contains(shootingStart),
-                          let amount = metaStore.meta(for: summary.id).amountCents else { return partial }
-                    return partial + amount
-                }
-                yearIncomeText = formatAmount(cents: total)
-            } else {
-                yearIncomeText = nil
-            }
-        }
     }
 
     private var statsView: some View {
-        Group {
-            if selectedTab != .stats {
-                EmptyView()
-            } else {
-                statsContent(snapshot: statsSnapshot)
-                    .task(id: statsRange) {
-                        refreshStatsSnapshot()
-                    }
-                    .task(id: selectedTab) {
-                        if selectedTab == .stats {
-                            refreshStatsSnapshot()
-                        }
-                    }
-            }
-        }
-    }
-
-    private func refreshStatsSnapshot() {
-        guard !isStatsLoading else { return }
-        isStatsLoading = true
-        statsSnapshot = buildStatsSnapshot()
-        isStatsLoading = false
-    }
-
-    private func statsContent(snapshot: StatsSnapshot) -> some View {
-        let prefix = snapshot.range.title
-        let orderById = snapshot.orderById
-        let sessionLabel: (SessionSummary) -> String = { summary in
-            let orderText = orderById[summary.id].map { "第\($0)单" } ?? "第?单"
-            let timeText = snapshot.sessionStartById[summary.id].map(formatSessionTime) ?? "--"
-            return "\(orderText) \(timeText)"
-        }
-        let sessionHeaderText: (SessionSummary) -> String = { summary in
-            let orderText = orderById[summary.id].map { "第\($0)单" } ?? "第?单"
-            let timeText = snapshot.sessionStartById[summary.id].map(formatSessionTime) ?? "--"
-            return "\(orderText) \(timeText)"
-        }
-        let shiftWindow = snapshot.shiftWindow
-        let shiftTotals = snapshot.shiftTotals
-        let dataQualityMissing = snapshot.dataQualityMissing
-        let dataQualityAnomaly = snapshot.dataQualityAnomaly
-        return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 8) {
-                if isStatsLoading {
-                    ProgressView("统计加载中…")
-                }
-                Picker("", selection: $statsRange) {
-                    ForEach(StatsRange.allCases, id: \.self) { range in
-                        Text(range.title).tag(range)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                Button("记录（月历）") {
-                    isShiftCalendarPresented = true
-                }
-                .buttonStyle(.bordered)
-
-                Text("上班时间线")
-                    .font(.headline)
-                if statsRange != .today {
-                    Text("仅今日显示")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if let shiftWindow {
-                    let shiftStartText = formatSessionTime(shiftWindow.start)
-                    let shiftEndText = shiftEnd == nil ? "进行中" : formatSessionTime(shiftWindow.end)
-                    Text("上班 \(shiftStartText) · 下班 \(shiftEndText)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("工作 \(format(shiftTotals.work)) · 空余 \(format(shiftTotals.idle)) · 利用率 \(shiftTotals.utilization)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                    GeometryReader { proxy in
-                        HStack(spacing: 0) {
-                            ForEach(Array(shiftTotals.segments.enumerated()), id: \.offset) { _, segment in
-                                let width = proxy.size.width * segment.0 / max(1, shiftWindow.end.timeIntervalSince(shiftWindow.start))
-                                Rectangle()
-                                    .fill(segment.1 ? Color.primary : Color.secondary.opacity(0.25))
-                                    .frame(width: width)
-                            }
-                        }
-                        .frame(height: 12)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                    .frame(height: 12)
-                } else {
-                    Text("暂无上班记录")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if statsRange == .today {
-                    Button("补记一单") {
-                        startManualSessionDraft()
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Text("仅今日可补记")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Text("今日复盘备注")
-                    .font(.headline)
-                Button("查看/复制") {
-                    isReviewDigestPresented = true
-                }
-                .buttonStyle(.bordered)
-                .sheet(isPresented: $isReviewDigestPresented) {
-                    NavigationStack {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ScrollView {
-                                Text(snapshot.reviewDigestText)
-                                    .font(.footnote)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
-                            }
-                            HStack(spacing: 12) {
-                                Button("复制") {
-                                    UIPasteboard.general.string = snapshot.reviewDigestText
-                                }
-                                ShareLink(item: snapshot.reviewDigestText) {
-                                    Text("分享")
-                                }
-                            }
-                        }
-                        .padding()
-                        .navigationTitle("今日复盘备注")
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("关闭") {
-                                    isReviewDigestPresented = false
-                                }
-                            }
-                        }
-                    }
-                }
-                Divider()
-
-                Text("\(prefix)单数 \(snapshot.count)")
-                Text("\(prefix)总时长 \(format(snapshot.totals.total))")
-                Text("\(prefix)拍摄时长 \(format(snapshot.totals.shooting))")
-                Text("\(prefix)选片时长 \(format(snapshot.totals.selecting))")
-                Text("\(prefix)平均每单总时长 \(snapshot.avgText)")
-                Text("\(prefix)选片占比 \(snapshot.shareText)")
-                Divider()
-                Text("经营汇总")
-                    .font(.headline)
-                Text("收入合计 \(snapshot.revenueText)")
-                Text("平均客单价 \(snapshot.avgRevenueText)")
-                Text("拍摄张数合计 \(snapshot.shotText)")
-                Text("选片张数合计 \(snapshot.selectedText)")
-                Text("选片率 \(snapshot.selectRateText)")
-                Text("RPH \(snapshot.rphText)")
-                Text("平均选片率（按单） \(snapshot.avgSelectRateText)（全要 \(snapshot.allTakeShareText)）")
-                Text("选片率（按张） \(snapshot.weightedPickRateText)")
-                Divider()
-                Text("Top 3")
-                    .font(.headline)
-                Text("收入")
-                    .font(.subheadline)
-                if snapshot.revenueTop3.isEmpty {
-                    Text("暂无足够数据")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(snapshot.revenueTop3.enumerated()), id: \.offset) { _, item in
-                        Text("\(sessionLabel(item.0))  \(formatAmount(cents: item.1))")
-                    }
-                }
-                Text("RPH")
-                    .font(.subheadline)
-                if snapshot.rphTop3.isEmpty {
-                    Text("暂无足够数据")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(snapshot.rphTop3.enumerated()), id: \.offset) { _, item in
-                        let rphLine = String(format: "RPH ¥%.0f/小时", item.1)
-                        Text("\(sessionLabel(item.0))  \(rphLine)")
-                    }
-                }
-                Text("用时")
-                    .font(.subheadline)
-                if snapshot.durationTop3.isEmpty {
-                    Text("暂无足够数据")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(snapshot.durationTop3.enumerated()), id: \.offset) { _, item in
-                        Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
-                    }
-                }
-                Divider()
-                Text("Bottom1（最大损耗源）")
-                    .font(.headline)
-                if let lowestRph = snapshot.lowestRph {
-                    let summary = lowestRph.0
-                    let order = orderById[summary.id] ?? 0
-                    let header = sessionHeaderText(summary)
-                    let rphLine = String(format: "RPH ¥%.0f/小时", lowestRph.1)
-                    NavigationLink {
-                        sessionDetailView(summary: summary, order: order)
-                    } label: {
-                        Text("\(header) · \(rphLine) · \(formatAmount(cents: lowestRph.2)) · 用时 \(format(lowestRph.3))")
-                    }
-                } else {
-                    Text("最低RPH：无")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let longestSession = snapshot.longestSession {
-                    let summary = longestSession.0
-                    let order = orderById[summary.id] ?? 0
-                    let header = sessionHeaderText(summary)
-                    let amountText = longestSession.2.map { formatAmount(cents: $0) }
-                    let suffix = amountText.map { " · \($0)" } ?? ""
-                    NavigationLink {
-                        sessionDetailView(summary: summary, order: order)
-                    } label: {
-                        Text("\(header) · 用时 \(format(longestSession.1))\(suffix)")
-                    }
-                } else {
-                    Text("最耗时：无")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let allTakeMaxShot = snapshot.allTakeMaxShot {
-                    let summary = allTakeMaxShot.0
-                    let order = orderById[summary.id] ?? 0
-                    let header = sessionHeaderText(summary)
-                    let amountText = allTakeMaxShot.2.map { formatAmount(cents: $0) }
-                    let suffix = amountText.map { " · \($0)" } ?? ""
-                    NavigationLink {
-                        sessionDetailView(summary: summary, order: order)
-                    } label: {
-                        Text("\(header) · 全要 · 拍\(allTakeMaxShot.1)张\(suffix)")
-                    }
-                } else {
-                    Text("全要：无")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let longestIdleGap = snapshot.longestIdleGap {
-                    let dateText = reviewDateText(longestIdleGap.0)
-                    let startText = formatSessionTime(longestIdleGap.1)
-                    let endText = formatSessionTime(longestIdleGap.2)
-                    let minutes = Int((longestIdleGap.3 / 60).rounded())
-                    Text("\(dateText) \(startText)–\(endText) · 空余 \(minutes)m")
-                } else {
-                    Text("空余：无")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Divider()
-                Text("数据质量")
-                    .font(.headline)
-                Text("缺失 \(dataQualityMissing.count) · 异常 \(dataQualityAnomaly.count)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Button("查看") {
-                    isDataQualityPresented = true
-                }
-                .buttonStyle(.bordered)
-                .disabled(dataQualityMissing.isEmpty && dataQualityAnomaly.isEmpty)
-                .sheet(isPresented: $isDataQualityPresented) {
-                    dataQualityListView(
-                        missing: dataQualityMissing,
-                        anomaly: dataQualityAnomaly,
-                        orderById: orderById
-                    )
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-        }
-        .sheet(isPresented: $isShiftCalendarPresented) {
-            shiftCalendarView
-        }
-    }
-
-    private func buildStatsSnapshot() -> StatsSnapshot {
         let isoCal = Calendar(identifier: .iso8601)
         let filteredSessions = effectiveSessionSummaries.filter { summary in
             guard let shootingStart = effectiveTimes(for: summary).shootingStart else { return false }
@@ -2121,6 +1438,7 @@ struct ContentView: View {
         let count = filteredSessions.count
         let avgTotal = count > 0 ? totals.total / Double(count) : nil
         let selectShare = totals.total > 0 ? totals.selecting / totals.total : nil
+        let prefix = statsRange.title
         let avgText = avgTotal.map { format($0) } ?? "--"
         let shareText = selectShare.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
         let bizTotals = filteredSessions.reduce(into: (amountCents: 0, hasAmount: false, shot: 0, hasShot: false, selected: 0, hasSelected: false)) { result, summary in
@@ -2193,9 +1511,6 @@ struct ContentView: View {
         }()
         let reviewDigestText = dailyReviewDigestText()
         let orderById = Dictionary(uniqueKeysWithValues: effectiveSessionSummaries.enumerated().map { ($0.element.id, $0.offset + 1) })
-        let sessionStartById = Dictionary(uniqueKeysWithValues: effectiveSessionSummaries.map {
-            ($0.id, effectiveSessionStartTime(for: $0) ?? effectiveSessionSortKey(for: $0))
-        })
         let sessionLabel: (SessionSummary) -> String = { summary in
             var parts: [String] = []
             if let order = orderById[summary.id] {
@@ -2203,8 +1518,9 @@ struct ContentView: View {
             } else {
                 parts.append("第?单")
             }
-            let timeValue = sessionStartById[summary.id] ?? now
-            parts.append(formatSessionTime(timeValue))
+            if let start = effectiveSessionStartTime(for: summary) {
+                parts.append(formatSessionTime(start))
+            }
             return parts.joined(separator: " ")
         }
         let revenueTop3: [(SessionSummary, Int)] = {
@@ -2234,104 +1550,6 @@ struct ContentView: View {
                 return (summary, totalSeconds)
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
-        }()
-        let lowestRph: (summary: SessionSummary, rph: Double, amountCents: Int, totalSeconds: TimeInterval)? = {
-            let items = filteredSessions.compactMap { summary -> (SessionSummary, Double, Int, TimeInterval)? in
-                let meta = metaStore.meta(for: summary.id)
-                guard let amount = meta.amountCents else { return nil }
-                let totalSeconds = sessionDurations(for: summary).total
-                guard totalSeconds > 0 else { return nil }
-                let hours = totalSeconds / 3600
-                guard hours > 0 else { return nil }
-                let revenue = Double(amount) / 100
-                return (summary, revenue / hours, amount, totalSeconds)
-            }
-            return items.min { $0.1 < $1.1 }
-        }()
-        let longestSession: (summary: SessionSummary, totalSeconds: TimeInterval, amountCents: Int?)? = {
-            let items = filteredSessions.compactMap { summary -> (SessionSummary, TimeInterval, Int?)? in
-                let totalSeconds = sessionDurations(for: summary).total
-                guard totalSeconds > 0 else { return nil }
-                let amount = metaStore.meta(for: summary.id).amountCents
-                return (summary, totalSeconds, amount)
-            }
-            return items.max { $0.1 < $1.1 }
-        }()
-        let allTakeMaxShot: (summary: SessionSummary, shotCount: Int, amountCents: Int?)? = {
-            let items = filteredSessions.compactMap { summary -> (SessionSummary, Int, Int?)? in
-                let meta = metaStore.meta(for: summary.id)
-                guard let shot = meta.shotCount, shot > 0,
-                      let selected = meta.selectedCount else { return nil }
-                if selected > shot { return nil }
-                guard selected == shot else { return nil }
-                return (summary, shot, meta.amountCents)
-            }
-            return items.max { $0.1 < $1.1 }
-        }()
-        let longestIdleGap: (date: Date, start: Date, end: Date, duration: TimeInterval)? = {
-            let formatter = DateFormatter()
-            formatter.calendar = isoCal
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.timeZone = isoCal.timeZone
-            formatter.dateFormat = "yyyy-MM-dd"
-            let inRange: (Date) -> Bool = { day in
-                switch statsRange {
-                case .today:
-                    return isoCal.isDateInToday(day)
-                case .week:
-                    guard let interval = isoCal.dateInterval(of: .weekOfYear, for: now) else { return false }
-                    return interval.contains(day)
-                case .month:
-                    guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
-                    return interval.contains(day)
-                }
-            }
-            var best: (Date, Date, Date, TimeInterval)?
-            for (key, record) in shiftRecordStore.records {
-                guard let day = formatter.date(from: key),
-                      inRange(day),
-                      let startAt = record.startAt else { continue }
-                let dayStart = isoCal.startOfDay(for: day)
-                let dayEnd = isoCal.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
-                let shiftStart = max(startAt, dayStart)
-                let shiftEnd = min(record.endAt ?? now, dayEnd)
-                guard shiftEnd > shiftStart else { continue }
-                let raw = filteredSessions.compactMap { summary -> (Date, Date)? in
-                    let times = effectiveTimes(for: summary)
-                    guard let start = times.shootingStart else { return nil }
-                    let end = times.endedAt ?? now
-                    let clippedStart = max(start, shiftStart)
-                    let clippedEnd = min(end, shiftEnd)
-                    return clippedEnd > clippedStart ? (clippedStart, clippedEnd) : nil
-                }
-                let sorted = raw.sorted { $0.0 < $1.0 }
-                var merged: [(Date, Date)] = []
-                for interval in sorted {
-                    if let last = merged.last, interval.0 <= last.1 {
-                        let newEnd = max(last.1, interval.1)
-                        merged[merged.count - 1].1 = newEnd
-                    } else {
-                        merged.append(interval)
-                    }
-                }
-                var cursor = shiftStart
-                for work in merged {
-                    if work.0 > cursor {
-                        let gap = work.0.timeIntervalSince(cursor)
-                        if best == nil || gap > best!.3 {
-                            best = (day, cursor, work.0, gap)
-                        }
-                    }
-                    cursor = max(cursor, work.1)
-                }
-                if cursor < shiftEnd {
-                    let gap = shiftEnd.timeIntervalSince(cursor)
-                    if best == nil || gap > best!.3 {
-                        best = (day, cursor, shiftEnd, gap)
-                    }
-                }
-            }
-            return best.map { ($0.0, $0.1, $0.2, $0.3) }
         }()
         let dataQuality = dataQualityReport(for: filteredSessions, sessionLabel: sessionLabel)
         let shiftWindow: (start: Date, end: Date)? = {
@@ -2390,36 +1608,180 @@ struct ContentView: View {
             let barSegments = segments.map { ($0.1.timeIntervalSince($0.0), $0.2) }
             return (workTotal, idleTotal, utilization, barSegments)
         }()
-        return StatsSnapshot(
-            range: statsRange,
-            count: count,
-            totals: totals,
-            avgText: avgText,
-            shareText: shareText,
-            revenueText: revenueText,
-            avgRevenueText: avgRevenueText,
-            shotText: shotText,
-            selectedText: selectedText,
-            selectRateText: selectRateText,
-            rphText: rphText,
-            avgSelectRateText: avgSelectRateText,
-            allTakeShareText: allTakeShareText,
-            weightedPickRateText: weightedPickRateText,
-            reviewDigestText: reviewDigestText,
-            orderById: orderById,
-            sessionStartById: sessionStartById,
-            revenueTop3: revenueTop3,
-            rphTop3: rphTop3,
-            durationTop3: durationTop3,
-            lowestRph: lowestRph.map { ($0.summary, $0.rph, $0.amountCents, $0.totalSeconds) },
-            longestSession: longestSession.map { ($0.summary, $0.totalSeconds, $0.amountCents) },
-            allTakeMaxShot: allTakeMaxShot.map { ($0.summary, $0.shotCount, $0.amountCents) },
-            longestIdleGap: longestIdleGap.map { ($0.date, $0.start, $0.end, $0.duration) },
-            dataQualityMissing: dataQuality.missing,
-            dataQualityAnomaly: dataQuality.anomaly,
-            shiftWindow: shiftWindow,
-            shiftTotals: shiftTotals
-        )
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: $statsRange) {
+                ForEach(StatsRange.allCases, id: \.self) { range in
+                    Text(range.title).tag(range)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Button("记录（月历）") {
+                isShiftCalendarPresented = true
+            }
+            .buttonStyle(.bordered)
+
+            Text("上班时间线")
+                .font(.headline)
+            if statsRange != .today {
+                Text("仅今日显示")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let shiftWindow {
+                let shiftStartText = formatSessionTime(shiftWindow.start)
+                let shiftEndText = shiftEnd == nil ? "进行中" : formatSessionTime(shiftWindow.end)
+                Text("上班 \(shiftStartText) · 下班 \(shiftEndText)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("工作 \(format(shiftTotals.work)) · 空余 \(format(shiftTotals.idle)) · 利用率 \(shiftTotals.utilization)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                GeometryReader { proxy in
+                    HStack(spacing: 0) {
+                        ForEach(Array(shiftTotals.segments.enumerated()), id: \.offset) { _, segment in
+                            let width = proxy.size.width * segment.0 / max(1, shiftWindow.end.timeIntervalSince(shiftWindow.start))
+                            Rectangle()
+                                .fill(segment.1 ? Color.primary : Color.secondary.opacity(0.25))
+                                .frame(width: width)
+                        }
+                    }
+                    .frame(height: 12)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .frame(height: 12)
+            } else {
+                Text("暂无上班记录")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if statsRange == .today {
+                Button("补记一单") {
+                    startManualSessionDraft()
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Text("仅今日可补记")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("今日复盘备注")
+                .font(.headline)
+            Button("查看/复制") {
+                isReviewDigestPresented = true
+            }
+            .buttonStyle(.bordered)
+            .sheet(isPresented: $isReviewDigestPresented) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ScrollView {
+                            Text(reviewDigestText)
+                                .font(.footnote)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        HStack(spacing: 12) {
+                            Button("复制") {
+                                UIPasteboard.general.string = reviewDigestText
+                            }
+                            ShareLink(item: reviewDigestText) {
+                                Text("分享")
+                            }
+                        }
+                    }
+                    .padding()
+                    .navigationTitle("今日复盘备注")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                isReviewDigestPresented = false
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+
+            Text("\(prefix)单数 \(count)")
+            Text("\(prefix)总时长 \(format(totals.total))")
+            Text("\(prefix)拍摄时长 \(format(totals.shooting))")
+            Text("\(prefix)选片时长 \(format(totals.selecting))")
+            Text("\(prefix)平均每单总时长 \(avgText)")
+            Text("\(prefix)选片占比 \(shareText)")
+            Divider()
+            Text("经营汇总")
+                .font(.headline)
+            Text("收入合计 \(revenueText)")
+            Text("平均客单价 \(avgRevenueText)")
+            Text("拍摄张数合计 \(shotText)")
+            Text("选片张数合计 \(selectedText)")
+            Text("选片率 \(selectRateText)")
+            Text("RPH \(rphText)")
+            Text("平均选片率（按单） \(avgSelectRateText)（全要 \(allTakeShareText)）")
+            Text("选片率（按张） \(weightedPickRateText)")
+            Divider()
+            Text("Top 3")
+                .font(.headline)
+            Text("收入")
+                .font(.subheadline)
+            if revenueTop3.isEmpty {
+                Text("暂无足够数据")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(revenueTop3.enumerated()), id: \.offset) { _, item in
+                    Text("\(sessionLabel(item.0))  \(formatAmount(cents: item.1))")
+                }
+            }
+            Text("RPH")
+                .font(.subheadline)
+            if rphTop3.isEmpty {
+                Text("暂无足够数据")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(rphTop3.enumerated()), id: \.offset) { _, item in
+                    let rphLine = String(format: "RPH ¥%.0f/小时", item.1)
+                    Text("\(sessionLabel(item.0))  \(rphLine)")
+                }
+            }
+            Text("用时")
+                .font(.subheadline)
+            if durationTop3.isEmpty {
+                Text("暂无足够数据")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(durationTop3.enumerated()), id: \.offset) { _, item in
+                    Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
+                }
+            }
+            Divider()
+            Text("数据质量")
+                .font(.headline)
+            Text("缺失 \(dataQuality.missing.count) · 异常 \(dataQuality.anomaly.count)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Button("查看") {
+                isDataQualityPresented = true
+            }
+            .buttonStyle(.bordered)
+            .disabled(dataQuality.missing.isEmpty && dataQuality.anomaly.isEmpty)
+            .sheet(isPresented: $isDataQualityPresented) {
+                dataQualityListView(
+                    missing: dataQuality.missing,
+                    anomaly: dataQuality.anomaly,
+                    orderById: orderById
+                )
+            }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+        }
+        .sheet(isPresented: $isShiftCalendarPresented) {
+            shiftCalendarView
+        }
     }
 
     private var bottomBar: some View {
@@ -2493,7 +1855,13 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .contextMenu {
-                    mainButtonContextMenu
+                    Button("拍摄") { performStageAction(.shooting) }
+                        .disabled(!canStartShooting)
+                    Button("选片") { performStageAction(.selecting) }
+                        .disabled(!canStartSelecting)
+                    Button("结束") { performStageAction(.ended) }
+                        .disabled(!canEndSession)
+                    Button("下班", role: .destructive) { setDuty(false) }
                 }
             )
         }
@@ -2505,36 +1873,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .contextMenu {
-                mainButtonContextMenu
-            }
         )
-    }
-
-    @ViewBuilder
-    private var mainButtonContextMenu: some View {
-        if syncStore.isOnDuty {
-            Button("拍摄") { performStageAction(.shooting) }
-                .disabled(!canStartShooting)
-            Button("选片") { performStageAction(.selecting) }
-                .disabled(!canStartSelecting)
-            Button("结束") { performStageAction(.ended) }
-                .disabled(!canEndSession)
-        }
-        Button("补记最近一单") {
-            openQuickBackfill()
-        }
-        if let summary = latestQuickEditSession {
-            Button("改记最近一单") {
-                openQuickEdit(for: summary)
-            }
-        } else {
-            Button("改记最近一单") {}
-                .disabled(true)
-        }
-        if syncStore.isOnDuty {
-            Button("下班", role: .destructive) { setDuty(false) }
-        }
     }
 
     private var canStartShooting: Bool {
@@ -3403,43 +2742,6 @@ private struct ShiftCalendarView: View {
     private struct EditingDay: Identifiable {
         let id = UUID()
         let date: Date
-    }
-}
-
-private struct SafeModeView: View {
-    let onClear: () -> Void
-    let onExitSafeMode: () -> Void
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("已进入安全模式")
-                .font(.title2)
-                .fontWeight(.semibold)
-            Text("请先清空本地数据，再重新打开应用。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Button(role: .destructive) {
-                onClear()
-            } label: {
-                Text("清空本地数据并退出")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            Button {
-                onExitSafeMode()
-            } label: {
-                Text("退出安全模式")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            Text("若设置了 PF_SAFE_MODE=1，请移除后再重启。")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
     }
 }
 
