@@ -62,6 +62,7 @@
 		A98B2891110D48A7B0F00ADC /* PhotoFlowWatchWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = PhotoFlowWatchWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoFlowWatchWidget.swift; sourceTree = "<group>"; };
 		4A95CF753F384D118C977302 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B9F7C0A9C9C74EAD9B0D62A1 /* PhotoFlowWatchWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhotoFlowWatchWidget.entitlements; sourceTree = "<group>"; };
 		19D185F1705B4A10A9FB513A /* WidgetKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		83010CC62EA54C53B3033CF7 /* SwiftUI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -132,6 +133,7 @@
 			children = (
 				7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */,
 				4A95CF753F384D118C977302 /* Info.plist */,
+				B9F7C0A9C9C74EAD9B0D62A1 /* PhotoFlowWatchWidget.entitlements */,
 			);
 			path = PhotoFlowWatchWidget;
 			sourceTree = "<group>";
@@ -576,6 +578,7 @@
 		BAD21626C1274EB8AFC00427 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PhotoFlowWatchWidget/PhotoFlowWatchWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
@@ -605,6 +608,7 @@
 		2CE62DD7EACA4C28B26CB0D8 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PhotoFlowWatchWidget/PhotoFlowWatchWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
