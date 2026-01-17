@@ -115,7 +115,7 @@ private enum WidgetStateStore {
     }
 
     static func writeLastReloadAt(_ date: Date = Date()) -> (hasValue: Bool, seconds: Double?) {
-        guard let defaults = UserDefaults(suiteName: appGroupId) else { return (false, nil) }
+        let defaults = UserDefaults(suiteName: appGroupId)!
         defaults.set(date.timeIntervalSince1970, forKey: keyCanonicalLastReloadAt)
         WidgetCenter.shared.reloadAllTimelines()
         let hasValue = defaults.object(forKey: keyCanonicalLastReloadAt) != nil
