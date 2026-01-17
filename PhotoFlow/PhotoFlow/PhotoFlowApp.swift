@@ -9,34 +9,18 @@ import SwiftUI
 
 @main
 struct PhotoFlowApp: App {
-    @AppStorage("pf_safe_mode") private var safeModeFlag = false
+    private let buildTag = "SAFE MODE BUILD 45aae13"
 
-    private var safeModeEnabled: Bool {
-        if ProcessInfo.processInfo.environment["PF_SAFE_MODE"] == "1" {
-            return true
-        }
-        if safeModeFlag {
-            return true
-        }
-#if DEBUG
-        let forceSafeModeInDebug = true
-        if forceSafeModeInDebug {
-            return true
-        }
-#endif
-        return false
+    init() {
+        print("PF_BOOT_OK 45aae13")
     }
 
     var body: some Scene {
         WindowGroup {
-            if safeModeEnabled {
-                SafeModeView(
-                    onClearAndExit: clearLocalDataAndExit,
-                    onExitSafeMode: { safeModeFlag = false }
-                )
-            } else {
-                RootContentView()
-            }
+            SafeModeView(
+                buildTag: buildTag,
+                onClearAndExit: clearLocalDataAndExit
+            )
         }
     }
 
@@ -64,23 +48,20 @@ struct PhotoFlowApp: App {
     }
 }
 
-private struct RootContentView: View {
-    @StateObject private var syncStore = WatchSyncStore()
-
-    var body: some View {
-        ContentView(syncStore: syncStore)
-    }
-}
-
 private struct SafeModeView: View {
+    let buildTag: String
     let onClearAndExit: () -> Void
-    let onExitSafeMode: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
             Text("已进入安全模式")
                 .font(.title2)
                 .fontWeight(.semibold)
+            Text(buildTag)
+                .font(.title3)
+                .fontWeight(.bold)
+                .monospacedDigit()
+                .padding(.vertical, 4)
             Text("请先清空本地数据，再重新打开应用。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -92,16 +73,6 @@ private struct SafeModeView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            Button {
-                onExitSafeMode()
-            } label: {
-                Text("退出安全模式")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            Text("若设置了 PF_SAFE_MODE=1，请移除后再重启。")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
