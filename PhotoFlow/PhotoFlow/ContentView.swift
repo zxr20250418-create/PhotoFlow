@@ -9,6 +9,7 @@ import Combine
 import SwiftUI
 import UIKit
 import WatchConnectivity
+import WidgetKit
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
@@ -20,6 +21,39 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         static let stageShooting = "shooting"
         static let stageSelecting = "selecting"
         static let stageStopped = "stopped"
+    }
+
+    fileprivate enum WidgetCanonicalStore {
+        static let appGroupId = "group.com.zhengxinrong.photoflow"
+        static let widgetKind = "PhotoFlowWatchWidget"
+        static let keyStage = "pf_canonical_stage"
+        static let keyStageStartAt = "pf_canonical_stageStartAt"
+        static let keyUpdatedAt = "pf_canonical_updatedAt"
+        static let keyRevision = "pf_canonical_revision"
+
+        static func write(from state: WatchSyncStore.CanonicalState) {
+            guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+            defaults.set(state.stage, forKey: keyStage)
+            defaults.set(state.updatedAt.timeIntervalSince1970, forKey: keyUpdatedAt)
+            defaults.set(state.revision, forKey: keyRevision)
+            if let stageStartAt = stageStartAt(for: state) {
+                defaults.set(stageStartAt.timeIntervalSince1970, forKey: keyStageStartAt)
+            } else {
+                defaults.removeObject(forKey: keyStageStartAt)
+            }
+            WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+        }
+
+        private static func stageStartAt(for state: WatchSyncStore.CanonicalState) -> Date? {
+            switch state.stage {
+            case StageSyncKey.stageSelecting:
+                return state.selectingStart ?? state.updatedAt
+            case StageSyncKey.stageShooting:
+                return state.shootingStart ?? state.updatedAt
+            default:
+                return nil
+            }
+        }
     }
 
     fileprivate enum CanonicalKey {
@@ -218,6 +252,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     func updateCanonicalState(_ state: CanonicalState, send: Bool) {
         canonicalState = state
         saveCanonicalState()
+        WidgetCanonicalStore.write(from: state)
         if send {
             sendCanonicalState(state)
         }
@@ -256,6 +291,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             saveCanonicalState()
             lastSyncAt = incoming.updatedAt
             incomingCanonicalState = incoming
+            WidgetCanonicalStore.write(from: incoming)
         }
     }
 

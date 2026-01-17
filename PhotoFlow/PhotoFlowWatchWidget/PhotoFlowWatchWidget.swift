@@ -8,6 +8,10 @@ private enum WidgetStateStore {
     static let keyStartedAt = "pf_widget_startedAt"
     static let keyLastUpdatedAt = "pf_widget_lastUpdatedAt"
     static let keyStage = "pf_widget_stage"
+    static let keyCanonicalStage = "pf_canonical_stage"
+    static let keyCanonicalStageStartAt = "pf_canonical_stageStartAt"
+    static let keyCanonicalUpdatedAt = "pf_canonical_updatedAt"
+    static let keyCanonicalRevision = "pf_canonical_revision"
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -36,6 +40,21 @@ private enum WidgetStateStore {
         let startedAt = startedSeconds.map { Date(timeIntervalSince1970: $0) }
         let lastUpdatedAt = lastUpdatedSeconds.map { Date(timeIntervalSince1970: $0) } ?? now
         return (isRunning, startedAt, lastUpdatedAt, stage)
+    }
+
+    static func readCanonicalState(now: Date = Date()) -> (stage: String, stageStartAt: Date?, updatedAt: Date, revision: Int64)? {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return nil }
+        guard let stageValue = defaults.string(forKey: keyCanonicalStage) else { return nil }
+        let stage = normalizedStage(stageValue)
+        let startSeconds = defaults.object(forKey: keyCanonicalStageStartAt) as? Double
+        let updatedSeconds = defaults.object(forKey: keyCanonicalUpdatedAt) as? Double
+        let revision = defaults.object(forKey: keyCanonicalRevision) as? Int64
+        return (
+            stage: stage,
+            stageStartAt: startSeconds.map { Date(timeIntervalSince1970: $0) },
+            updatedAt: updatedSeconds.map { Date(timeIntervalSince1970: $0) } ?? now,
+            revision: revision ?? Int64((updatedSeconds ?? now.timeIntervalSince1970) * 1000)
+        )
     }
 }
 
@@ -75,6 +94,16 @@ struct PhotoFlowWidgetProvider: TimelineProvider {
         let now = Date()
         guard WidgetStateStore.isAvailable else {
             return sampleEntry(isRunning: true, stage: WidgetStateStore.stageShooting)
+        }
+        if let canonical = WidgetStateStore.readCanonicalState(now: now) {
+            let isRunning = canonical.stage != WidgetStateStore.stageStopped && canonical.stageStartAt != nil
+            return PhotoFlowWidgetEntry(
+                date: now,
+                isRunning: isRunning,
+                startedAt: canonical.stageStartAt,
+                lastUpdated: canonical.updatedAt,
+                stage: canonical.stage
+            )
         }
         let state = WidgetStateStore.readState(now: now)
         return PhotoFlowWidgetEntry(
@@ -133,9 +162,9 @@ struct PhotoFlowWidgetView: View {
     private func elapsedTextView(font: Font) -> some View {
         Group {
             if entry.isRunning, let startedAt = entry.startedAt {
-                Text(startedAt, style: .timer)
+                Text(timerInterval: startedAt...startedAt.addingTimeInterval(24 * 60 * 60), countsDown: false)
             } else {
-                Text("00:00")
+                Text("--")
             }
         }
         .font(font.monospacedDigit())

@@ -25,7 +25,13 @@ while IFS= read -r file; do
       fi
       forbidden+=("$file")
       ;;
-    "PhotoFlow/PhotoFlowWatchWidget/"*|\
+    "PhotoFlow/PhotoFlowWatchWidget/"*)
+      if [ "$allow_watch_swift" = "1" ] && [[ "$file" == *.swift ]]; then
+        continue
+      fi
+      forbidden+=("$file")
+      ;;
+    # keep config and project files blocked
     *.entitlements|\
     *.plist|\
     *.xcodeproj/project.pbxproj)

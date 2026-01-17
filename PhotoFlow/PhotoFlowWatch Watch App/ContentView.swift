@@ -20,6 +20,10 @@ private enum WidgetStateStore {
     static let keyStartedAt = "pf_widget_startedAt"
     static let keyLastUpdatedAt = "pf_widget_lastUpdatedAt"
     static let keyStage = "pf_widget_stage"
+    static let keyCanonicalStage = "pf_canonical_stage"
+    static let keyCanonicalStageStartAt = "pf_canonical_stageStartAt"
+    static let keyCanonicalUpdatedAt = "pf_canonical_updatedAt"
+    static let keyCanonicalRevision = "pf_canonical_revision"
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -39,6 +43,30 @@ private enum WidgetStateStore {
         }
         defaults.set(stage, forKey: keyStage)
         defaults.set(lastUpdatedAt.timeIntervalSince1970, forKey: keyLastUpdatedAt)
+    }
+
+    static func writeCanonicalState(from state: WatchSyncStore.CanonicalState) {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+        defaults.set(state.stage, forKey: keyCanonicalStage)
+        defaults.set(state.updatedAt.timeIntervalSince1970, forKey: keyCanonicalUpdatedAt)
+        defaults.set(state.revision, forKey: keyCanonicalRevision)
+        if let stageStartAt = stageStartAt(for: state) {
+            defaults.set(stageStartAt.timeIntervalSince1970, forKey: keyCanonicalStageStartAt)
+        } else {
+            defaults.removeObject(forKey: keyCanonicalStageStartAt)
+        }
+        WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+    }
+
+    private static func stageStartAt(for state: WatchSyncStore.CanonicalState) -> Date? {
+        switch state.stage {
+        case stageSelecting:
+            return state.selectingStart ?? state.updatedAt
+        case stageShooting:
+            return state.shootingStart ?? state.updatedAt
+        default:
+            return nil
+        }
     }
 }
 
@@ -304,6 +332,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         guard shouldApplyState(incoming) else { return }
         incomingState = incoming
         lastSyncAt = incoming.updatedAt
+        WidgetStateStore.writeCanonicalState(from: incoming)
         UserDefaults.standard.set(incoming.revision, forKey: SyncOrderKey.lastAppliedRevision)
 #if DEBUG
         debugLastAppliedAt = formatDebugTimestamp(TimeInterval(incoming.revision) / 1000)
@@ -612,6 +641,7 @@ struct ContentView: View {
             session.shootingStart = now
             sessionId = makeSessionId(startedAt: now)
             let state = makeCanonicalState(stage: WidgetStateStore.stageShooting, now: now)
+            WidgetStateStore.writeCanonicalState(from: state)
             syncStore.sendCanonicalState(state)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
             playStageHaptic()
@@ -619,6 +649,7 @@ struct ContentView: View {
             stage = .selecting
             session.selectingStart = now
             let state = makeCanonicalState(stage: WidgetStateStore.stageSelecting, now: now)
+            WidgetStateStore.writeCanonicalState(from: state)
             syncStore.sendCanonicalState(state)
             updateWidgetState(isRunning: true, startedAt: session.shootingStart, stage: WidgetStateStore.stageSelecting)
             playStageHaptic()
@@ -626,6 +657,7 @@ struct ContentView: View {
             stage = .ended
             session.endedAt = now
             let state = makeCanonicalState(stage: WidgetStateStore.stageStopped, now: now)
+            WidgetStateStore.writeCanonicalState(from: state)
             syncStore.sendCanonicalState(state)
             updateWidgetState(isRunning: false, startedAt: nil, stage: WidgetStateStore.stageStopped)
             playStageHaptic()
@@ -635,6 +667,7 @@ struct ContentView: View {
             stage = .shooting
             sessionId = makeSessionId(startedAt: now)
             let state = makeCanonicalState(stage: WidgetStateStore.stageShooting, now: now)
+            WidgetStateStore.writeCanonicalState(from: state)
             syncStore.sendCanonicalState(state)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
             playStageHaptic()
