@@ -42,7 +42,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             } else {
                 defaults.removeObject(forKey: keyStageStartAt)
             }
-            WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+            WidgetCenter.shared.reloadAllTimelines()
         }
 
         private static func stageStartAt(for state: WatchSyncStore.CanonicalState) -> Date? {

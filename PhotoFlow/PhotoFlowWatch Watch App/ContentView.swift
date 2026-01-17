@@ -56,7 +56,7 @@ private enum WidgetStateStore {
         } else {
             defaults.removeObject(forKey: keyCanonicalStageStartAt)
         }
-        WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     private static func stageStartAt(for state: WatchSyncStore.CanonicalState) -> Date? {
@@ -68,6 +68,78 @@ private enum WidgetStateStore {
         default:
             return state.shootingStart ?? state.selectingStart ?? state.endedAt
         }
+    }
+
+    static func debugSummary() -> String {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else {
+            return [
+                "suiteOK=false rawStage=nil",
+                "rawStartType=nil rawStartValue=nil",
+                "epoch=0"
+            ].joined(separator: "\n")
+        }
+        let rawStage = defaults.string(forKey: keyCanonicalStage)
+        let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
+        let parsed = parseEpoch(rawStart)
+        let line1 = "suiteOK=true rawStage=\(rawStage ?? "nil")"
+        let line2 = "rawStartType=\(rawStartTypeLabel(rawStart)) rawStartValue=\(rawStartValueLabel(rawStart))"
+        let line3 = "epoch=\(Int(parsed ?? 0))"
+        return [line1, line2, line3].joined(separator: "\n")
+    }
+
+    private static func rawStartTypeLabel(_ value: Any?) -> String {
+        guard let value else { return "nil" }
+        if value is Date { return "Date" }
+        if value is Double { return "Double" }
+        if value is Int64 { return "Int64" }
+        if value is Int { return "Int" }
+        if let number = value as? NSNumber {
+            switch CFNumberGetType(number) {
+            case .floatType, .float32Type, .float64Type, .doubleType, .cgFloatType:
+                return "Double"
+            case .sInt64Type, .longLongType, .cfIndexType, .nsIntegerType:
+                return "Int64"
+            case .sInt8Type, .sInt16Type, .sInt32Type, .shortType, .intType, .longType:
+                return "Int"
+            default:
+                return "NSNumber"
+            }
+        }
+        return String(describing: type(of: value))
+    }
+
+    private static func rawStartValueLabel(_ value: Any?) -> String {
+        guard let value else { return "nil" }
+        if let date = value as? Date {
+            return String(Int(date.timeIntervalSince1970))
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        return String(describing: value)
+    }
+
+    private static func parseEpoch(_ value: Any?) -> TimeInterval? {
+        if let seconds = value as? Double {
+            return normalizeEpoch(seconds)
+        }
+        if let seconds = value as? Int {
+            return normalizeEpoch(TimeInterval(seconds))
+        }
+        if let seconds = value as? Int64 {
+            return normalizeEpoch(TimeInterval(seconds))
+        }
+        if let date = value as? Date {
+            return date.timeIntervalSince1970
+        }
+        return nil
+    }
+
+    private static func normalizeEpoch(_ value: TimeInterval) -> TimeInterval {
+        if value > 100_000_000_000 {
+            return value / 1000
+        }
+        return value
     }
 }
 
@@ -540,6 +612,11 @@ struct ContentView: View {
                 Text("总时长 \(format(durations.total))")
                 Text("当前阶段 \(format(durations.currentStage))")
                 Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
+#if DEBUG
+                Text(WidgetStateStore.debugSummary())
+                    .lineLimit(3)
+                    .minimumScaleFactor(0.6)
+#endif
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -742,7 +819,7 @@ struct ContentView: View {
             stage: stage,
             lastUpdatedAt: lastUpdatedAt
         )
-        WidgetCenter.shared.reloadTimelines(ofKind: WidgetStateStore.widgetKind)
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     @MainActor

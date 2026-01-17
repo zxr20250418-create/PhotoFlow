@@ -59,18 +59,19 @@ private enum WidgetStateStore {
 
     static func debugSummary(now: Date = Date()) -> String {
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
-            return "suiteOK=false raw=nil type=nil value=nil epoch=0"
+            return [
+                "suiteOK=false rawStage=nil",
+                "rawStartType=nil rawStartValue=nil",
+                "epoch=0"
+            ].joined(separator: "\n")
         }
         let rawStage = defaults.string(forKey: keyCanonicalStage)
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
         let parsed = readSeconds(rawStart)
-        return [
-            "suiteOK=true",
-            "rawStage=\(rawStage ?? "nil")",
-            "rawStartType=\(rawStartTypeLabel(rawStart))",
-            "rawStartValue=\(rawStartValueLabel(rawStart))",
-            "epoch=\(Int(parsed ?? 0))"
-        ].joined(separator: " ")
+        let line1 = "suiteOK=true rawStage=\(rawStage ?? "nil")"
+        let line2 = "rawStartType=\(rawStartTypeLabel(rawStart)) rawStartValue=\(rawStartValueLabel(rawStart))"
+        let line3 = "epoch=\(Int(parsed ?? 0))"
+        return [line1, line2, line3].joined(separator: "\n")
     }
 
     static func readSeconds(_ value: Any?) -> Double? {
@@ -297,6 +298,8 @@ struct PhotoFlowWidgetView: View {
                     Text(debugLine)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.6)
 #endif
                 }
 #if os(watchOS)
