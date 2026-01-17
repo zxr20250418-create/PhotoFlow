@@ -22,6 +22,31 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         static let stageStopped = "stopped"
     }
 
+    fileprivate enum CanonicalKey {
+        static let type = "type"
+        static let canonicalType = "canonical_state"
+        static let requestType = "canonical_request"
+        static let sessionId = "sessionId"
+        static let stage = "stage"
+        static let shootingStart = "shootingStart"
+        static let selectingStart = "selectingStart"
+        static let endedAt = "endedAt"
+        static let updatedAt = "updatedAt"
+        static let revision = "revision"
+        static let sourceDevice = "sourceDevice"
+    }
+
+    struct CanonicalState: Codable, Equatable {
+        let sessionId: String
+        let stage: String
+        let shootingStart: Date?
+        let selectingStart: Date?
+        let endedAt: Date?
+        let updatedAt: Date
+        let revision: Int64
+        let sourceDevice: String
+    }
+
     struct SessionEvent: Identifiable {
         let id = UUID()
         let event: String
@@ -30,16 +55,21 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     @Published var isOnDuty = false
     @Published var incomingEvent: SessionEvent?
+    @Published var incomingCanonicalState: CanonicalState?
+    @Published private(set) var canonicalState: CanonicalState?
+    @Published var lastSyncAt: Date?
 #if DEBUG
     @Published var debugLastSentPayload: String = "—"
     @Published var debugSessionStatus: String = "—"
 #endif
+    private let canonicalStorageKey = "pf_canonical_state_v1"
 
     override init() {
         super.init()
         guard WCSession.isSupported() else { return }
         WCSession.default.delegate = self
         WCSession.default.activate()
+        loadCanonicalState()
 #if DEBUG
         updateDebugStatus(for: WCSession.default)
 #endif
@@ -145,14 +175,25 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        handleSessionPayload(message)
+        handlePayload(message)
     }
 
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
-        handleSessionPayload(userInfo)
+        handlePayload(userInfo)
     }
 
-    private func handleSessionPayload(_ payload: [String: Any]) {
+    private func handlePayload(_ payload: [String: Any]) {
+        if let value = payload["isOnDuty"] as? Bool {
+            isOnDuty = value
+        }
+        if let type = payload[CanonicalKey.type] as? String, type == CanonicalKey.requestType {
+            sendLatestCanonicalState()
+            return
+        }
+        if let canonical = decodeCanonicalState(from: payload) {
+            mergeCanonicalState(canonical)
+            return
+        }
         guard let type = payload["type"] as? String, type == "session_event" else { return }
         guard let event = payload["event"] as? String else { return }
         let timestamp: TimeInterval?
@@ -167,6 +208,175 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         Task { @MainActor in
             incomingEvent = SessionEvent(event: event, timestamp: resolvedTimestamp)
         }
+    }
+
+    func reloadCanonicalState() -> CanonicalState? {
+        loadCanonicalState()
+        return canonicalState
+    }
+
+    func updateCanonicalState(_ state: CanonicalState, send: Bool) {
+        canonicalState = state
+        saveCanonicalState()
+        if send {
+            sendCanonicalState(state)
+        }
+    }
+
+    private func sendLatestCanonicalState() {
+        guard let canonicalState else { return }
+        sendCanonicalState(canonicalState)
+    }
+
+    private func sendCanonicalState(_ state: CanonicalState) {
+        guard WCSession.isSupported() else { return }
+        var payload = encodeCanonicalState(state)
+        payload["isOnDuty"] = isOnDuty
+        let session = WCSession.default
+#if DEBUG
+        debugLastSentPayload = formatDebugPayload(payload)
+        updateDebugStatus(for: session)
+#endif
+        do {
+            try session.updateApplicationContext(payload)
+        } catch {
+            print("WCSession updateApplicationContext failed: \(error.localizedDescription)")
+        }
+        session.transferUserInfo(payload)
+        if session.isReachable {
+            session.sendMessage(payload, replyHandler: nil) { error in
+                print("WCSession sendMessage failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func mergeCanonicalState(_ incoming: CanonicalState) {
+        if shouldApplyState(incoming) {
+            canonicalState = incoming
+            saveCanonicalState()
+            lastSyncAt = incoming.updatedAt
+            incomingCanonicalState = incoming
+        }
+    }
+
+    private func shouldApplyState(_ incoming: CanonicalState) -> Bool {
+        guard let current = canonicalState else { return true }
+        if incoming.revision > current.revision {
+            return true
+        }
+        if incoming.revision < current.revision {
+            return false
+        }
+        return sourcePriority(incoming.sourceDevice) > sourcePriority(current.sourceDevice)
+    }
+
+    private func sourcePriority(_ source: String) -> Int {
+        switch source {
+        case "phone":
+            return 2
+        case "watch":
+            return 1
+        default:
+            return 0
+        }
+    }
+
+    private func encodeCanonicalState(_ state: CanonicalState) -> [String: Any] {
+        var payload: [String: Any] = [
+            CanonicalKey.type: CanonicalKey.canonicalType,
+            CanonicalKey.sessionId: state.sessionId,
+            CanonicalKey.stage: state.stage,
+            CanonicalKey.updatedAt: state.updatedAt.timeIntervalSince1970,
+            CanonicalKey.revision: state.revision,
+            CanonicalKey.sourceDevice: state.sourceDevice
+        ]
+        if let shootingStart = state.shootingStart {
+            payload[CanonicalKey.shootingStart] = shootingStart.timeIntervalSince1970
+        }
+        if let selectingStart = state.selectingStart {
+            payload[CanonicalKey.selectingStart] = selectingStart.timeIntervalSince1970
+        }
+        if let endedAt = state.endedAt {
+            payload[CanonicalKey.endedAt] = endedAt.timeIntervalSince1970
+        }
+        let isRunning = state.stage != StageSyncKey.stageStopped
+        payload[StageSyncKey.stage] = state.stage
+        payload[StageSyncKey.isRunning] = isRunning
+        payload[StageSyncKey.startedAt] = state.shootingStart?.timeIntervalSince1970
+        payload[StageSyncKey.lastUpdatedAt] = state.updatedAt.timeIntervalSince1970
+        return payload
+    }
+
+    private func decodeCanonicalState(from payload: [String: Any]) -> CanonicalState? {
+        let type = payload[CanonicalKey.type] as? String
+        let hasCanonicalType = type == CanonicalKey.canonicalType
+        let hasSessionId = payload[CanonicalKey.sessionId] != nil
+        let hasStage = payload[CanonicalKey.stage] != nil
+        guard hasCanonicalType || (hasSessionId && hasStage) else { return nil }
+        guard let sessionId = parseString(payload[CanonicalKey.sessionId]) else { return nil }
+        let stage = payload[CanonicalKey.stage] as? String ?? StageSyncKey.stageStopped
+        let revision = parseInt64(payload[CanonicalKey.revision]) ?? Int64(Date().timeIntervalSince1970 * 1000)
+        let updatedAtSeconds = parseTimeInterval(payload[CanonicalKey.updatedAt]) ?? Date().timeIntervalSince1970
+        return CanonicalState(
+            sessionId: sessionId,
+            stage: stage,
+            shootingStart: parseTimeInterval(payload[CanonicalKey.shootingStart]).map { Date(timeIntervalSince1970: $0) },
+            selectingStart: parseTimeInterval(payload[CanonicalKey.selectingStart]).map { Date(timeIntervalSince1970: $0) },
+            endedAt: parseTimeInterval(payload[CanonicalKey.endedAt]).map { Date(timeIntervalSince1970: $0) },
+            updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+            revision: revision,
+            sourceDevice: payload[CanonicalKey.sourceDevice] as? String ?? "unknown"
+        )
+    }
+
+    private func parseTimeInterval(_ value: Any?) -> TimeInterval? {
+        if let seconds = value as? Double {
+            return seconds
+        }
+        if let seconds = value as? Int {
+            return TimeInterval(seconds)
+        }
+        if let seconds = value as? Int64 {
+            return TimeInterval(seconds)
+        }
+        return nil
+    }
+
+    private func parseInt64(_ value: Any?) -> Int64? {
+        if let num = value as? Int64 {
+            return num
+        }
+        if let num = value as? Int {
+            return Int64(num)
+        }
+        if let num = value as? Double {
+            return Int64(num)
+        }
+        return nil
+    }
+
+    private func parseString(_ value: Any?) -> String? {
+        if let string = value as? String {
+            return string
+        }
+        if let string = value as? NSString {
+            return string as String
+        }
+        return nil
+    }
+
+    private func loadCanonicalState() {
+        guard let data = UserDefaults.standard.data(forKey: canonicalStorageKey),
+              let decoded = try? JSONDecoder().decode(CanonicalState.self, from: data) else {
+            return
+        }
+        canonicalState = decoded
+    }
+
+    private func saveCanonicalState() {
+        guard let canonicalState,
+              let data = try? JSONEncoder().encode(canonicalState) else { return }
+        UserDefaults.standard.set(data, forKey: canonicalStorageKey)
     }
 }
 
@@ -595,6 +805,7 @@ struct ContentView: View {
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
     @StateObject private var metaStore: SessionMetaStore
@@ -711,6 +922,19 @@ struct ContentView: View {
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
             applySessionEvent(event)
+        }
+        .onReceive(syncStore.$incomingCanonicalState) { state in
+            guard let state else { return }
+            applyCanonicalState(state, shouldPrompt: false)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            if let state = syncStore.reloadCanonicalState() {
+                applyCanonicalState(state, shouldPrompt: false)
+                syncStore.updateCanonicalState(state, send: true)
+            } else {
+                syncStageState(now: now)
+            }
         }
     }
 
@@ -1962,33 +2186,112 @@ struct ContentView: View {
                 promptSettlementIfNeeded(for: sessionId)
             }
         }
-        syncStageState(now: now)
+        syncStageState(now: now, sessionIdOverride: endedSessionId)
     }
 
     private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
         let timestampSeconds = normalizeEpochSeconds(event.timestamp)
         let timestamp = Date(timeIntervalSince1970: timestampSeconds)
+        var sessionIdOverride: String?
         switch event.event {
         case "startShooting":
             session = Session()
             session.shootingStart = timestamp
             stage = .shooting
             updateSessionSummary(for: .shooting, at: timestamp)
+            sessionIdOverride = sessionIdForTimestamp(timestamp)
         case "startSelecting":
             session.selectingStart = timestamp
             stage = .selecting
             updateSessionSummary(for: .selecting, at: timestamp)
+            sessionIdOverride = sessionIdForTimestamp(timestamp)
         case "end":
             session.endedAt = timestamp
             stage = .ended
             let endedSessionId = activeSessionIndex().map { sessionSummaries[$0].id }
             updateSessionSummary(for: .ended, at: timestamp)
-            if let sessionId = endedSessionId ?? sessionIdForTimestamp(timestamp) {
+            let resolvedSessionId = endedSessionId ?? sessionIdForTimestamp(timestamp)
+            sessionIdOverride = resolvedSessionId
+            if let sessionId = resolvedSessionId {
                 promptSettlementIfNeeded(for: sessionId)
             }
         default:
             break
         }
+        syncStageState(now: timestamp, sessionIdOverride: sessionIdOverride)
+    }
+
+    private func applyCanonicalState(_ state: WatchSyncStore.CanonicalState, shouldPrompt: Bool) {
+        let stageValue = state.stage
+        let hasAnyTime = state.shootingStart != nil || state.selectingStart != nil || state.endedAt != nil
+        let fallbackStart = state.shootingStart ?? state.selectingStart ?? state.endedAt
+        let resolvedShootingStart = state.shootingStart ?? fallbackStart ?? (stageValue != WatchSyncStore.StageSyncKey.stageStopped ? state.updatedAt : nil)
+        let resolvedSelectingStart = state.selectingStart ?? (stageValue == WatchSyncStore.StageSyncKey.stageSelecting ? state.updatedAt : nil)
+        let resolvedEndedAt = state.endedAt ?? (stageValue == WatchSyncStore.StageSyncKey.stageStopped && resolvedShootingStart != nil ? state.updatedAt : nil)
+
+        switch stageValue {
+        case WatchSyncStore.StageSyncKey.stageShooting:
+            stage = .shooting
+        case WatchSyncStore.StageSyncKey.stageSelecting:
+            stage = .selecting
+        default:
+            stage = hasAnyTime ? .ended : .idle
+        }
+
+        if stage == .idle {
+            session = Session()
+        } else {
+            session.shootingStart = resolvedShootingStart
+            session.selectingStart = resolvedSelectingStart
+            session.endedAt = resolvedEndedAt
+        }
+
+        if resolvedShootingStart != nil || resolvedSelectingStart != nil || resolvedEndedAt != nil {
+            upsertSessionSummary(
+                sessionId: state.sessionId,
+                shootingStart: resolvedShootingStart,
+                selectingStart: resolvedSelectingStart,
+                endedAt: resolvedEndedAt
+            )
+            if stage == .ended && shouldPrompt {
+                promptSettlementIfNeeded(for: state.sessionId)
+            }
+        }
+    }
+
+    private func upsertSessionSummary(
+        sessionId: String,
+        shootingStart: Date?,
+        selectingStart: Date?,
+        endedAt: Date?
+    ) {
+        if let index = sessionSummaries.firstIndex(where: { $0.id == sessionId }) {
+            var summary = sessionSummaries[index]
+            if let shootingStart {
+                if summary.shootingStart == nil || shootingStart < summary.shootingStart! {
+                    summary.shootingStart = shootingStart
+                }
+            }
+            if let selectingStart {
+                if summary.selectingStart == nil || selectingStart < summary.selectingStart! {
+                    summary.selectingStart = selectingStart
+                }
+            }
+            if let endedAt {
+                if summary.endedAt == nil || endedAt > summary.endedAt! {
+                    summary.endedAt = endedAt
+                }
+            }
+            sessionSummaries[index] = summary
+        } else if shootingStart != nil || selectingStart != nil || endedAt != nil {
+            sessionSummaries.append(SessionSummary(
+                id: sessionId,
+                shootingStart: shootingStart,
+                selectingStart: selectingStart,
+                endedAt: endedAt
+            ))
+        }
+        sortSessionSummaries()
     }
 
     private func normalizeEpochSeconds(_ value: TimeInterval) -> TimeInterval {
@@ -2392,7 +2695,12 @@ struct ContentView: View {
         return base
     }
 
-    private func syncStageState(now: Date) {
+    private func syncStageState(now: Date, sessionIdOverride: String? = nil) {
+        let state = makeCanonicalState(now: now, sessionIdOverride: sessionIdOverride)
+        syncStore.updateCanonicalState(state, send: true)
+    }
+
+    private func makeCanonicalState(now: Date, sessionIdOverride: String?) -> WatchSyncStore.CanonicalState {
         let stageValue: String
         switch stage {
         case .shooting:
@@ -2402,14 +2710,39 @@ struct ContentView: View {
         case .idle, .ended:
             stageValue = WatchSyncStore.StageSyncKey.stageStopped
         }
-        let isRunning = stageValue != WatchSyncStore.StageSyncKey.stageStopped
-        let startedAt = isRunning ? session.shootingStart : nil
-        syncStore.sendStageSync(
+        let resolvedSessionId = resolveSessionId(now: now, sessionIdOverride: sessionIdOverride)
+        return WatchSyncStore.CanonicalState(
+            sessionId: resolvedSessionId,
             stage: stageValue,
-            isRunning: isRunning,
-            startedAt: startedAt,
-            lastUpdatedAt: now
+            shootingStart: session.shootingStart,
+            selectingStart: session.selectingStart,
+            endedAt: session.endedAt,
+            updatedAt: now,
+            revision: Int64(now.timeIntervalSince1970 * 1000),
+            sourceDevice: "phone"
         )
+    }
+
+    private func resolveSessionId(now: Date, sessionIdOverride: String?) -> String {
+        if let sessionIdOverride {
+            return sessionIdOverride
+        }
+        if let activeIndex = activeSessionIndex() {
+            return sessionSummaries[activeIndex].id
+        }
+        if let shootingStart = session.shootingStart, let id = sessionIdForTimestamp(shootingStart) {
+            return id
+        }
+        if let selectingStart = session.selectingStart, let id = sessionIdForTimestamp(selectingStart) {
+            return id
+        }
+        if let endedAt = session.endedAt, let id = sessionIdForTimestamp(endedAt) {
+            return id
+        }
+        if stage == .idle {
+            return "idle"
+        }
+        return makeSessionId(startedAt: session.shootingStart ?? now)
     }
 }
 
