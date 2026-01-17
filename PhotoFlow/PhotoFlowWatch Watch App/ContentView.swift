@@ -808,7 +808,7 @@ struct ContentView: View {
         let uiShort = shortStage(uiStageDebugValue)
         let groupShort = shortStage(WidgetStateStore.readGroupStage())
         let lr = WidgetStateStore.readHasLastReloadAt() ? 1 : 0
-        return "ui=\(uiShort) grp=\(groupShort) LR=\(lr)"
+        return "ui=\(uiShort) grp=\(groupShort) LR=\(lr) gid=\(gidSuffix)"
     }
 
     private func shortStage(_ raw: String) -> String {
@@ -824,6 +824,10 @@ struct ContentView: View {
         default:
             return "nil"
         }
+    }
+
+    private var gidSuffix: String {
+        String(WidgetStateKeys.appGroupId.suffix(6))
     }
 
     private var connectionStatusText: String {
