@@ -99,6 +99,29 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 #endif
     }
 
+    func setOnDuty(_ value: Bool) {
+        isOnDuty = value
+        sendOnDutyUpdate(value)
+    }
+
+    private func sendOnDutyUpdate(_ value: Bool) {
+        guard WCSession.isSupported() else { return }
+        let payload: [String: Any] = [
+            "isOnDuty": value,
+            "ts": Int(Date().timeIntervalSince1970)
+        ]
+        let session = WCSession.default
+        do {
+            try session.updateApplicationContext(payload)
+        } catch {
+            print("WCSession updateApplicationContext failed: \(error.localizedDescription)")
+        }
+        session.transferUserInfo(payload)
+        if session.isReachable {
+            session.sendMessage(payload, replyHandler: nil, errorHandler: nil)
+        }
+    }
+
     func sendSessionEvent(event: String, timestamp: TimeInterval) {
         guard WCSession.isSupported() else { return }
         let payload: [String: Any] = [
@@ -164,6 +187,9 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     private func applyStatePayload(_ payload: [String: Any]) {
+        if let value = payload["isOnDuty"] as? Bool {
+            isOnDuty = value
+        }
         if let canonical = decodeCanonicalState(from: payload) {
             mergeCanonicalState(canonical)
             return
@@ -452,18 +478,9 @@ struct ContentView: View {
         let durations = computeDurations(now: now)
 
         VStack(spacing: 10) {
-            VStack(spacing: 4) {
-                if syncStore.isOnDuty {
-                    Text(stageLabel)
-                        .font(.headline)
-                } else {
-                    Text("未上班，无法开始记录")
-                        .font(.headline)
-                }
-                Text("总时长 \(format(durations.total)) · 当前阶段 \(format(durations.currentStage))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+            Text(syncStore.isOnDuty ? stageLabel : "未上班")
+                .font(.title3)
+                .fontWeight(.semibold)
 #if DEBUG
             .contentShape(Rectangle())
             .onTapGesture(count: 5) {
@@ -471,24 +488,32 @@ struct ContentView: View {
             }
 #endif
 
-            HStack {
-                Text("连接 \(connectionStatusText)")
-                Spacer(minLength: 8)
-                Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-            .background(.thinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-
             Button(action: handlePrimaryAction) {
                 Text(primaryButtonTitle)
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            .contextMenu {
+                Button("立即同步") {
+                    syncStore.requestLatestState()
+                }
+                if syncStore.isOnDuty {
+                    Button("下班", role: .destructive) {
+                        setOnDuty(false)
+                    }
+                }
+                Button("补记最近一单") { }
+                    .disabled(true)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("总时长 \(format(durations.total))")
+                Text("当前阶段 \(format(durations.currentStage))")
+                Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
 #if DEBUG
             if showDebugPanel {
@@ -523,6 +548,9 @@ struct ContentView: View {
             Alert(title: Text(alert.message))
         }
         .onReceive(ticker) { now = $0 }
+        .task {
+            syncStore.requestLatestState()
+        }
         .onReceive(syncStore.$incomingState) { state in
             guard let state else { return }
             applyIncomingState(state)
@@ -539,7 +567,7 @@ struct ContentView: View {
     private var stageLabel: String {
         switch stage {
         case .idle:
-            return ""
+            return "待开始"
         case .shooting:
             return "拍摄"
         case .selecting:
@@ -558,7 +586,7 @@ struct ContentView: View {
 
     private var primaryButtonTitle: String {
         if !syncStore.isOnDuty {
-            return "开始拍摄"
+            return "上班"
         }
         switch stage {
         case .idle:
@@ -574,7 +602,7 @@ struct ContentView: View {
 
     private func handlePrimaryAction() {
         guard syncStore.isOnDuty else {
-            activeAlert = .notOnDuty
+            setOnDuty(true)
             return
         }
         let now = Date()
@@ -617,6 +645,15 @@ struct ContentView: View {
         stage = .idle
         session = Session()
         sessionId = nil
+    }
+
+    private func setOnDuty(_ value: Bool) {
+        syncStore.setOnDuty(value)
+        if value {
+            syncStore.requestLatestState()
+        } else {
+            resetSession()
+        }
     }
 
     private func computeDurations(now: Date) -> (total: TimeInterval, currentStage: TimeInterval) {
