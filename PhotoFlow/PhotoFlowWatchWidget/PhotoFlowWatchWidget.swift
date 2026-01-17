@@ -65,8 +65,9 @@ private enum WidgetStateStore {
     }
 
     static func debugSummary(now: Date = Date()) -> String {
+        let gidSuffix = String(appGroupId.suffix(8))
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
-            return "NO nil e=0 lr=--:--:-- hasLR=0\nGID=\(appGroupId)"
+            return "suiteOK=0 hasLR=0 st=nil e=0 lr=--:--:-- gid=\(gidSuffix)"
         }
         let rawStage = defaults.string(forKey: "pf_canonical_stage")
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
@@ -75,9 +76,7 @@ private enum WidgetStateStore {
         let hasLR = defaults.object(forKey: keyCanonicalLastReloadAt) != nil
         let lastReloadSeconds = readSeconds(defaults.object(forKey: keyCanonicalLastReloadAt))
         let lrText = lastReloadSeconds.map { formatTime(seconds: $0) } ?? "--:--:--"
-        let line1 = "OK \(shortStage) e=\(Int(parsed)) lr=\(lrText) hasLR=\(hasLR ? 1 : 0)"
-        let line2 = "GID=\(appGroupId)"
-        return [line1, line2].joined(separator: "\n")
+        return "suiteOK=1 hasLR=\(hasLR ? 1 : 0) st=\(shortStage) e=\(Int(parsed)) lr=\(lrText) gid=\(gidSuffix)"
     }
 
     static func readSeconds(_ value: Any?) -> Double? {

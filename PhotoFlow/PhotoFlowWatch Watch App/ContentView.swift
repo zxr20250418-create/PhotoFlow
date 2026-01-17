@@ -103,12 +103,13 @@ private enum WidgetStateStore {
         WidgetCenter.shared.reloadAllTimelines()
     }
 
-    static func writeLastReloadAt(_ date: Date = Date()) -> Double? {
-        guard let defaults = UserDefaults(suiteName: appGroupId) else { return nil }
+    static func writeLastReloadAt(_ date: Date = Date()) -> (hasValue: Bool, seconds: Double?) {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return (false, nil) }
         defaults.set(date.timeIntervalSince1970, forKey: keyCanonicalLastReloadAt)
         WidgetCenter.shared.reloadAllTimelines()
+        let hasValue = defaults.object(forKey: keyCanonicalLastReloadAt) != nil
         let reread = defaults.double(forKey: keyCanonicalLastReloadAt)
-        return reread > 0 ? reread : nil
+        return (hasValue, reread > 0 ? reread : nil)
     }
 
     static func readGroupStage() -> String {
@@ -617,6 +618,7 @@ struct ContentView: View {
 #if DEBUG
     @State private var showDebugPanel = false
     @State private var lastReloadLocal: Date?
+    @State private var lastReloadLocalHas = false
 #endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
@@ -649,7 +651,9 @@ struct ContentView: View {
                     syncStore.requestLatestState()
                 }
                 Button("刷新表盘") {
-                    if let reread = WidgetStateStore.writeLastReloadAt() {
+                    let result = WidgetStateStore.writeLastReloadAt()
+                    lastReloadLocalHas = result.hasValue
+                    if let reread = result.seconds {
                         lastReloadLocal = Date(timeIntervalSince1970: reread)
                     } else {
                         lastReloadLocal = nil
@@ -669,10 +673,7 @@ struct ContentView: View {
                 Text("当前阶段 \(format(durations.currentStage))")
                 Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
 #if DEBUG
-                Text("uiStage=\(uiStageDebugValue) groupStage=\(WidgetStateStore.readGroupStage())")
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                Text("lrLocal \(formatSyncTime(lastReloadLocal))")
+                Text("uiStage=\(uiStageDebugValue) groupStage=\(WidgetStateStore.readGroupStage()) lrLocalHas=\(lastReloadLocalHas ? 1 : 0) lrLocal=\(formatSyncTime(lastReloadLocal)) gid=\(gidSuffix)")
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                 Text(WidgetStateStore.debugSummary())
@@ -757,6 +758,10 @@ struct ContentView: View {
         case .idle:
             return "idle"
         }
+    }
+
+    private var gidSuffix: String {
+        String(WidgetStateStore.appGroupId.suffix(8))
     }
 
     private var connectionStatusText: String {
