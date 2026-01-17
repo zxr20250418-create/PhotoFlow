@@ -773,6 +773,7 @@ struct ContentView: View {
             }
         }
 
+        WidgetStateStore.writeCanonicalState(from: state)
         updateWidgetState(
             isRunning: stageValue != WidgetStateStore.stageStopped,
             startedAt: state.shootingStart,

@@ -57,6 +57,22 @@ private enum WidgetStateStore {
         )
     }
 
+    static func debugSummary(now: Date = Date()) -> String {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else {
+            return "suiteOK=false raw=nil type=nil value=nil epoch=0"
+        }
+        let rawStage = defaults.string(forKey: keyCanonicalStage)
+        let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
+        let parsed = readSeconds(rawStart)
+        return [
+            "suiteOK=true",
+            "rawStage=\(rawStage ?? "nil")",
+            "rawStartType=\(rawStartTypeLabel(rawStart))",
+            "rawStartValue=\(rawStartValueLabel(rawStart))",
+            "epoch=\(Int(parsed ?? 0))"
+        ].joined(separator: " ")
+    }
+
     static func readSeconds(_ value: Any?) -> Double? {
         if let date = value as? Date {
             return date.timeIntervalSince1970
@@ -78,6 +94,38 @@ private enum WidgetStateStore {
             return value / 1000
         }
         return value
+    }
+
+    private static func rawStartTypeLabel(_ value: Any?) -> String {
+        guard let value else { return "nil" }
+        if value is Date { return "Date" }
+        if value is Double { return "Double" }
+        if value is Int64 { return "Int64" }
+        if value is Int { return "Int" }
+        if let number = value as? NSNumber {
+            switch CFNumberGetType(number) {
+            case .floatType, .float32Type, .float64Type, .doubleType, .cgFloatType:
+                return "Double"
+            case .sInt64Type, .longLongType, .cfIndexType, .nsIntegerType:
+                return "Int64"
+            case .sInt8Type, .sInt16Type, .sInt32Type, .shortType, .intType, .longType:
+                return "Int"
+            default:
+                return "NSNumber"
+            }
+        }
+        return String(describing: type(of: value))
+    }
+
+    private static func rawStartValueLabel(_ value: Any?) -> String {
+        guard let value else { return "nil" }
+        if let date = value as? Date {
+            return String(Int(date.timeIntervalSince1970))
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        return String(describing: value)
     }
 
     static func readInt64(_ value: Any?) -> Int64? {
@@ -220,10 +268,7 @@ struct PhotoFlowWidgetView: View {
 
 #if DEBUG
     private var debugLine: String {
-        let stage = entry.stage.isEmpty ? "nil" : entry.stage
-        let startedAtText = entry.startedAt == nil ? "nil" : "ok"
-        let epoch = Int(entry.startedAt?.timeIntervalSince1970 ?? 0)
-        return "raw=\(stage) start=\(startedAtText) ts=\(epoch)"
+        WidgetStateStore.debugSummary()
     }
 #endif
 
