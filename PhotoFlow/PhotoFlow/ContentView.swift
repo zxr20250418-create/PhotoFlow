@@ -630,11 +630,6 @@ struct ContentView: View {
     @State private var timeEditingSession: TimeEditingSession?
     @State private var deleteCandidateId: String?
     @State private var memoDraft = ""
-    @State private var memoEditDraft = ""
-    @State private var isMemoEditorPresented = false
-    @State private var showIncomeOptions = false
-    @AppStorage("pf_home_show_month_income") private var showMonthIncome = false
-    @AppStorage("pf_home_show_year_income") private var showYearIncome = false
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
     @State private var draftSelected = ""
@@ -979,25 +974,20 @@ struct ContentView: View {
     private var memoEditor: some View {
         let dayKey = dailyMemoStore.dayKey(for: now)
         let placeholder = "备忘：客户/卡点/今天只做一件事…"
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("当日备忘")
-                    .font(.subheadline)
+        return ZStack(alignment: .topLeading) {
+            if memoDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(placeholder)
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Button("编辑") {
-                    memoEditDraft = memoDraft
-                    isMemoEditorPresented = true
-                }
-                .font(.footnote)
+                    .padding(.top, 8)
+                    .padding(.leading, 6)
             }
-            Text(memoDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? placeholder : memoDraft)
+            TextEditor(text: $memoDraft)
                 .font(.footnote)
-                .foregroundStyle(memoDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .secondary : .primary)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 80)
+                .scrollContentBackground(.hidden)
         }
-        .padding(10)
+        .padding(8)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .onAppear {
@@ -1006,30 +996,8 @@ struct ContentView: View {
         .onChange(of: dayKey) { _, newKey in
             memoDraft = dailyMemoStore.memo(for: newKey)
         }
-        .sheet(isPresented: $isMemoEditorPresented) {
-            NavigationStack {
-                Form {
-                    Section("备忘") {
-                        TextEditor(text: $memoEditDraft)
-                            .frame(minHeight: 160)
-                    }
-                }
-                .navigationTitle("编辑备忘")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("取消") {
-                            isMemoEditorPresented = false
-                        }
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("保存") {
-                            dailyMemoStore.setMemo(memoEditDraft, for: dayKey)
-                            memoDraft = memoEditDraft
-                            isMemoEditorPresented = false
-                        }
-                    }
-                }
-            }
+        .onChange(of: memoDraft) { _, newValue in
+            dailyMemoStore.setMemo(newValue, for: dayKey)
         }
     }
 
@@ -1581,26 +1549,11 @@ struct ContentView: View {
                 result.hasSelected = true
             }
         }
-        let monthIncomeCents: Int = {
-            guard let interval = isoCal.dateInterval(of: .month, for: now) else { return 0 }
-            return effectiveSessionSummaries.reduce(0) { partial, summary in
-                guard let shootingStart = effectiveTimes(for: summary).shootingStart,
-                      interval.contains(shootingStart),
-                      let amount = metaStore.meta(for: summary.id).amountCents else { return partial }
-                return partial + amount
-            }
-        }()
-        let yearIncomeCents: Int = {
-            guard let interval = isoCal.dateInterval(of: .year, for: now) else { return 0 }
-            return effectiveSessionSummaries.reduce(0) { partial, summary in
-                guard let shootingStart = effectiveTimes(for: summary).shootingStart,
-                      interval.contains(shootingStart),
-                      let amount = metaStore.meta(for: summary.id).amountCents else { return partial }
-                return partial + amount
-            }
-        }()
         let count = todaySessions.count
-        let amountText = metaTotals.hasAmount ? formatAmount(cents: metaTotals.amountCents) : formatAmount(cents: 0)
+        let amountText = metaTotals.hasAmount ? formatAmount(cents: metaTotals.amountCents) : "--"
+        let rateText = (metaTotals.hasShot && metaTotals.hasSelected && metaTotals.shot > 0)
+            ? "\(Int((Double(metaTotals.selected) / Double(metaTotals.shot) * 100).rounded()))%"
+            : "--"
         return Button(action: { selectedTab = .stats }) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1608,42 +1561,19 @@ struct ContentView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
-                    HStack(spacing: 6) {
-                        Text(amountText)
-                            .font(.title2)
-                            .fontWeight(.bold)
-                            .monospacedDigit()
-                        Button(action: { showIncomeOptions.toggle() }) {
-                            Image(systemName: showIncomeOptions ? "chevron.up" : "chevron.down")
-                        }
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .buttonStyle(.plain)
-                    }
-                }
-                HStack(spacing: 12) {
-                    Text("今日单数 \(count)")
-                    Text("今日总时长 \(format(totals.total))")
-                }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                if showIncomeOptions {
-                    Toggle("显示本月收入", isOn: $showMonthIncome)
-                    Toggle("显示本年收入", isOn: $showYearIncome)
-                }
-                if showMonthIncome {
-                    Text("本月收入 \(formatAmount(cents: monthIncomeCents))")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    Text(amountText)
+                        .font(.title2)
+                        .fontWeight(.bold)
                         .monospacedDigit()
                 }
-                if showYearIncome {
-                    Text("本年收入 \(formatAmount(cents: yearIncomeCents))")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
+                Text("\(count)单 · 总 \(format(totals.total))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Text("拍 \(format(totals.shooting)) · 选 \(format(totals.selecting)) · 拍 \(metaTotals.hasShot ? "\(metaTotals.shot)张" : "--") · 选 \(metaTotals.hasSelected ? "\(metaTotals.selected)张" : "--") · 选片率 \(rateText)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
