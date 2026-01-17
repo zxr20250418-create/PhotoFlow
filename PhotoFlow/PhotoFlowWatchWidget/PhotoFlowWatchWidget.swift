@@ -1,13 +1,8 @@
 import SwiftUI
 import WidgetKit
 
-private enum WidgetStateStore {
+private enum WidgetStateKeys {
     static let appGroupId = "group.com.zhengxinrong.photoflow"
-    static let widgetKind = "PhotoFlowWatchWidget"
-    static let keyIsRunning = "pf_widget_isRunning"
-    static let keyStartedAt = "pf_widget_startedAt"
-    static let keyLastUpdatedAt = "pf_widget_lastUpdatedAt"
-    static let keyStage = "pf_widget_stage"
     static let keyCanonicalStage = "pf_canonical_stage"
     static let keyCanonicalStageStartAt = "pf_canonical_stageStartAt"
     static let keyCanonicalUpdatedAt = "pf_canonical_updatedAt"
@@ -15,6 +10,22 @@ private enum WidgetStateStore {
     static let keyCanonicalLastStageStartAt = "pf_canonical_lastStageStartAt"
     static let keyCanonicalLastEndedAt = "pf_canonical_lastEndedAt"
     static let keyCanonicalLastReloadAt = "pf_canonical_lastReloadAt"
+}
+
+private enum WidgetStateStore {
+    static let appGroupId = WidgetStateKeys.appGroupId
+    static let widgetKind = "PhotoFlowWatchWidget"
+    static let keyIsRunning = "pf_widget_isRunning"
+    static let keyStartedAt = "pf_widget_startedAt"
+    static let keyLastUpdatedAt = "pf_widget_lastUpdatedAt"
+    static let keyStage = "pf_widget_stage"
+    static let keyCanonicalStage = WidgetStateKeys.keyCanonicalStage
+    static let keyCanonicalStageStartAt = WidgetStateKeys.keyCanonicalStageStartAt
+    static let keyCanonicalUpdatedAt = WidgetStateKeys.keyCanonicalUpdatedAt
+    static let keyCanonicalRevision = WidgetStateKeys.keyCanonicalRevision
+    static let keyCanonicalLastStageStartAt = WidgetStateKeys.keyCanonicalLastStageStartAt
+    static let keyCanonicalLastEndedAt = WidgetStateKeys.keyCanonicalLastEndedAt
+    static let keyCanonicalLastReloadAt = WidgetStateKeys.keyCanonicalLastReloadAt
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -47,7 +58,7 @@ private enum WidgetStateStore {
 
     static func readCanonicalState(now: Date = Date()) -> (stage: String, stageStartAt: Date?, lastStageStartAt: Date?, lastEndedAt: Date?, updatedAt: Date, revision: Int64)? {
         guard let defaults = UserDefaults(suiteName: appGroupId) else { return nil }
-        guard let stageValue = defaults.string(forKey: "pf_canonical_stage") else { return nil }
+        guard let stageValue = defaults.string(forKey: keyCanonicalStage) else { return nil }
         let stage = normalizedStage(stageValue)
         let startSeconds = readSeconds(defaults.object(forKey: keyCanonicalStageStartAt))
         let lastStageSeconds = readSeconds(defaults.object(forKey: keyCanonicalLastStageStartAt))
@@ -69,7 +80,7 @@ private enum WidgetStateStore {
         guard let defaults = UserDefaults(suiteName: appGroupId) else {
             return "suiteOK=0 hasLR=0 st=nil e=0 lr=--:--:-- gid=\(gidSuffix)"
         }
-        let rawStage = defaults.string(forKey: "pf_canonical_stage")
+        let rawStage = defaults.string(forKey: keyCanonicalStage)
         let rawStart = defaults.object(forKey: keyCanonicalStageStartAt)
         let parsed = readSeconds(rawStart) ?? 0
         let shortStage = shortStageLabel(normalizedStage(rawStage))

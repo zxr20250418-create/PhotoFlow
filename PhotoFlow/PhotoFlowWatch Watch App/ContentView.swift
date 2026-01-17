@@ -13,13 +13,8 @@ import WatchKit
 import WatchConnectivity
 import WidgetKit
 
-private enum WidgetStateStore {
+private enum WidgetStateKeys {
     static let appGroupId = "group.com.zhengxinrong.photoflow"
-    static let widgetKind = "PhotoFlowWatchWidget"
-    static let keyIsRunning = "pf_widget_isRunning"
-    static let keyStartedAt = "pf_widget_startedAt"
-    static let keyLastUpdatedAt = "pf_widget_lastUpdatedAt"
-    static let keyStage = "pf_widget_stage"
     static let keyCanonicalStage = "pf_canonical_stage"
     static let keyCanonicalStageStartAt = "pf_canonical_stageStartAt"
     static let keyCanonicalUpdatedAt = "pf_canonical_updatedAt"
@@ -27,6 +22,22 @@ private enum WidgetStateStore {
     static let keyCanonicalLastStageStartAt = "pf_canonical_lastStageStartAt"
     static let keyCanonicalLastEndedAt = "pf_canonical_lastEndedAt"
     static let keyCanonicalLastReloadAt = "pf_canonical_lastReloadAt"
+}
+
+private enum WidgetStateStore {
+    static let appGroupId = WidgetStateKeys.appGroupId
+    static let widgetKind = "PhotoFlowWatchWidget"
+    static let keyIsRunning = "pf_widget_isRunning"
+    static let keyStartedAt = "pf_widget_startedAt"
+    static let keyLastUpdatedAt = "pf_widget_lastUpdatedAt"
+    static let keyStage = "pf_widget_stage"
+    static let keyCanonicalStage = WidgetStateKeys.keyCanonicalStage
+    static let keyCanonicalStageStartAt = WidgetStateKeys.keyCanonicalStageStartAt
+    static let keyCanonicalUpdatedAt = WidgetStateKeys.keyCanonicalUpdatedAt
+    static let keyCanonicalRevision = WidgetStateKeys.keyCanonicalRevision
+    static let keyCanonicalLastStageStartAt = WidgetStateKeys.keyCanonicalLastStageStartAt
+    static let keyCanonicalLastEndedAt = WidgetStateKeys.keyCanonicalLastEndedAt
+    static let keyCanonicalLastReloadAt = WidgetStateKeys.keyCanonicalLastReloadAt
     static let stageShooting = "shooting"
     static let stageSelecting = "selecting"
     static let stageStopped = "stopped"
@@ -615,10 +626,12 @@ struct ContentView: View {
 #if os(watchOS)
     @Environment(\.scenePhase) private var scenePhase
 #endif
-#if DEBUG
     @State private var showDebugPanel = false
     @State private var lastReloadLocal: Date?
     @State private var lastReloadLocalHas = false
+#if DEBUG
+    @State private var showReloadAlert = false
+    @State private var reloadAlertMessage = ""
 #endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
@@ -640,6 +653,13 @@ struct ContentView: View {
                 showDebugPanel.toggle()
             }
 #endif
+#if DEBUG
+            Text(shortDebugLine)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.9)
+#endif
 
             Button(action: handlePrimaryAction) {
                 Text(primaryButtonTitle)
@@ -658,6 +678,13 @@ struct ContentView: View {
                     } else {
                         lastReloadLocal = nil
                     }
+#if DEBUG
+                    let secondsValue = result.seconds ?? 0
+                    let secondsText = secondsValue > 0 ? String(format: "%.0f", secondsValue) : "--"
+                    let secOk = secondsValue > 0 ? 1 : 0
+                    reloadAlertMessage = "LR=\(result.hasValue ? 1 : 0) secOK=\(secOk) sec=\(secondsText)"
+                    showReloadAlert = true
+#endif
                 }
                 if syncStore.isOnDuty {
                     Button("下班", role: .destructive) {
@@ -667,19 +694,18 @@ struct ContentView: View {
                 Button("补记最近一单") { }
                     .disabled(true)
             }
+#if DEBUG
+            .alert("刷新表盘", isPresented: $showReloadAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(reloadAlertMessage)
+            }
+#endif
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("总时长 \(format(durations.total))")
                 Text("当前阶段 \(format(durations.currentStage))")
                 Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
-#if DEBUG
-                Text("uiStage=\(uiStageDebugValue) groupStage=\(WidgetStateStore.readGroupStage()) lrLocalHas=\(lastReloadLocalHas ? 1 : 0) lrLocal=\(formatSyncTime(lastReloadLocal)) gid=\(gidSuffix)")
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                Text(WidgetStateStore.debugSummary())
-                    .lineLimit(4)
-                    .minimumScaleFactor(0.6)
-#endif
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -699,6 +725,14 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     Text(syncStore.debugLastAppliedAt)
                         .font(.caption2)
+
+                    Text("appGroup")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(WidgetStateStore.debugSummary())
+                        .font(.caption2)
+                        .lineLimit(6)
+                        .minimumScaleFactor(0.6)
 
                     Text("sessionStatus")
                         .font(.caption2)
@@ -760,8 +794,29 @@ struct ContentView: View {
         }
     }
 
+    private var shortDebugLine: String {
+        let uiShort = shortStage(uiStageDebugValue)
+        let groupShort = shortStage(WidgetStateStore.readGroupStage())
+        return "ui=\(uiShort) grp=\(groupShort) LR=\(lastReloadLocalHas ? 1 : 0) gid=\(gidSuffix)"
+    }
+
+    private func shortStage(_ raw: String) -> String {
+        switch raw {
+        case WidgetStateStore.stageShooting:
+            return "sho"
+        case WidgetStateStore.stageSelecting:
+            return "sel"
+        case WidgetStateStore.stageStopped:
+            return "stp"
+        case "idle":
+            return "idl"
+        default:
+            return "nil"
+        }
+    }
+
     private var gidSuffix: String {
-        String(WidgetStateStore.appGroupId.suffix(8))
+        String(WidgetStateKeys.appGroupId.suffix(8))
     }
 
     private var connectionStatusText: String {
