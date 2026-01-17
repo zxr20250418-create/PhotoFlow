@@ -115,6 +115,8 @@ private enum WidgetStateStore {
         }
         defaults.set(Date().timeIntervalSince1970, forKey: keyCanonicalLastReloadAt)
         defaults.set(1, forKey: keyCanonicalProbe)
+        defaults.synchronize()
+        CFPreferencesAppSynchronize(appGroupId as CFString)
         _ = defaults.object(forKey: keyCanonicalLastReloadAt) != nil
         WidgetCenter.shared.reloadAllTimelines()
     }
