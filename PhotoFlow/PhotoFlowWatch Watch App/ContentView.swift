@@ -62,6 +62,21 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         static let sourceDevice = "sourceDevice"
     }
 
+    private enum EventKey {
+        static let type = "type"
+        static let eventType = "session_event"
+        static let eventId = "eventId"
+        static let sessionId = "sessionId"
+        static let action = "action"
+        static let clientAt = "clientAt"
+        static let sourceDevice = "sourceDevice"
+        static let ackForEventId = "ackForEventId"
+    }
+
+    private enum OutboxKey {
+        static let storage = "pf_watch_event_outbox_v1"
+    }
+
     struct CanonicalState: Equatable {
         let sessionId: String
         let stage: String
@@ -73,9 +88,21 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         let sourceDevice: String
     }
 
+    struct SyncEvent: Codable, Equatable, Identifiable {
+        let id: String
+        let sessionId: String
+        let action: String
+        let clientAt: TimeInterval
+        let sourceDevice: String
+        var queuedAt: TimeInterval
+        var lastAttemptAt: TimeInterval?
+    }
+
     @Published var isOnDuty = false
     @Published var incomingState: CanonicalState?
     @Published var lastSyncAt: Date?
+    @Published var pendingCount: Int = 0
+    @Published var lastRevision: Int64 = 0
     @Published var sessionActivationState: WCSessionActivationState = .notActivated
     @Published var sessionReachable = false
 #if DEBUG
@@ -83,15 +110,22 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published var debugLastAppliedAt: String = "—"
     @Published var debugSessionStatus: String = "—"
 #endif
+    private var outbox: [SyncEvent] = []
+    private var pendingEventIds: Set<String> = []
 
     override init() {
         super.init()
+        loadOutbox()
+        pendingEventIds = Set(outbox.map(\.id))
+        pendingCount = pendingEventIds.count
+        lastRevision = UserDefaults.standard.object(forKey: SyncOrderKey.lastAppliedRevision) as? Int64 ?? 0
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
         session.delegate = self
         session.activate()
         if session.activationState == .activated {
             applyLatestContextIfAvailable(from: session)
+            flushOutbox()
         }
         updateSessionStatus(for: session)
 #if DEBUG
@@ -122,27 +156,91 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
 
-    func sendSessionEvent(event: String, timestamp: TimeInterval) {
+    func sendSessionEvent(action: String, sessionId: String, clientAt: Date) {
+        let event = SyncEvent(
+            id: UUID().uuidString,
+            sessionId: sessionId,
+            action: action,
+            clientAt: clientAt.timeIntervalSince1970,
+            sourceDevice: "watch",
+            queuedAt: Date().timeIntervalSince1970,
+            lastAttemptAt: nil
+        )
+        enqueueEvent(event)
+        sendEvent(event)
+        schedulePendingTimeout(for: event.id)
+    }
+
+    private func enqueueEvent(_ event: SyncEvent) {
+        guard !outbox.contains(where: { $0.id == event.id }) else { return }
+        outbox.append(event)
+        saveOutbox()
+    }
+
+    private func sendEvent(_ event: SyncEvent) {
         guard WCSession.isSupported() else { return }
-        let payload: [String: Any] = [
-            "type": "session_event",
-            "event": event,
-            "t": Int(timestamp),
-            "source": "watch"
-        ]
+        markAttempt(for: event.id)
+        let payload = encodeEvent(event)
         let session = WCSession.default
         if session.isReachable {
-            session.sendMessage(payload, replyHandler: nil) { _ in
+            session.sendMessage(payload, replyHandler: { [weak self] reply in
+                self?.applyStatePayload(reply)
+            }, errorHandler: { _ in
                 session.transferUserInfo(payload)
-            }
+            })
         } else {
             session.transferUserInfo(payload)
         }
     }
 
+    private func flushOutbox() {
+        guard WCSession.isSupported(), !outbox.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        for event in outbox {
+            if let lastAttemptAt = event.lastAttemptAt, now - lastAttemptAt < 2 {
+                continue
+            }
+            sendEvent(event)
+        }
+    }
+
+    private func schedulePendingTimeout(for eventId: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            guard self.outbox.contains(where: { $0.id == eventId }) else { return }
+            self.pendingEventIds.insert(eventId)
+            self.pendingCount = self.pendingEventIds.count
+        }
+    }
+
+    private func clearEvent(_ eventId: String) {
+        outbox.removeAll { $0.id == eventId }
+        pendingEventIds.remove(eventId)
+        pendingCount = pendingEventIds.count
+        saveOutbox()
+    }
+
+    private func markAttempt(for eventId: String) {
+        guard let index = outbox.firstIndex(where: { $0.id == eventId }) else { return }
+        outbox[index].lastAttemptAt = Date().timeIntervalSince1970
+        saveOutbox()
+    }
+
+    private func encodeEvent(_ event: SyncEvent) -> [String: Any] {
+        [
+            EventKey.type: EventKey.eventType,
+            EventKey.eventId: event.id,
+            EventKey.sessionId: event.sessionId,
+            EventKey.action: event.action,
+            EventKey.clientAt: event.clientAt,
+            EventKey.sourceDevice: event.sourceDevice
+        ]
+    }
+
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         guard error == nil, activationState == .activated else { return }
         applyLatestContextIfAvailable(from: session)
+        flushOutbox()
         updateSessionStatus(for: session)
 #if DEBUG
         updateDebugStatus(for: session)
@@ -159,6 +257,9 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     func sessionReachabilityDidChange(_ session: WCSession) {
         updateSessionStatus(for: session)
+        if session.isReachable {
+            flushOutbox()
+        }
 #if DEBUG
         updateDebugStatus(for: session)
 #endif
@@ -174,9 +275,6 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         if let type = message[CanonicalKey.type] as? String, type == CanonicalKey.requestType {
-            if let state = incomingState {
-                sendCanonicalState(state)
-            }
             return
         }
         applyStatePayload(message)
@@ -189,6 +287,9 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     private func applyStatePayload(_ payload: [String: Any]) {
         if let value = payload["isOnDuty"] as? Bool {
             isOnDuty = value
+        }
+        if let ackId = parseString(payload[EventKey.ackForEventId]) {
+            clearEvent(ackId)
         }
         if let canonical = decodeCanonicalState(from: payload) {
             mergeCanonicalState(canonical)
@@ -274,6 +375,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     func requestLatestState() {
         guard WCSession.isSupported() else { return }
         applyLatestContextIfAvailable(from: WCSession.default)
+        flushOutbox()
         let payload: [String: Any] = [
             CanonicalKey.type: CanonicalKey.requestType,
             CanonicalKey.sourceDevice: "watch"
@@ -304,6 +406,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         guard shouldApplyState(incoming) else { return }
         incomingState = incoming
         lastSyncAt = incoming.updatedAt
+        lastRevision = incoming.revision
         UserDefaults.standard.set(incoming.revision, forKey: SyncOrderKey.lastAppliedRevision)
 #if DEBUG
         debugLastAppliedAt = formatDebugTimestamp(TimeInterval(incoming.revision) / 1000)
@@ -376,6 +479,19 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             return string as String
         }
         return nil
+    }
+
+    private func loadOutbox() {
+        guard let data = UserDefaults.standard.data(forKey: OutboxKey.storage),
+              let decoded = try? JSONDecoder().decode([SyncEvent].self, from: data) else {
+            return
+        }
+        outbox = decoded
+    }
+
+    private func saveOutbox() {
+        guard let data = try? JSONEncoder().encode(outbox) else { return }
+        UserDefaults.standard.set(data, forKey: OutboxKey.storage)
     }
 
     func sendCanonicalState(_ state: CanonicalState) {
@@ -509,7 +625,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("总时长 \(format(durations.total))")
                 Text("当前阶段 \(format(durations.currentStage))")
-                Text("最近同步 \(formatSyncTime(syncStore.lastSyncAt))")
+                if syncStore.pendingCount > 0 {
+                    Text("待确认")
+                        .opacity(0.4)
+                }
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -528,6 +647,12 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Text(syncStore.debugLastAppliedAt)
+                        .font(.caption2)
+
+                    Text("lastSyncAt / pending / lastRevision")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("\(formatSyncTime(syncStore.lastSyncAt)) · \(syncStore.pendingCount) · \(syncStore.lastRevision)")
                         .font(.caption2)
 
                     Text("sessionStatus")
@@ -610,32 +735,34 @@ struct ContentView: View {
         case .idle:
             stage = .shooting
             session.shootingStart = now
-            sessionId = makeSessionId(startedAt: now)
-            let state = makeCanonicalState(stage: WidgetStateStore.stageShooting, now: now)
-            syncStore.sendCanonicalState(state)
+            let resolvedSessionId = makeSessionId(startedAt: now)
+            sessionId = resolvedSessionId
+            syncStore.sendSessionEvent(action: "startShooting", sessionId: resolvedSessionId, clientAt: now)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
             playStageHaptic()
         case .shooting:
             stage = .selecting
             session.selectingStart = now
-            let state = makeCanonicalState(stage: WidgetStateStore.stageSelecting, now: now)
-            syncStore.sendCanonicalState(state)
+            let resolvedSessionId = sessionId ?? makeSessionId(startedAt: session.shootingStart ?? now)
+            sessionId = resolvedSessionId
+            syncStore.sendSessionEvent(action: "startSelecting", sessionId: resolvedSessionId, clientAt: now)
             updateWidgetState(isRunning: true, startedAt: session.shootingStart, stage: WidgetStateStore.stageSelecting)
             playStageHaptic()
         case .selecting:
             stage = .ended
             session.endedAt = now
-            let state = makeCanonicalState(stage: WidgetStateStore.stageStopped, now: now)
-            syncStore.sendCanonicalState(state)
+            let resolvedSessionId = sessionId ?? makeSessionId(startedAt: session.shootingStart ?? now)
+            sessionId = resolvedSessionId
+            syncStore.sendSessionEvent(action: "end", sessionId: resolvedSessionId, clientAt: now)
             updateWidgetState(isRunning: false, startedAt: nil, stage: WidgetStateStore.stageStopped)
             playStageHaptic()
         case .ended:
             session = Session()
             session.shootingStart = now
             stage = .shooting
-            sessionId = makeSessionId(startedAt: now)
-            let state = makeCanonicalState(stage: WidgetStateStore.stageShooting, now: now)
-            syncStore.sendCanonicalState(state)
+            let resolvedSessionId = makeSessionId(startedAt: now)
+            sessionId = resolvedSessionId
+            syncStore.sendSessionEvent(action: "startShooting", sessionId: resolvedSessionId, clientAt: now)
             updateWidgetState(isRunning: true, startedAt: now, stage: WidgetStateStore.stageShooting)
             playStageHaptic()
         }
