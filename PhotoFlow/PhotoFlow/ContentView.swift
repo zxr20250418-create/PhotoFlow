@@ -36,6 +36,17 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         static let sourceDevice = "sourceDevice"
     }
 
+    fileprivate enum EventKey {
+        static let type = "type"
+        static let eventType = "session_event"
+        static let eventId = "eventId"
+        static let sessionId = "sessionId"
+        static let action = "action"
+        static let clientAt = "clientAt"
+        static let sourceDevice = "sourceDevice"
+        static let ackForEventId = "ackForEventId"
+    }
+
     struct CanonicalState: Codable, Equatable {
         let sessionId: String
         let stage: String
@@ -48,9 +59,11 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     struct SessionEvent: Identifiable {
-        let id = UUID()
-        let event: String
-        let timestamp: TimeInterval
+        let id: String
+        let sessionId: String
+        let action: String
+        let clientAt: TimeInterval
+        let sourceDevice: String
     }
 
     @Published var isOnDuty = false
@@ -58,20 +71,32 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     @Published var incomingCanonicalState: CanonicalState?
     @Published private(set) var canonicalState: CanonicalState?
     @Published var lastSyncAt: Date?
+    @Published var pendingEventCount: Int = 0
+    @Published var lastRevision: Int64 = 0
 #if DEBUG
     @Published var debugLastSentPayload: String = "—"
     @Published var debugSessionStatus: String = "—"
 #endif
     private let canonicalStorageKey = "pf_canonical_state_v1"
+    private let processedEventIdsKey = "pf_sync_processed_event_ids_v1"
+    private let processedEventLimit = 120
+    private var processedEventIds: [String] = []
+    private var processedEventIdSet: Set<String> = []
+    private var pendingReplies: [String: ([String: Any]) -> Void] = [:]
+    private var eventQueue: [SessionEvent] = []
+    private var inFlightEventId: String?
 
     override init() {
         super.init()
-        guard WCSession.isSupported() else { return }
-        WCSession.default.delegate = self
-        WCSession.default.activate()
         loadCanonicalState()
+        loadProcessedEventIds()
+        lastRevision = canonicalState?.revision ?? 0
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        session.delegate = self
+        session.activate()
 #if DEBUG
-        updateDebugStatus(for: WCSession.default)
+        updateDebugStatus(for: session)
 #endif
     }
 
@@ -175,14 +200,18 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        handlePayload(message)
+        handlePayload(message, replyHandler: nil)
+    }
+
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        handlePayload(message, replyHandler: replyHandler)
     }
 
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
-        handlePayload(userInfo)
+        handlePayload(userInfo, replyHandler: nil)
     }
 
-    private func handlePayload(_ payload: [String: Any]) {
+    private func handlePayload(_ payload: [String: Any], replyHandler: (([String: Any]) -> Void)?) {
         if let value = payload["isOnDuty"] as? Bool {
             isOnDuty = value
         }
@@ -194,20 +223,8 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             mergeCanonicalState(canonical)
             return
         }
-        guard let type = payload["type"] as? String, type == "session_event" else { return }
-        guard let event = payload["event"] as? String else { return }
-        let timestamp: TimeInterval?
-        if let value = payload["t"] as? Int {
-            timestamp = TimeInterval(value)
-        } else if let value = payload["t"] as? Double {
-            timestamp = value
-        } else {
-            timestamp = nil
-        }
-        guard let resolvedTimestamp = timestamp else { return }
-        Task { @MainActor in
-            incomingEvent = SessionEvent(event: event, timestamp: resolvedTimestamp)
-        }
+        guard let event = decodeSessionEvent(from: payload) else { return }
+        enqueueEvent(event, replyHandler: replyHandler)
     }
 
     func reloadCanonicalState() -> CanonicalState? {
@@ -216,11 +233,23 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func updateCanonicalState(_ state: CanonicalState, send: Bool) {
-        canonicalState = state
-        saveCanonicalState()
+        applyCanonicalState(state)
         if send {
             sendCanonicalState(state)
         }
+    }
+
+    func nextRevision(now: Date) -> Int64 {
+        let candidate = Int64(now.timeIntervalSince1970 * 1000)
+        let current = max(canonicalState?.revision ?? 0, lastRevision)
+        return max(candidate, current + 1)
+    }
+
+    private func applyCanonicalState(_ state: CanonicalState) {
+        canonicalState = state
+        lastSyncAt = state.updatedAt
+        lastRevision = state.revision
+        saveCanonicalState()
     }
 
     private func sendLatestCanonicalState() {
@@ -252,9 +281,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
 
     private func mergeCanonicalState(_ incoming: CanonicalState) {
         if shouldApplyState(incoming) {
-            canonicalState = incoming
-            saveCanonicalState()
-            lastSyncAt = incoming.updatedAt
+            applyCanonicalState(incoming)
             incomingCanonicalState = incoming
         }
     }
@@ -329,6 +356,99 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         )
     }
 
+    private func decodeSessionEvent(from payload: [String: Any]) -> SessionEvent? {
+        guard let type = payload[EventKey.type] as? String, type == EventKey.eventType else { return nil }
+        guard let action = parseString(payload[EventKey.action]) else { return nil }
+        let clientAt = parseTimeInterval(payload[EventKey.clientAt]) ?? Date().timeIntervalSince1970
+        let sessionId = parseString(payload[EventKey.sessionId]) ?? "session-\(Int(clientAt * 1000))"
+        let sourceDevice = parseString(payload[EventKey.sourceDevice]) ?? "watch"
+        let eventId = parseString(payload[EventKey.eventId]) ?? "\(sessionId)|\(action)|\(Int(clientAt * 1000))"
+        return SessionEvent(
+            id: eventId,
+            sessionId: sessionId,
+            action: action,
+            clientAt: clientAt,
+            sourceDevice: sourceDevice
+        )
+    }
+
+    private func enqueueEvent(_ event: SessionEvent, replyHandler: (([String: Any]) -> Void)?) {
+        if isEventProcessed(event.id), let state = canonicalState {
+            if let replyHandler {
+                replyHandler(ackPayload(for: event.id, state: state))
+            } else {
+                sendAck(for: event.id, state: state)
+            }
+            return
+        }
+        if let replyHandler {
+            pendingReplies[event.id] = replyHandler
+        }
+        eventQueue.append(event)
+        updatePendingEventCount()
+        processNextEventIfNeeded()
+    }
+
+    private func processNextEventIfNeeded() {
+        guard inFlightEventId == nil, let next = eventQueue.first else { return }
+        inFlightEventId = next.id
+        eventQueue.removeFirst()
+        updatePendingEventCount()
+        incomingEvent = next
+    }
+
+    func completeEvent(eventId: String, state: CanonicalState) {
+        sendAck(for: eventId, state: state)
+        markEventProcessed(eventId)
+        if inFlightEventId == eventId {
+            inFlightEventId = nil
+        }
+        updatePendingEventCount()
+        processNextEventIfNeeded()
+    }
+
+    private func sendAck(for eventId: String, state: CanonicalState) {
+        let payload = ackPayload(for: eventId, state: state)
+        if let replyHandler = pendingReplies.removeValue(forKey: eventId) {
+            replyHandler(payload)
+            return
+        }
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        if session.isReachable {
+            session.sendMessage(payload, replyHandler: nil, errorHandler: nil)
+        } else {
+            session.transferUserInfo(payload)
+        }
+    }
+
+    private func ackPayload(for eventId: String, state: CanonicalState) -> [String: Any] {
+        var payload = encodeCanonicalState(state)
+        payload[EventKey.ackForEventId] = eventId
+        return payload
+    }
+
+    private func updatePendingEventCount() {
+        pendingEventCount = eventQueue.count + (inFlightEventId == nil ? 0 : 1)
+    }
+
+    private func markEventProcessed(_ eventId: String) {
+        guard !processedEventIdSet.contains(eventId) else { return }
+        processedEventIds.append(eventId)
+        processedEventIdSet.insert(eventId)
+        if processedEventIds.count > processedEventLimit {
+            let overflow = processedEventIds.count - processedEventLimit
+            let removed = processedEventIds.prefix(overflow)
+            removed.forEach { processedEventIdSet.remove($0) }
+            processedEventIds.removeFirst(overflow)
+        }
+        saveProcessedEventIds()
+    }
+
+    private func isEventProcessed(_ eventId: String) -> Bool {
+        processedEventIdSet.contains(eventId)
+    }
+
     private func parseTimeInterval(_ value: Any?) -> TimeInterval? {
         if let seconds = value as? Double {
             return seconds
@@ -371,12 +491,28 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
             return
         }
         canonicalState = decoded
+        lastSyncAt = decoded.updatedAt
+        lastRevision = decoded.revision
     }
 
     private func saveCanonicalState() {
         guard let canonicalState,
               let data = try? JSONEncoder().encode(canonicalState) else { return }
         UserDefaults.standard.set(data, forKey: canonicalStorageKey)
+    }
+
+    private func loadProcessedEventIds() {
+        guard let data = UserDefaults.standard.data(forKey: processedEventIdsKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return
+        }
+        processedEventIds = decoded
+        processedEventIdSet = Set(decoded)
+    }
+
+    private func saveProcessedEventIds() {
+        guard let data = try? JSONEncoder().encode(processedEventIds) else { return }
+        UserDefaults.standard.set(data, forKey: processedEventIdsKey)
     }
 }
 
@@ -929,6 +1065,12 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
+            if isReadOnlyDevice {
+                if let state = syncStore.reloadCanonicalState() {
+                    applyCanonicalState(state, shouldPrompt: false)
+                }
+                return
+            }
             if let state = syncStore.reloadCanonicalState() {
                 applyCanonicalState(state, shouldPrompt: false)
                 syncStore.updateCanonicalState(state, send: true)
@@ -1077,6 +1219,13 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                                 Text(syncStore.debugLastSentPayload)
+                                    .font(.caption2)
+                                    .textSelection(.enabled)
+
+                                Text("lastSyncAt / pending / lastRevision")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text("\(formatDebugSyncTime(syncStore.lastSyncAt)) · \(syncStore.pendingEventCount) · \(syncStore.lastRevision)")
                                     .font(.caption2)
                                     .textSelection(.enabled)
 
@@ -2013,9 +2162,14 @@ struct ContentView: View {
             bottomTabButton(title: "Home", systemImage: "house", tab: .home)
             Spacer(minLength: 0)
             VStack(spacing: 4) {
-                Text(syncStore.isOnDuty ? stageLabel : "未上班")
+                Text(effectiveOnDuty ? stageLabel : "未上班")
                     .font(.headline)
                 nextActionButton
+                if isReadOnlyDevice {
+                    Text("只读模式")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer(minLength: 0)
             bottomTabButton(title: "Stats", systemImage: "chart.bar", tab: .stats)
@@ -2061,8 +2215,19 @@ struct ContentView: View {
         }
     }
 
+    private var isReadOnlyDevice: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    private var effectiveOnDuty: Bool {
+        if isReadOnlyDevice {
+            return stage != .idle
+        }
+        return syncStore.isOnDuty
+    }
+
     private var nextActionButton: some View {
-        if syncStore.isOnDuty {
+        if effectiveOnDuty {
             let durations = computeDurations(now: now)
             return AnyView(
                 Button(action: performNextAction) {
@@ -2078,14 +2243,20 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(isReadOnlyDevice)
                 .contextMenu {
-                    Button("拍摄") { performStageAction(.shooting) }
-                        .disabled(!canStartShooting)
-                    Button("选片") { performStageAction(.selecting) }
-                        .disabled(!canStartSelecting)
-                    Button("结束") { performStageAction(.ended) }
-                        .disabled(!canEndSession)
-                    Button("下班", role: .destructive) { setDuty(false) }
+                    if isReadOnlyDevice {
+                        Button("只读模式") { }
+                            .disabled(true)
+                    } else {
+                        Button("拍摄") { performStageAction(.shooting) }
+                            .disabled(!canStartShooting)
+                        Button("选片") { performStageAction(.selecting) }
+                            .disabled(!canStartSelecting)
+                        Button("结束") { performStageAction(.ended) }
+                            .disabled(!canEndSession)
+                        Button("下班", role: .destructive) { setDuty(false) }
+                    }
                 }
             )
         }
@@ -2097,6 +2268,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .disabled(isReadOnlyDevice)
         )
     }
 
@@ -2113,6 +2285,7 @@ struct ContentView: View {
     }
 
     private func setDuty(_ onDuty: Bool) {
+        guard !isReadOnlyDevice else { return }
         syncStore.setOnDuty(onDuty)
         let key = shiftRecordStore.dayKey(for: now)
         var record = shiftRecordStore.record(for: key) ?? ShiftRecord()
@@ -2145,6 +2318,7 @@ struct ContentView: View {
     }
 
     private func performNextAction() {
+        guard !isReadOnlyDevice else { return }
         let targetStage: Stage
         switch stage {
         case .idle, .ended:
@@ -2158,6 +2332,7 @@ struct ContentView: View {
     }
 
     private func performStageAction(_ targetStage: Stage) {
+        guard !isReadOnlyDevice else { return }
         guard syncStore.isOnDuty else {
             activeAlert = .notOnDuty
             return
@@ -2190,35 +2365,34 @@ struct ContentView: View {
     }
 
     private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
-        let timestampSeconds = normalizeEpochSeconds(event.timestamp)
-        let timestamp = Date(timeIntervalSince1970: timestampSeconds)
-        var sessionIdOverride: String?
-        switch event.event {
+        let eventSeconds = normalizeEpochSeconds(event.clientAt)
+        let eventTime = Date(timeIntervalSince1970: eventSeconds)
+        let processedAt = Date()
+        let sessionIdOverride = event.sessionId
+        switch event.action {
         case "startShooting":
             session = Session()
-            session.shootingStart = timestamp
+            session.shootingStart = eventTime
             stage = .shooting
-            updateSessionSummary(for: .shooting, at: timestamp)
-            sessionIdOverride = sessionIdForTimestamp(timestamp)
+            updateSessionSummary(for: .shooting, at: eventTime, sessionIdOverride: sessionIdOverride)
         case "startSelecting":
-            session.selectingStart = timestamp
+            session.selectingStart = eventTime
             stage = .selecting
-            updateSessionSummary(for: .selecting, at: timestamp)
-            sessionIdOverride = sessionIdForTimestamp(timestamp)
+            updateSessionSummary(for: .selecting, at: eventTime, sessionIdOverride: sessionIdOverride)
         case "end":
-            session.endedAt = timestamp
+            session.endedAt = eventTime
             stage = .ended
             let endedSessionId = activeSessionIndex().map { sessionSummaries[$0].id }
-            updateSessionSummary(for: .ended, at: timestamp)
-            let resolvedSessionId = endedSessionId ?? sessionIdForTimestamp(timestamp)
-            sessionIdOverride = resolvedSessionId
+            updateSessionSummary(for: .ended, at: eventTime, sessionIdOverride: sessionIdOverride)
+            let resolvedSessionId = endedSessionId ?? sessionIdOverride ?? sessionIdForTimestamp(eventTime)
             if let sessionId = resolvedSessionId {
                 promptSettlementIfNeeded(for: sessionId)
             }
         default:
             break
         }
-        syncStageState(now: timestamp, sessionIdOverride: sessionIdOverride)
+        let state = syncStageState(now: processedAt, sessionIdOverride: sessionIdOverride)
+        syncStore.completeEvent(eventId: event.id, state: state)
     }
 
     private func applyCanonicalState(_ state: WatchSyncStore.CanonicalState, shouldPrompt: Bool) {
@@ -2332,35 +2506,88 @@ struct ContentView: View {
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
-    private func updateSessionSummary(for stage: Stage, at timestamp: Date) {
-        switch stage {
-        case .shooting:
-            if let index = targetSessionIndex(for: timestamp) {
+    private func formatDebugSyncTime(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "H:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private func updateSessionSummary(for stage: Stage, at timestamp: Date, sessionIdOverride: String? = nil) {
+        if let overrideId = sessionIdOverride,
+           let index = sessionSummaries.firstIndex(where: { $0.id == overrideId }) {
+            switch stage {
+            case .shooting:
                 let current = sessionSummaries[index].shootingStart
                 if current == nil || timestamp < current! {
                     sessionSummaries[index].shootingStart = timestamp
                 }
-            } else {
-                let sessionId = makeSessionId(startedAt: timestamp)
-                sessionSummaries.append(SessionSummary(
-                    id: sessionId,
-                    shootingStart: timestamp,
-                    selectingStart: nil,
-                    endedAt: nil
-                ))
+            case .selecting:
+                let current = sessionSummaries[index].selectingStart
+                if current == nil || timestamp < current! {
+                    sessionSummaries[index].selectingStart = timestamp
+                }
+            case .ended:
+                let current = sessionSummaries[index].endedAt
+                if current == nil || timestamp > current! {
+                    sessionSummaries[index].endedAt = timestamp
+                }
+            case .idle:
+                break
             }
+            sortSessionSummaries()
+            return
+        }
+
+        if let index = targetSessionIndex(for: timestamp) {
+            switch stage {
+            case .shooting:
+                let current = sessionSummaries[index].shootingStart
+                if current == nil || timestamp < current! {
+                    sessionSummaries[index].shootingStart = timestamp
+                }
+            case .selecting:
+                let current = sessionSummaries[index].selectingStart
+                if current == nil || timestamp < current! {
+                    sessionSummaries[index].selectingStart = timestamp
+                }
+            case .ended:
+                let current = sessionSummaries[index].endedAt
+                if current == nil || timestamp > current! {
+                    sessionSummaries[index].endedAt = timestamp
+                }
+            case .idle:
+                break
+            }
+            sortSessionSummaries()
+            return
+        }
+
+        switch stage {
+        case .shooting:
+            let sessionId = sessionIdOverride ?? makeSessionId(startedAt: timestamp)
+            sessionSummaries.append(SessionSummary(
+                id: sessionId,
+                shootingStart: timestamp,
+                selectingStart: nil,
+                endedAt: nil
+            ))
         case .selecting:
-            guard let index = targetSessionIndex(for: timestamp) else { return }
-            let current = sessionSummaries[index].selectingStart
-            if current == nil || timestamp < current! {
-                sessionSummaries[index].selectingStart = timestamp
-            }
+            guard let sessionId = sessionIdOverride else { return }
+            sessionSummaries.append(SessionSummary(
+                id: sessionId,
+                shootingStart: nil,
+                selectingStart: timestamp,
+                endedAt: nil
+            ))
         case .ended:
-            guard let index = targetSessionIndex(for: timestamp) else { return }
-            let current = sessionSummaries[index].endedAt
-            if current == nil || timestamp > current! {
-                sessionSummaries[index].endedAt = timestamp
-            }
+            guard let sessionId = sessionIdOverride else { return }
+            sessionSummaries.append(SessionSummary(
+                id: sessionId,
+                shootingStart: nil,
+                selectingStart: nil,
+                endedAt: timestamp
+            ))
         case .idle:
             break
         }
@@ -2695,9 +2922,11 @@ struct ContentView: View {
         return base
     }
 
-    private func syncStageState(now: Date, sessionIdOverride: String? = nil) {
+    @discardableResult
+    private func syncStageState(now: Date, sessionIdOverride: String? = nil) -> WatchSyncStore.CanonicalState {
         let state = makeCanonicalState(now: now, sessionIdOverride: sessionIdOverride)
         syncStore.updateCanonicalState(state, send: true)
+        return state
     }
 
     private func makeCanonicalState(now: Date, sessionIdOverride: String?) -> WatchSyncStore.CanonicalState {
@@ -2718,7 +2947,7 @@ struct ContentView: View {
             selectingStart: session.selectingStart,
             endedAt: session.endedAt,
             updatedAt: now,
-            revision: Int64(now.timeIntervalSince1970 * 1000),
+            revision: syncStore.nextRevision(now: now),
             sourceDevice: "phone"
         )
     }
