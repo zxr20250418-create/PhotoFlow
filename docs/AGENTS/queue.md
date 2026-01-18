@@ -330,8 +330,45 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+## ACTIVE — TC-IOS-IPAD-CLOUDSYNC-V1
 Status: ACTIVE
+ID: TC-IOS-IPAD-CLOUDSYNC-V1
+Title: iPad 同步 + iCloud CloudKit V1
+AssignedTo: Coordinator1/Codex
+
+Goal:
+- iPhone/iPad 共用 CloudKit 同步数据，iCloud 不可用时仍可本地读写。
+- watch 仍为事件上报端，iPhone 继续作为权威写入端。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- 配置卡（独立 PR）：PhotoFlow/PhotoFlow/PhotoFlow.entitlements + PhotoFlow/PhotoFlow.xcodeproj/project.pbxproj（仅 iOS app capability 最小改动）
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 配置改动必须走独立 config PR（不走默认 PASS，需明确 PASS）。
+- 禁止修改 watch/widget/appex 相关 entitlements/targets；禁止改其他 plist 设置。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Requirements:
+- Config PR：启用 iCloud CloudKit capability，container 复用 `iCloud.com.zhengxinrong.PhotoFlow`。
+- Code PR：NSPersistentCloudKitContainer + 本地 fallback + remote change 通知；iPad V1 先只读 UI。
+- 冲突规则：revision 大者覆盖，小者丢弃；相等按 sourceDevice 固定排序。
+
+Acceptance (Device):
+- A：iPhone 离线新增/编辑 SessionRecord，上线后 iPad 自动出现。
+- B：iPad 离线编辑 DayMemo，上线后 iPhone 自动出现。
+- C：iCloud 未登录时 App 可本地使用，不崩。
+- D：同一条冲突时以 revision 大的为准。
+
+StopCondition:
+- 配置 PR opened（不合并）
+- 代码 PR opened（不合并）
+- CI green
+- STOP
+
+## PAUSED — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+Status: PAUSED (widget complication 仍未修通，避免阻塞主线)
 ID: TC-IOS-WIDGET-COMPLICATION-TIMER-V1
 Title: Widget/Complication 计时实时走（不再卡 00:00）
 AssignedTo: Executor
