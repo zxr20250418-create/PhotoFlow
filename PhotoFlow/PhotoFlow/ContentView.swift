@@ -574,6 +574,9 @@ final class CloudDataStore: ObservableObject {
     @Published private(set) var sessionRecords: [SessionRecord] = []
     @Published private(set) var shiftRecords: [String: ShiftRecordSnapshot] = [:]
     @Published private(set) var dayMemos: [String: DayMemoSnapshot] = [:]
+    @Published private(set) var lastCloudSyncAt: Date?
+    @Published private(set) var lastRevision: Int64 = 0
+    @Published private(set) var pendingCount: Int = 0
     @Published private(set) var isCloudEnabled: Bool = true
 
     private enum EntityName {
@@ -622,6 +625,7 @@ final class CloudDataStore: ObservableObject {
     private let container: NSPersistentCloudKitContainer
     private let context: NSManagedObjectContext
     private var cancellables: Set<AnyCancellable> = []
+    private var activeCloudEvents: Set<UUID> = []
 
     init() {
         localSourceDevice = CloudDataStore.deviceSource()
@@ -632,6 +636,7 @@ final class CloudDataStore: ObservableObject {
         context.automaticallyMergesChangesFromParent = true
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         observeRemoteChanges()
+        observeCloudEvents()
         refreshAll()
     }
 
@@ -818,6 +823,14 @@ final class CloudDataStore: ObservableObject {
         sessionRecords = fetchSessionRecords()
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
         dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
+        updateRevisionSnapshot()
+    }
+
+    private func updateRevisionSnapshot() {
+        let sessionMax = sessionRecords.map(\.revision).max() ?? 0
+        let shiftMax = shiftRecords.values.map(\.revision).max() ?? 0
+        let memoMax = dayMemos.values.map(\.revision).max() ?? 0
+        lastRevision = max(sessionMax, max(shiftMax, memoMax))
     }
 
     private func observeRemoteChanges() {
@@ -827,7 +840,29 @@ final class CloudDataStore: ObservableObject {
         )
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in
+            self?.lastCloudSyncAt = Date()
             self?.refreshAll()
+        }
+        .store(in: &cancellables)
+    }
+
+    private func observeCloudEvents() {
+        NotificationCenter.default.publisher(
+            for: NSPersistentCloudKitContainer.eventChangedNotification,
+            object: container
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] notification in
+            guard let self,
+                  let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey]
+                    as? NSPersistentCloudKitContainer.Event else { return }
+            if event.endDate == nil {
+                activeCloudEvents.insert(event.identifier)
+            } else {
+                activeCloudEvents.remove(event.identifier)
+                lastCloudSyncAt = event.endDate ?? Date()
+            }
+            pendingCount = activeCloudEvents.count
         }
         .store(in: &cancellables)
     }
@@ -1559,6 +1594,7 @@ struct ContentView: View {
     @State private var isReviewDigestPresented = false
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
+    @State private var selectedIpadSessionId: String?
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -1735,72 +1771,174 @@ struct ContentView: View {
 
     private var ipadSyncView: some View {
         let sessions = cloudStore.sessionRecords
-            .filter { !$0.isDeleted }
+            .filter { !$0.isDeleted && !$0.isVoided }
             .sorted { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
-        let shifts = cloudStore.shiftRecords.values.sorted { $0.dayKey < $1.dayKey }
-        let memos = cloudStore.dayMemos.values.sorted { $0.dayKey < $1.dayKey }
-        return NavigationStack {
-            List {
-                Section("Sessions") {
+        let sessionIds = sessions.map(\.id)
+        let selectedRecord = sessions.first { $0.id == selectedIpadSessionId } ?? sessions.first
+        return NavigationSplitView {
+            List(sessions, selection: $selectedIpadSessionId) { record in
+                ipadSessionRow(record: record)
+                    .tag(record.id)
+            }
+            .listStyle(.sidebar)
+            .navigationTitle("会话列表")
+        } detail: {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ipadStatsDashboard(records: sessions)
+                    Divider()
                     if sessions.isEmpty {
                         Text("暂无会话")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    } else if let record = selectedRecord {
+                        ipadSessionDetail(record: record)
                     } else {
-                        ForEach(sessions) { record in
-                            NavigationLink {
-                                ipadSessionDetail(record: record)
-                            } label: {
-                                ipadSessionRow(record: record)
-                            }
-                        }
-                    }
-                }
-                Section("Shifts") {
-                    if shifts.isEmpty {
-                        Text("暂无班次")
+                        Text("请选择会话")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(shifts, id: \.dayKey) { record in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(record.dayKey)
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                Text("\(shiftTimeText(record.startAt)) – \(shiftTimeText(record.endAt))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                            }
-                        }
                     }
+                    ipadCloudStatusView
                 }
-                Section("Memos") {
-                    if memos.isEmpty {
-                        Text("暂无备忘")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(memos, id: \.dayKey) { memo in
-                            NavigationLink {
-                                ipadMemoDetail(memo: memo)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(memo.dayKey)
-                                        .font(.subheadline)
-                                        .fontWeight(.semibold)
-                                    Text(memo.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? memo.text ?? "" : "—")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                            }
-                        }
-                    }
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
             }
             .navigationTitle("iPad Sync")
         }
+        .onAppear {
+            if selectedIpadSessionId == nil {
+                selectedIpadSessionId = sessions.first?.id
+            }
+        }
+        .onChange(of: sessionIds) { _, newIds in
+            if let selected = selectedIpadSessionId, newIds.contains(selected) {
+                return
+            }
+            selectedIpadSessionId = newIds.first
+        }
+    }
+
+    private struct IpadStatsSnapshot {
+        let count: Int
+        let totalDuration: TimeInterval
+        let revenueCents: Int
+        let hasRevenue: Bool
+        let rphText: String
+    }
+
+    private func ipadStatsSnapshot(
+        for range: StatsRange,
+        records: [CloudDataStore.SessionRecord]
+    ) -> IpadStatsSnapshot {
+        let isoCal = Calendar(identifier: .iso8601)
+        let filtered = records.filter { record in
+            guard let shootingStart = record.shootingStart else { return false }
+            switch range {
+            case .today:
+                return isoCal.isDateInToday(shootingStart)
+            case .week:
+                guard let interval = isoCal.dateInterval(of: .weekOfYear, for: now) else { return false }
+                return interval.contains(shootingStart)
+            case .month:
+                guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
+                return interval.contains(shootingStart)
+            }
+        }
+        let totals = filtered.reduce(into: (duration: TimeInterval(0), revenue: 0, hasRevenue: false)) { result, record in
+            result.duration += cloudSessionDurations(for: record).total
+            if let amount = record.amountCents {
+                result.revenue += amount
+                result.hasRevenue = true
+            }
+        }
+        let rphText: String = {
+            guard totals.hasRevenue, totals.duration > 0 else { return "--" }
+            let revenue = Double(totals.revenue) / 100
+            let hours = totals.duration / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        return IpadStatsSnapshot(
+            count: filtered.count,
+            totalDuration: totals.duration,
+            revenueCents: totals.revenue,
+            hasRevenue: totals.hasRevenue,
+            rphText: rphText
+        )
+    }
+
+    private func ipadStatsDashboard(records: [CloudDataStore.SessionRecord]) -> some View {
+        let columns = [GridItem(.flexible()), GridItem(.flexible())]
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("统计看板")
+                .font(.headline)
+            ForEach(StatsRange.allCases, id: \.self) { range in
+                let stats = ipadStatsSnapshot(for: range, records: records)
+                let revenueText = stats.hasRevenue ? formatAmount(cents: stats.revenueCents) : "--"
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(range.title)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                        ipadStatItem(title: "收入", value: revenueText)
+                        ipadStatItem(title: "单数", value: "\(stats.count)")
+                        ipadStatItem(title: "总时长", value: format(stats.totalDuration))
+                        ipadStatItem(title: "RPH", value: stats.rphText)
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private func ipadStatItem(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .monospacedDigit()
+        }
+    }
+
+    private var ipadCloudStatusView: some View {
+        let syncText = cloudStore.lastCloudSyncAt.map(formatSessionTimeWithSeconds) ?? "--"
+        return Text("lastCloudSyncAt \(syncText) · lastRevision \(cloudStore.lastRevision) · pendingCount \(cloudStore.pendingCount)")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+    }
+
+    private func cloudSessionDurations(
+        for record: CloudDataStore.SessionRecord
+    ) -> (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval?) {
+        guard let shootingStart = record.shootingStart else {
+            return (0, 0, nil)
+        }
+        let endTime = record.endedAt ?? now
+        let total = max(0, endTime.timeIntervalSince(shootingStart))
+
+        let shooting: TimeInterval
+        if let selectingStart = record.selectingStart {
+            shooting = max(0, selectingStart.timeIntervalSince(shootingStart))
+        } else if let endedAt = record.endedAt {
+            shooting = max(0, endedAt.timeIntervalSince(shootingStart))
+        } else {
+            shooting = max(0, now.timeIntervalSince(shootingStart))
+        }
+
+        let selecting: TimeInterval?
+        if let selectingStart = record.selectingStart {
+            let selectingEnd = record.endedAt ?? now
+            selecting = max(0, selectingEnd.timeIntervalSince(selectingStart))
+        } else {
+            selecting = nil
+        }
+
+        return (total, shooting, selecting)
     }
 
     private func sessionStart(for record: CloudDataStore.SessionRecord) -> Date? {
@@ -1874,52 +2012,57 @@ struct ContentView: View {
         let amountText = record.amountCents.map { formatAmount(cents: $0) } ?? "—"
         let shotText = record.shotCount.map(String.init) ?? "—"
         let selectedText = record.selectedCount.map(String.init) ?? "—"
-        return List {
-            Section("Basic") {
-                Text("ID: \(record.id)")
-                Text("阶段: \(stageLabel(for: record.stage))")
+        let noteText = record.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("会话详情")
+                .font(.headline)
+            GroupBox("基础") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ID: \(record.id)")
+                        .font(.caption)
+                    Text("阶段: \(stageLabel(for: record.stage))")
+                        .font(.caption)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Section("时间") {
-                Text("拍摄开始: \(shiftTimeText(record.shootingStart))")
-                Text("选片开始: \(shiftTimeText(record.selectingStart))")
-                Text("结束: \(shiftTimeText(record.endedAt))")
+            GroupBox("时间") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("拍摄开始: \(shiftTimeText(record.shootingStart))")
+                    Text("选片开始: \(shiftTimeText(record.selectingStart))")
+                    Text("结束: \(shiftTimeText(record.endedAt))")
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Section("结算") {
-                Text("金额: \(amountText)")
-                Text("拍摄: \(shotText)")
-                Text("选片: \(selectedText)")
+            GroupBox("结算") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("金额: \(amountText)")
+                    Text("拍摄: \(shotText)")
+                    Text("选片: \(selectedText)")
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Section("备注") {
-                Text(record.reviewNote?.isEmpty == false ? record.reviewNote ?? "" : "—")
+            GroupBox("备注") {
+                Text(noteText?.isEmpty == false ? noteText ?? "" : "—")
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Section("同步") {
-                Text("revision: \(record.revision)")
-                Text("updatedAt: \(formatSessionTimeWithSeconds(record.updatedAt))")
-                Text("source: \(record.sourceDevice)")
-                Text("voided: \(record.isVoided ? "yes" : "no")")
-                Text("deleted: \(record.isDeleted ? "yes" : "no")")
+            GroupBox("同步") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("revision: \(record.revision)")
+                    Text("updatedAt: \(formatSessionTimeWithSeconds(record.updatedAt))")
+                    Text("source: \(record.sourceDevice)")
+                    Text("voided: \(record.isVoided ? "yes" : "no")")
+                    Text("deleted: \(record.isDeleted ? "yes" : "no")")
+                }
+                .font(.caption2)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .navigationTitle("Session")
-    }
-
-    private func ipadMemoDetail(memo: CloudDataStore.DayMemoSnapshot) -> some View {
-        let trimmed = memo.text?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let memoText = trimmed?.isEmpty == false ? trimmed ?? "" : "—"
-        return List {
-            Section("Day") {
-                Text(memo.dayKey)
-            }
-            Section("Memo") {
-                Text(memoText)
-            }
-            Section("Sync") {
-                Text("revision: \(memo.revision)")
-                Text("updatedAt: \(formatSessionTimeWithSeconds(memo.updatedAt))")
-                Text("source: \(memo.sourceDevice)")
-            }
-        }
-        .navigationTitle("Memo")
     }
 
     private var homeView: some View {
