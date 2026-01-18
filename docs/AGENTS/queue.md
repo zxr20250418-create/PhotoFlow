@@ -290,8 +290,48 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+## ACTIVE — TC-SYNC-TRI-DEVICE-V1
 Status: ACTIVE
+ID: TC-SYNC-TRI-DEVICE-V1
+Title: 三端同步 V1（iPhone 权威写入 + watch 事件上报 + ACK）
+AssignedTo: Coordinator1/Codex
+
+Goal:
+- iPhone 成为唯一权威写入端；watch 事件上报后几秒内对齐显示。
+- watch 事件带 ACK，断连可补发；iPad 先做本地只读入口（无 iCloud）。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+- PhotoFlow/PhotoFlowWatch Watch App/**/*.swift
+- docs/AGENTS/exec.md（可选）
+
+Guardrails:
+- 禁止触碰：watch/widget 配置、Info.plist、project.pbxproj、entitlements、targets/appex。
+- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+
+Requirements:
+- CanonicalState：sessionId, stage, shootingStart, selectingStart, endedAt, revision(Int64), updatedAt, sourceDevice。
+- revision 单调递增（毫秒时间戳为主），合并规则：revision 更大优先；相等用 sourceDevice tie-break。
+- watch 只发事件（sessionId/action/clientAt/sourceDevice），2 秒未 ACK 进入 pending + outbox 重试。
+- iPhone 串行处理事件并生成 canonical state，回 ACK（含 revision + canonical state）。
+- 通道：sendMessage+reply 快 ACK；transferUserInfo 保底；updateApplicationContext 始终最新快照。
+- Debug only：watch/iPhone 显示 lastSyncAt / pendingCount / lastRevision。
+- iPad：本地只读入口（读本地 canonical store；无 iCloud 配置）。
+
+Acceptance (Device):
+- A：watch 点开始拍摄后，iPhone 2 秒内显示新阶段并按时间戳计时。
+- B：watch 锁屏后点亮，对齐 iPhone 最新 canonical state，pending 消失。
+- C：不可达时 watch 进入 pending；恢复连接后最终一致并清除 pending。
+- D：iPhone 重启后状态仍正确（持久化生效）。
+
+StopCondition:
+- PR opened to main（不合并）
+- CI green
+- exec.md 更新（若有）
+- STOP
+
+## PAUSED — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+Status: PAUSED
 ID: TC-IOS-WIDGET-COMPLICATION-TIMER-V1
 Title: Widget/Complication 计时实时走（不再卡 00:00）
 AssignedTo: Executor
