@@ -6,6 +6,7 @@
 //
 
 import Combine
+import CoreData
 import SwiftUI
 import UIKit
 import WatchConnectivity
@@ -535,13 +536,600 @@ struct SessionTimeOverride: Codable, Equatable {
 }
 
 @MainActor
-final class SessionMetaStore: ObservableObject {
-    @Published private(set) var metas: [String: SessionMeta] = [:]
-    private let storageKey = "pf_session_meta_v1"
-    private let defaults = UserDefaults.standard
+final class CloudDataStore: ObservableObject {
+    struct SessionRecord: Identifiable, Equatable {
+        let id: String
+        let stage: String
+        let shootingStart: Date?
+        let selectingStart: Date?
+        let endedAt: Date?
+        let amountCents: Int?
+        let shotCount: Int?
+        let selectedCount: Int?
+        let reviewNote: String?
+        let revision: Int64
+        let updatedAt: Date
+        let sourceDevice: String
+        let isVoided: Bool
+        let isDeleted: Bool
+    }
+
+    struct ShiftRecordSnapshot: Equatable {
+        let dayKey: String
+        let startAt: Date?
+        let endAt: Date?
+        let revision: Int64
+        let updatedAt: Date
+        let sourceDevice: String
+    }
+
+    struct DayMemoSnapshot: Equatable {
+        let dayKey: String
+        let text: String?
+        let revision: Int64
+        let updatedAt: Date
+        let sourceDevice: String
+    }
+
+    @Published private(set) var sessionRecords: [SessionRecord] = []
+    @Published private(set) var shiftRecords: [String: ShiftRecordSnapshot] = [:]
+    @Published private(set) var dayMemos: [String: DayMemoSnapshot] = [:]
+    @Published private(set) var isCloudEnabled: Bool = true
+
+    private enum EntityName {
+        static let session = "SessionRecord"
+        static let shift = "ShiftRecord"
+        static let memo = "DayMemo"
+    }
+
+    private static let defaultStage = "stopped"
+
+    private enum SessionField {
+        static let sessionId = "sessionId"
+        static let stage = "stage"
+        static let shootingStart = "shootingStart"
+        static let selectingStart = "selectingStart"
+        static let endedAt = "endedAt"
+        static let amountCents = "amountCents"
+        static let shotCount = "shotCount"
+        static let selectedCount = "selectedCount"
+        static let reviewNote = "reviewNote"
+        static let revision = "revision"
+        static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+        static let isVoided = "isVoided"
+        static let isDeleted = "isDeleted"
+    }
+
+    private enum ShiftField {
+        static let dayKey = "dayKey"
+        static let startAt = "startAt"
+        static let endAt = "endAt"
+        static let revision = "revision"
+        static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+    }
+
+    private enum MemoField {
+        static let dayKey = "dayKey"
+        static let text = "text"
+        static let revision = "revision"
+        static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+    }
+
+    let localSourceDevice: String
+    private let container: NSPersistentCloudKitContainer
+    private let context: NSManagedObjectContext
+    private var cancellables: Set<AnyCancellable> = []
 
     init() {
-        load()
+        localSourceDevice = CloudDataStore.deviceSource()
+        let setup = Self.makeContainer()
+        container = setup.container
+        context = container.viewContext
+        isCloudEnabled = setup.cloudEnabled
+        context.automaticallyMergesChangesFromParent = true
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        observeRemoteChanges()
+        refreshAll()
+    }
+
+    func sessionRecord(for sessionId: String) -> SessionRecord? {
+        sessionRecords.first { $0.id == sessionId }
+    }
+
+    func upsertSessionTiming(
+        sessionId: String,
+        stage: String,
+        shootingStart: Date?,
+        selectingStart: Date?,
+        endedAt: Date?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingRevision = int64Value(record, key: SessionField.revision)
+        let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+        target.setValue(sessionId, forKey: SessionField.sessionId)
+        target.setValue(stage, forKey: SessionField.stage)
+        target.setValue(shootingStart, forKey: SessionField.shootingStart)
+        target.setValue(selectingStart, forKey: SessionField.selectingStart)
+        target.setValue(endedAt, forKey: SessionField.endedAt)
+        target.setValue(nextRevisionValue, forKey: SessionField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+        target.setValue(source, forKey: SessionField.sourceDevice)
+        if record == nil {
+            target.setValue(false, forKey: SessionField.isVoided)
+            target.setValue(false, forKey: SessionField.isDeleted)
+        }
+        saveContext()
+    }
+
+    func updateSessionMeta(
+        sessionId: String,
+        meta: SessionMeta,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingRevision = int64Value(record, key: SessionField.revision)
+        let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+        target.setValue(sessionId, forKey: SessionField.sessionId)
+        target.setValue(meta.amountCents, forKey: SessionField.amountCents)
+        target.setValue(meta.shotCount, forKey: SessionField.shotCount)
+        target.setValue(meta.selectedCount, forKey: SessionField.selectedCount)
+        target.setValue(meta.reviewNote, forKey: SessionField.reviewNote)
+        target.setValue(nextRevisionValue, forKey: SessionField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+        target.setValue(source, forKey: SessionField.sourceDevice)
+        if record == nil {
+            target.setValue(Self.defaultStage, forKey: SessionField.stage)
+            target.setValue(false, forKey: SessionField.isVoided)
+            target.setValue(false, forKey: SessionField.isDeleted)
+        }
+        saveContext()
+    }
+
+    func updateSessionVisibility(
+        sessionId: String,
+        isVoided: Bool? = nil,
+        isDeleted: Bool? = nil,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingRevision = int64Value(record, key: SessionField.revision)
+        let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+        target.setValue(sessionId, forKey: SessionField.sessionId)
+        if let isVoided {
+            target.setValue(isVoided, forKey: SessionField.isVoided)
+        }
+        if let isDeleted {
+            target.setValue(isDeleted, forKey: SessionField.isDeleted)
+        }
+        target.setValue(nextRevisionValue, forKey: SessionField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+        target.setValue(source, forKey: SessionField.sourceDevice)
+        if record == nil {
+            target.setValue(Self.defaultStage, forKey: SessionField.stage)
+        }
+        saveContext()
+    }
+
+    func upsertShiftRecord(
+        dayKey: String,
+        startAt: Date?,
+        endAt: Date?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchShiftManagedObject(dayKey: dayKey)
+        let existingRevision = int64Value(record, key: ShiftField.revision)
+        let existingSource = stringValue(record, key: ShiftField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.shift, into: context)
+        target.setValue(dayKey, forKey: ShiftField.dayKey)
+        target.setValue(startAt, forKey: ShiftField.startAt)
+        target.setValue(endAt, forKey: ShiftField.endAt)
+        target.setValue(nextRevisionValue, forKey: ShiftField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: ShiftField.updatedAt)
+        target.setValue(source, forKey: ShiftField.sourceDevice)
+        saveContext()
+    }
+
+    func upsertDayMemo(
+        dayKey: String,
+        text: String?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchMemoManagedObject(dayKey: dayKey)
+        let existingRevision = int64Value(record, key: MemoField.revision)
+        let existingSource = stringValue(record, key: MemoField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.memo, into: context)
+        target.setValue(dayKey, forKey: MemoField.dayKey)
+        target.setValue(text, forKey: MemoField.text)
+        target.setValue(nextRevisionValue, forKey: MemoField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: MemoField.updatedAt)
+        target.setValue(source, forKey: MemoField.sourceDevice)
+        saveContext()
+    }
+
+    private func saveContext() {
+        guard context.hasChanges else { return }
+        do {
+            try context.save()
+            refreshAll()
+        } catch {
+            print("CloudDataStore save failed: \(error.localizedDescription)")
+            context.rollback()
+        }
+    }
+
+    private func refreshAll() {
+        sessionRecords = fetchSessionRecords()
+        shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
+        dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
+    }
+
+    private func observeRemoteChanges() {
+        NotificationCenter.default.publisher(
+            for: .NSPersistentStoreRemoteChange,
+            object: container.persistentStoreCoordinator
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            self?.refreshAll()
+        }
+        .store(in: &cancellables)
+    }
+
+    private func fetchSessionRecords() -> [SessionRecord] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
+        let objects = (try? context.fetch(request)) ?? []
+        return objects.compactMap { object in
+            guard let sessionId = object.value(forKey: SessionField.sessionId) as? String else { return nil }
+            let stage = stringValue(object, key: SessionField.stage, fallback: Self.defaultStage)
+            let updatedAtSeconds = doubleValue(object, key: SessionField.updatedAt)
+            return SessionRecord(
+                id: sessionId,
+                stage: stage,
+                shootingStart: object.value(forKey: SessionField.shootingStart) as? Date,
+                selectingStart: object.value(forKey: SessionField.selectingStart) as? Date,
+                endedAt: object.value(forKey: SessionField.endedAt) as? Date,
+                amountCents: intValue(object, key: SessionField.amountCents),
+                shotCount: intValue(object, key: SessionField.shotCount),
+                selectedCount: intValue(object, key: SessionField.selectedCount),
+                reviewNote: object.value(forKey: SessionField.reviewNote) as? String,
+                revision: int64Value(object, key: SessionField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: SessionField.sourceDevice, fallback: "unknown"),
+                isVoided: boolValue(object, key: SessionField.isVoided),
+                isDeleted: boolValue(object, key: SessionField.isDeleted)
+            )
+        }
+    }
+
+    private func fetchShiftRecords() -> [ShiftRecordSnapshot] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.shift)
+        let objects = (try? context.fetch(request)) ?? []
+        return objects.compactMap { object in
+            guard let dayKey = object.value(forKey: ShiftField.dayKey) as? String else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: ShiftField.updatedAt)
+            return ShiftRecordSnapshot(
+                dayKey: dayKey,
+                startAt: object.value(forKey: ShiftField.startAt) as? Date,
+                endAt: object.value(forKey: ShiftField.endAt) as? Date,
+                revision: int64Value(object, key: ShiftField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: ShiftField.sourceDevice, fallback: "unknown")
+            )
+        }
+    }
+
+    private func fetchDayMemos() -> [DayMemoSnapshot] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.memo)
+        let objects = (try? context.fetch(request)) ?? []
+        return objects.compactMap { object in
+            guard let dayKey = object.value(forKey: MemoField.dayKey) as? String else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: MemoField.updatedAt)
+            return DayMemoSnapshot(
+                dayKey: dayKey,
+                text: object.value(forKey: MemoField.text) as? String,
+                revision: int64Value(object, key: MemoField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: MemoField.sourceDevice, fallback: "unknown")
+            )
+        }
+    }
+
+    private func fetchSessionManagedObject(sessionId: String) -> NSManagedObject? {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
+        request.predicate = NSPredicate(format: "%K == %@", SessionField.sessionId, sessionId)
+        request.fetchLimit = 1
+        return (try? context.fetch(request))?.first
+    }
+
+    private func fetchShiftManagedObject(dayKey: String) -> NSManagedObject? {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.shift)
+        request.predicate = NSPredicate(format: "%K == %@", ShiftField.dayKey, dayKey)
+        request.fetchLimit = 1
+        return (try? context.fetch(request))?.first
+    }
+
+    private func fetchMemoManagedObject(dayKey: String) -> NSManagedObject? {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.memo)
+        request.predicate = NSPredicate(format: "%K == %@", MemoField.dayKey, dayKey)
+        request.fetchLimit = 1
+        return (try? context.fetch(request))?.first
+    }
+
+    private func nextRevision(existing: Int64) -> Int64 {
+        let candidate = Int64(Date().timeIntervalSince1970 * 1000)
+        return max(candidate, existing + 1)
+    }
+
+    private func shouldApply(
+        incomingRevision: Int64,
+        incomingSource: String,
+        existingRevision: Int64,
+        existingSource: String
+    ) -> Bool {
+        if incomingRevision > existingRevision {
+            return true
+        }
+        if incomingRevision < existingRevision {
+            return false
+        }
+        return sourcePriority(incomingSource) >= sourcePriority(existingSource)
+    }
+
+    private func sourcePriority(_ source: String) -> Int {
+        switch source {
+        case "phone":
+            return 3
+        case "ipad":
+            return 2
+        case "watch":
+            return 1
+        default:
+            return 0
+        }
+    }
+
+    private func int64Value(_ object: NSManagedObject?, key: String) -> Int64 {
+        guard let object else { return 0 }
+        if let value = object.value(forKey: key) as? Int64 {
+            return value
+        }
+        if let value = object.value(forKey: key) as? NSNumber {
+            return value.int64Value
+        }
+        return 0
+    }
+
+    private func intValue(_ object: NSManagedObject?, key: String) -> Int? {
+        guard let object else { return nil }
+        if let value = object.value(forKey: key) as? Int {
+            return value
+        }
+        if let value = object.value(forKey: key) as? NSNumber {
+            return value.intValue
+        }
+        return nil
+    }
+
+    private func doubleValue(_ object: NSManagedObject?, key: String) -> Double {
+        guard let object else { return 0 }
+        if let value = object.value(forKey: key) as? Double {
+            return value
+        }
+        if let value = object.value(forKey: key) as? NSNumber {
+            return value.doubleValue
+        }
+        return 0
+    }
+
+    private func boolValue(_ object: NSManagedObject?, key: String) -> Bool {
+        guard let object else { return false }
+        if let value = object.value(forKey: key) as? Bool {
+            return value
+        }
+        if let value = object.value(forKey: key) as? NSNumber {
+            return value.boolValue
+        }
+        return false
+    }
+
+    private func stringValue(_ object: NSManagedObject?, key: String, fallback: String) -> String {
+        guard let object else { return fallback }
+        return (object.value(forKey: key) as? String) ?? fallback
+    }
+
+    private static func deviceSource() -> String {
+        UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "phone"
+    }
+
+    private static func storeURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let root = base?.appendingPathComponent("PhotoFlow", isDirectory: true) ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root.appendingPathComponent("PhotoFlowCloud.sqlite")
+    }
+
+    private static func makeContainer() -> (container: NSPersistentCloudKitContainer, cloudEnabled: Bool) {
+        let model = makeModel()
+        let container = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
+        let description = NSPersistentStoreDescription(url: storeURL())
+        description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(containerIdentifier: "iCloud.com.zhengxinrong.PhotoFlow")
+        description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+        container.persistentStoreDescriptions = [description]
+        if loadStores(container: container) {
+            return (container, true)
+        }
+        let fallback = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
+        let fallbackDescription = NSPersistentStoreDescription(url: storeURL())
+        fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+        fallback.persistentStoreDescriptions = [fallbackDescription]
+        if !loadStores(container: fallback) {
+            print("CloudDataStore fallback load failed.")
+        }
+        return (fallback, false)
+    }
+
+    private static func loadStores(container: NSPersistentCloudKitContainer) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        var loadError: Error?
+        DispatchQueue.global(qos: .userInitiated).async {
+            container.loadPersistentStores { _, error in
+                loadError = error
+                semaphore.signal()
+            }
+        }
+        let result = semaphore.wait(timeout: .now() + 30)
+        if result == .timedOut {
+            print("CloudDataStore load timed out.")
+            return false
+        }
+        if let error = loadError {
+            print("CloudDataStore load failed: \(error.localizedDescription)")
+            return false
+        }
+        return true
+    }
+
+    private static func makeModel() -> NSManagedObjectModel {
+        let model = NSManagedObjectModel()
+        let session = NSEntityDescription()
+        session.name = EntityName.session
+        session.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        session.properties = [
+            attribute(SessionField.sessionId, type: .stringAttributeType),
+            attribute(SessionField.stage, type: .stringAttributeType, defaultValue: Self.defaultStage),
+            attribute(SessionField.shootingStart, type: .dateAttributeType, optional: true),
+            attribute(SessionField.selectingStart, type: .dateAttributeType, optional: true),
+            attribute(SessionField.endedAt, type: .dateAttributeType, optional: true),
+            attribute(SessionField.amountCents, type: .integer64AttributeType, optional: true),
+            attribute(SessionField.shotCount, type: .integer64AttributeType, optional: true),
+            attribute(SessionField.selectedCount, type: .integer64AttributeType, optional: true),
+            attribute(SessionField.reviewNote, type: .stringAttributeType, optional: true),
+            attribute(SessionField.revision, type: .integer64AttributeType, defaultValue: 0),
+            attribute(SessionField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(SessionField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown"),
+            attribute(SessionField.isVoided, type: .booleanAttributeType, defaultValue: false),
+            attribute(SessionField.isDeleted, type: .booleanAttributeType, defaultValue: false)
+        ]
+        session.uniquenessConstraints = [[SessionField.sessionId]]
+
+        let shift = NSEntityDescription()
+        shift.name = EntityName.shift
+        shift.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        shift.properties = [
+            attribute(ShiftField.dayKey, type: .stringAttributeType),
+            attribute(ShiftField.startAt, type: .dateAttributeType, optional: true),
+            attribute(ShiftField.endAt, type: .dateAttributeType, optional: true),
+            attribute(ShiftField.revision, type: .integer64AttributeType, defaultValue: 0),
+            attribute(ShiftField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(ShiftField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
+        ]
+        shift.uniquenessConstraints = [[ShiftField.dayKey]]
+
+        let memo = NSEntityDescription()
+        memo.name = EntityName.memo
+        memo.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        memo.properties = [
+            attribute(MemoField.dayKey, type: .stringAttributeType),
+            attribute(MemoField.text, type: .stringAttributeType, optional: true),
+            attribute(MemoField.revision, type: .integer64AttributeType, defaultValue: 0),
+            attribute(MemoField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(MemoField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
+        ]
+        memo.uniquenessConstraints = [[MemoField.dayKey]]
+
+        model.entities = [session, shift, memo]
+        return model
+    }
+
+    private static func attribute(
+        _ name: String,
+        type: NSAttributeType,
+        optional: Bool = false,
+        defaultValue: Any? = nil
+    ) -> NSAttributeDescription {
+        let attribute = NSAttributeDescription()
+        attribute.name = name
+        attribute.attributeType = type
+        attribute.isOptional = optional
+        attribute.defaultValue = defaultValue
+        return attribute
+    }
+}
+
+@MainActor
+final class SessionMetaStore: ObservableObject {
+    @Published private(set) var metas: [String: SessionMeta] = [:]
+    private let cloudStore: CloudDataStore
+    private var cancellables: Set<AnyCancellable> = []
+
+    init(cloudStore: CloudDataStore) {
+        self.cloudStore = cloudStore
+        apply(records: cloudStore.sessionRecords)
+        cloudStore.$sessionRecords
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records in
+                self?.apply(records: records)
+            }
+            .store(in: &cancellables)
     }
 
     func meta(for id: String) -> SessionMeta {
@@ -549,25 +1137,23 @@ final class SessionMetaStore: ObservableObject {
     }
 
     func update(_ meta: SessionMeta, for id: String) {
-        if meta.isEmpty {
-            metas.removeValue(forKey: id)
-        } else {
-            metas[id] = meta
-        }
-        save()
+        cloudStore.updateSessionMeta(sessionId: id, meta: meta)
     }
 
-    private func load() {
-        guard let data = defaults.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) else {
-            return
+    private func apply(records: [CloudDataStore.SessionRecord]) {
+        var mapped: [String: SessionMeta] = [:]
+        for record in records {
+            let meta = SessionMeta(
+                amountCents: record.amountCents,
+                shotCount: record.shotCount,
+                selectedCount: record.selectedCount,
+                reviewNote: record.reviewNote
+            )
+            if !meta.isEmpty {
+                mapped[record.id] = meta
+            }
         }
-        metas = decoded
-    }
-
-    private func save() {
-        guard let data = try? JSONEncoder().encode(metas) else { return }
-        defaults.set(data, forKey: storageKey)
+        metas = mapped
     }
 }
 
@@ -666,19 +1252,26 @@ struct ShiftRecord: Codable, Equatable {
 @MainActor
 final class ShiftRecordStore: ObservableObject {
     @Published private(set) var records: [String: ShiftRecord] = [:]
-    private let storageKey = "pf_shift_records_v1"
-    private let defaults = UserDefaults.standard
+    private let cloudStore: CloudDataStore
+    private var cancellables: Set<AnyCancellable> = []
     private let calendar: Calendar
     private let formatter: DateFormatter
 
-    init() {
+    init(cloudStore: CloudDataStore) {
+        self.cloudStore = cloudStore
         calendar = Calendar(identifier: .iso8601)
         formatter = DateFormatter()
         formatter.calendar = calendar
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
-        load()
+        apply(records: cloudStore.shiftRecords)
+        cloudStore.$shiftRecords
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records in
+                self?.apply(records: records)
+            }
+            .store(in: &cancellables)
     }
 
     func dayKey(for date: Date) -> String {
@@ -691,11 +1284,10 @@ final class ShiftRecordStore: ObservableObject {
 
     func upsert(_ record: ShiftRecord, for key: String) {
         if record.isEmpty {
-            records.removeValue(forKey: key)
+            cloudStore.upsertShiftRecord(dayKey: key, startAt: nil, endAt: nil)
         } else {
-            records[key] = record
+            cloudStore.upsertShiftRecord(dayKey: key, startAt: record.startAt, endAt: record.endAt)
         }
-        save()
     }
 
     func setStartIfNeeded(_ start: Date, for key: String) {
@@ -726,35 +1318,40 @@ final class ShiftRecordStore: ObservableObject {
         upsert(record, for: key)
     }
 
-    private func load() {
-        guard let data = defaults.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([String: ShiftRecord].self, from: data) else {
-            return
+    private func apply(records: [String: CloudDataStore.ShiftRecordSnapshot]) {
+        var mapped: [String: ShiftRecord] = [:]
+        for (key, record) in records {
+            let value = ShiftRecord(startAt: record.startAt, endAt: record.endAt)
+            if !value.isEmpty {
+                mapped[key] = value
+            }
         }
-        records = decoded
-    }
-
-    private func save() {
-        guard let data = try? JSONEncoder().encode(records) else { return }
-        defaults.set(data, forKey: storageKey)
+        self.records = mapped
     }
 }
 
 @MainActor
 final class DailyMemoStore: ObservableObject {
     @Published private(set) var memos: [String: String] = [:]
-    private let storageKey = "pf_daily_memos_v1"
-    private let defaults = UserDefaults.standard
+    private let cloudStore: CloudDataStore
+    private var cancellables: Set<AnyCancellable> = []
     private let formatter: DateFormatter
 
-    init() {
+    init(cloudStore: CloudDataStore) {
+        self.cloudStore = cloudStore
         let calendar = Calendar(identifier: .iso8601)
         formatter = DateFormatter()
         formatter.calendar = calendar
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
-        load()
+        apply(records: cloudStore.dayMemos)
+        cloudStore.$dayMemos
+            .receive(on: RunLoop.main)
+            .sink { [weak self] memos in
+                self?.apply(records: memos)
+            }
+            .store(in: &cancellables)
     }
 
     func dayKey(for date: Date) -> String {
@@ -768,24 +1365,20 @@ final class DailyMemoStore: ObservableObject {
     func setMemo(_ memo: String, for key: String) {
         let trimmed = memo.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            memos.removeValue(forKey: key)
+            cloudStore.upsertDayMemo(dayKey: key, text: nil)
         } else {
-            memos[key] = memo
+            cloudStore.upsertDayMemo(dayKey: key, text: memo)
         }
-        save()
     }
 
-    private func load() {
-        guard let data = defaults.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
-            return
+    private func apply(records: [String: CloudDataStore.DayMemoSnapshot]) {
+        var mapped: [String: String] = [:]
+        for (key, memo) in records {
+            if let text = memo.text, !text.isEmpty {
+                mapped[key] = text
+            }
         }
-        memos = decoded
-    }
-
-    private func save() {
-        guard let data = try? JSONEncoder().encode(memos) else { return }
-        defaults.set(data, forKey: storageKey)
+        memos = mapped
     }
 }
 
@@ -793,12 +1386,18 @@ final class DailyMemoStore: ObservableObject {
 final class SessionVisibilityStore: ObservableObject {
     @Published private(set) var voidedIds: Set<String> = []
     @Published private(set) var deletedIds: Set<String> = []
-    private let voidedKey = "pf_session_voided_v1"
-    private let deletedKey = "pf_session_deleted_v1"
-    private let defaults = UserDefaults.standard
+    private let cloudStore: CloudDataStore
+    private var cancellables: Set<AnyCancellable> = []
 
-    init() {
-        load()
+    init(cloudStore: CloudDataStore) {
+        self.cloudStore = cloudStore
+        apply(records: cloudStore.sessionRecords)
+        cloudStore.$sessionRecords
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records in
+                self?.apply(records: records)
+            }
+            .store(in: &cancellables)
     }
 
     func isVoided(_ id: String) -> Bool {
@@ -811,38 +1410,18 @@ final class SessionVisibilityStore: ObservableObject {
 
     func setVoided(_ id: String, isVoided: Bool) {
         guard !deletedIds.contains(id) else { return }
-        if isVoided {
-            voidedIds.insert(id)
-        } else {
-            voidedIds.remove(id)
-        }
-        save()
+        cloudStore.updateSessionVisibility(sessionId: id, isVoided: isVoided)
     }
 
     func markDeleted(_ id: String) {
-        deletedIds.insert(id)
-        voidedIds.remove(id)
-        save()
+        cloudStore.updateSessionVisibility(sessionId: id, isVoided: false, isDeleted: true)
     }
 
-    private func load() {
-        if let data = defaults.data(forKey: voidedKey),
-           let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            voidedIds = Set(decoded)
-        }
-        if let data = defaults.data(forKey: deletedKey),
-           let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            deletedIds = Set(decoded)
-        }
-    }
-
-    private func save() {
-        if let data = try? JSONEncoder().encode(Array(voidedIds)) {
-            defaults.set(data, forKey: voidedKey)
-        }
-        if let data = try? JSONEncoder().encode(Array(deletedIds)) {
-            defaults.set(data, forKey: deletedKey)
-        }
+    private func apply(records: [CloudDataStore.SessionRecord]) {
+        let voided = records.filter { $0.isVoided }.map(\.id)
+        let deleted = records.filter { $0.isDeleted }.map(\.id)
+        voidedIds = Set(voided)
+        deletedIds = Set(deleted)
     }
 }
 
@@ -944,6 +1523,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
+    @StateObject private var cloudStore: CloudDataStore
     @StateObject private var metaStore: SessionMetaStore
     @StateObject private var timeOverrideStore: SessionTimeOverrideStore
     @StateObject private var manualSessionStore: ManualSessionStore
@@ -987,13 +1567,15 @@ struct ContentView: View {
 
     init(syncStore: WatchSyncStore) {
         self.syncStore = syncStore
-        _metaStore = StateObject(wrappedValue: SessionMetaStore())
+        let cloud = CloudDataStore()
+        _cloudStore = StateObject(wrappedValue: cloud)
+        _metaStore = StateObject(wrappedValue: SessionMetaStore(cloudStore: cloud))
         _timeOverrideStore = StateObject(wrappedValue: SessionTimeOverrideStore())
         _manualSessionStore = StateObject(wrappedValue: ManualSessionStore())
-        let shiftStore = ShiftRecordStore()
+        let shiftStore = ShiftRecordStore(cloudStore: cloud)
         _shiftRecordStore = StateObject(wrappedValue: shiftStore)
-        _dailyMemoStore = StateObject(wrappedValue: DailyMemoStore())
-        _sessionVisibilityStore = StateObject(wrappedValue: SessionVisibilityStore())
+        _dailyMemoStore = StateObject(wrappedValue: DailyMemoStore(cloudStore: cloud))
+        _sessionVisibilityStore = StateObject(wrappedValue: SessionVisibilityStore(cloudStore: cloud))
         let defaults = UserDefaults.standard
         let start = defaults.object(forKey: "pf_shift_start") as? Date
         let end = defaults.object(forKey: "pf_shift_end") as? Date
@@ -1003,6 +1585,9 @@ struct ContentView: View {
     }
 
     var body: some View {
+        if isReadOnlyDevice {
+            ipadSyncView
+        } else {
         ZStack {
             if selectedTab == .home {
                 homeView
@@ -1063,6 +1648,16 @@ struct ContentView: View {
             guard let state else { return }
             applyCanonicalState(state, shouldPrompt: false)
         }
+        .onReceive(cloudStore.$sessionRecords) { records in
+            syncSessionSummaries(from: records)
+        }
+        .onReceive(dailyMemoStore.$memos) { memos in
+            let dayKey = dailyMemoStore.dayKey(for: now)
+            let latest = memos[dayKey] ?? ""
+            if latest != memoDraft {
+                memoDraft = latest
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             if isReadOnlyDevice {
@@ -1078,6 +1673,22 @@ struct ContentView: View {
                 syncStageState(now: now)
             }
         }
+        }
+    }
+
+    private func syncSessionSummaries(from records: [CloudDataStore.SessionRecord]) {
+        let summaries = records
+            .filter { !$0.isDeleted }
+            .filter { $0.shootingStart != nil || $0.selectingStart != nil || $0.endedAt != nil }
+            .map { record in
+                SessionSummary(
+                    id: record.id,
+                    shootingStart: record.shootingStart,
+                    selectingStart: record.selectingStart,
+                    endedAt: record.endedAt
+                )
+            }
+        sessionSummaries = summaries
     }
 
     private var effectiveSessionSummaries: [SessionSummary] {
@@ -1120,6 +1731,222 @@ struct ContentView: View {
 
     private func effectiveSessionSortKey(for summary: SessionSummary) -> Date {
         effectiveSessionStartTime(for: summary) ?? Date.distantPast
+    }
+
+    private var ipadSyncView: some View {
+        let sessions = cloudStore.sessionRecords
+            .filter { !$0.isDeleted }
+            .sorted { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
+        let shifts = cloudStore.shiftRecords.values.sorted { $0.dayKey < $1.dayKey }
+        let memos = cloudStore.dayMemos.values.sorted { $0.dayKey < $1.dayKey }
+        return NavigationStack {
+            List {
+                Section("Sessions") {
+                    if sessions.isEmpty {
+                        Text("暂无会话")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(sessions) { record in
+                            NavigationLink {
+                                ipadSessionDetail(record: record)
+                            } label: {
+                                ipadSessionRow(record: record)
+                            }
+                        }
+                    }
+                }
+                Section("Shifts") {
+                    if shifts.isEmpty {
+                        Text("暂无班次")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(shifts, id: \.dayKey) { record in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(record.dayKey)
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                Text("\(shiftTimeText(record.startAt)) – \(shiftTimeText(record.endAt))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                }
+                Section("Memos") {
+                    if memos.isEmpty {
+                        Text("暂无备忘")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(memos, id: \.dayKey) { memo in
+                            NavigationLink {
+                                IpadMemoEditor(cloudStore: cloudStore, dayKey: memo.dayKey)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(memo.dayKey)
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                    Text(memo.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? memo.text ?? "" : "—")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("iPad Sync")
+        }
+    }
+
+    private func sessionStart(for record: CloudDataStore.SessionRecord) -> Date? {
+        [record.shootingStart, record.selectingStart, record.endedAt].compactMap { $0 }.min()
+    }
+
+    private func sessionSortKey(for record: CloudDataStore.SessionRecord) -> Date {
+        sessionStart(for: record) ?? record.updatedAt
+    }
+
+    private func stageLabel(for stage: String) -> String {
+        switch stage {
+        case WatchSyncStore.StageSyncKey.stageShooting:
+            return "拍摄中"
+        case WatchSyncStore.StageSyncKey.stageSelecting:
+            return "选片中"
+        case WatchSyncStore.StageSyncKey.stageStopped:
+            return "已结束"
+        default:
+            return stage
+        }
+    }
+
+    private func shiftTimeText(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        return formatSessionTime(date)
+    }
+
+    private func ipadSessionRow(record: CloudDataStore.SessionRecord) -> some View {
+        let timeText = sessionStart(for: record).map(formatSessionTime) ?? "--"
+        let amountText = record.amountCents.map { formatAmount(cents: $0) } ?? "--"
+        var counts: [String] = []
+        if let shotCount = record.shotCount {
+            counts.append("拍\(shotCount)")
+        }
+        if let selectedCount = record.selectedCount {
+            counts.append("选\(selectedCount)")
+        }
+        let countsText = counts.joined(separator: " · ")
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(timeText)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .monospacedDigit()
+                    Text(stageLabel(for: record.stage))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Text(amountText)
+                    .font(.headline)
+                    .monospacedDigit()
+            }
+            if !countsText.isEmpty {
+                Text(countsText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let note = record.reviewNote, !note.isEmpty {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    private func ipadSessionDetail(record: CloudDataStore.SessionRecord) -> some View {
+        let amountText = record.amountCents.map { formatAmount(cents: $0) } ?? "—"
+        let shotText = record.shotCount.map(String.init) ?? "—"
+        let selectedText = record.selectedCount.map(String.init) ?? "—"
+        return List {
+            Section("Basic") {
+                Text("ID: \(record.id)")
+                Text("阶段: \(stageLabel(for: record.stage))")
+            }
+            Section("时间") {
+                Text("拍摄开始: \(shiftTimeText(record.shootingStart))")
+                Text("选片开始: \(shiftTimeText(record.selectingStart))")
+                Text("结束: \(shiftTimeText(record.endedAt))")
+            }
+            Section("结算") {
+                Text("金额: \(amountText)")
+                Text("拍摄: \(shotText)")
+                Text("选片: \(selectedText)")
+            }
+            Section("备注") {
+                Text(record.reviewNote?.isEmpty == false ? record.reviewNote ?? "" : "—")
+            }
+            Section("同步") {
+                Text("revision: \(record.revision)")
+                Text("updatedAt: \(formatSessionTimeWithSeconds(record.updatedAt))")
+                Text("source: \(record.sourceDevice)")
+                Text("voided: \(record.isVoided ? "yes" : "no")")
+                Text("deleted: \(record.isDeleted ? "yes" : "no")")
+            }
+        }
+        .navigationTitle("Session")
+    }
+
+    private struct IpadMemoEditor: View {
+        @ObservedObject var cloudStore: CloudDataStore
+        let dayKey: String
+        @State private var draft: String = ""
+
+        var body: some View {
+            let latest = cloudStore.dayMemos[dayKey]?.text ?? ""
+            return Form {
+                Section("Day") {
+                    Text(dayKey)
+                }
+                Section("Memo") {
+                    TextEditor(text: $draft)
+                        .frame(minHeight: 160)
+                }
+                Section("Sync") {
+                    Text("revision: \(cloudStore.dayMemos[dayKey]?.revision ?? 0)")
+                    Text("updatedAt: \(formatTime(cloudStore.dayMemos[dayKey]?.updatedAt))")
+                    Text("source: \(cloudStore.dayMemos[dayKey]?.sourceDevice ?? "unknown")")
+                }
+            }
+            .navigationTitle("Memo")
+            .onAppear {
+                draft = latest
+            }
+            .onReceive(cloudStore.$dayMemos) { memos in
+                let incoming = memos[dayKey]?.text ?? ""
+                if incoming != draft {
+                    draft = incoming
+                }
+            }
+            .onChange(of: draft) { _, newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                cloudStore.upsertDayMemo(dayKey: dayKey, text: trimmed.isEmpty ? nil : newValue)
+            }
+        }
+
+        private func formatTime(_ date: Date?) -> String {
+            guard let date else { return "—" }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            return formatter.string(from: date)
+        }
     }
 
     private var homeView: some View {
@@ -1235,6 +2062,12 @@ struct ContentView: View {
                                 Text(syncStore.debugSessionStatus)
                                     .font(.caption2)
                                     .textSelection(.enabled)
+
+                                Button("Debug: Import legacy data to Cloud") {
+                                    importLegacyDataToCloud()
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             }
                             .padding(8)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1318,6 +2151,53 @@ struct ContentView: View {
         timeOverrideStore.clear(for: id)
         manualSessionStore.remove(id)
         sessionSummaries.removeAll { $0.id == id }
+    }
+
+    private func importLegacyDataToCloud() {
+        let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey: "pf_session_meta_v1"),
+           let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) {
+            for (id, meta) in decoded {
+                cloudStore.updateSessionMeta(sessionId: id, meta: meta)
+            }
+        }
+        if let data = defaults.data(forKey: "pf_shift_records_v1"),
+           let decoded = try? JSONDecoder().decode([String: ShiftRecord].self, from: data) {
+            for (dayKey, record) in decoded {
+                cloudStore.upsertShiftRecord(dayKey: dayKey, startAt: record.startAt, endAt: record.endAt)
+            }
+        }
+        if let data = defaults.data(forKey: "pf_daily_memos_v1"),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            for (dayKey, memo) in decoded {
+                let trimmed = memo.trimmingCharacters(in: .whitespacesAndNewlines)
+                cloudStore.upsertDayMemo(dayKey: dayKey, text: trimmed.isEmpty ? nil : memo)
+            }
+        }
+        if let data = defaults.data(forKey: "pf_session_voided_v1"),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            for id in decoded {
+                cloudStore.updateSessionVisibility(sessionId: id, isVoided: true)
+            }
+        }
+        if let data = defaults.data(forKey: "pf_session_deleted_v1"),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            for id in decoded {
+                cloudStore.updateSessionVisibility(sessionId: id, isVoided: false, isDeleted: true)
+            }
+        }
+        if let data = defaults.data(forKey: "pf_manual_sessions_v1"),
+           let decoded = try? JSONDecoder().decode([String: ManualSession].self, from: data) {
+            for session in decoded.values {
+                cloudStore.upsertSessionTiming(
+                    sessionId: session.id,
+                    stage: WatchSyncStore.StageSyncKey.stageStopped,
+                    shootingStart: session.shootingStart,
+                    selectingStart: session.selectingStart,
+                    endedAt: session.endedAt
+                )
+            }
+        }
     }
 
     private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
@@ -1519,6 +2399,13 @@ struct ContentView: View {
             reviewNote: normalizedNote(from: draftManualReviewNote)
         )
         metaStore.update(meta, for: sessionId)
+        cloudStore.upsertSessionTiming(
+            sessionId: sessionId,
+            stage: WatchSyncStore.StageSyncKey.stageStopped,
+            shootingStart: manual.shootingStart,
+            selectingStart: manual.selectingStart,
+            endedAt: manual.endedAt
+        )
         isManualSessionPresented = false
     }
 
@@ -2403,6 +3290,17 @@ struct ContentView: View {
         let resolvedSelectingStart = state.selectingStart ?? (stageValue == WatchSyncStore.StageSyncKey.stageSelecting ? state.updatedAt : nil)
         let resolvedEndedAt = state.endedAt ?? (stageValue == WatchSyncStore.StageSyncKey.stageStopped && resolvedShootingStart != nil ? state.updatedAt : nil)
 
+        cloudStore.upsertSessionTiming(
+            sessionId: state.sessionId,
+            stage: state.stage,
+            shootingStart: resolvedShootingStart,
+            selectingStart: resolvedSelectingStart,
+            endedAt: resolvedEndedAt,
+            revision: state.revision,
+            updatedAt: state.updatedAt,
+            sourceDevice: state.sourceDevice
+        )
+
         switch stageValue {
         case WatchSyncStore.StageSyncKey.stageShooting:
             stage = .shooting
@@ -2926,6 +3824,16 @@ struct ContentView: View {
     private func syncStageState(now: Date, sessionIdOverride: String? = nil) -> WatchSyncStore.CanonicalState {
         let state = makeCanonicalState(now: now, sessionIdOverride: sessionIdOverride)
         syncStore.updateCanonicalState(state, send: true)
+        cloudStore.upsertSessionTiming(
+            sessionId: state.sessionId,
+            stage: state.stage,
+            shootingStart: state.shootingStart,
+            selectingStart: state.selectingStart,
+            endedAt: state.endedAt,
+            revision: state.revision,
+            updatedAt: state.updatedAt,
+            sourceDevice: state.sourceDevice
+        )
         return state
     }
 
