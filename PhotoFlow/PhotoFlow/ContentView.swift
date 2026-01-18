@@ -1597,6 +1597,7 @@ struct ContentView: View {
     @State private var selectedIpadSessionId: String?
 #if DEBUG
     @State private var showDebugPanel = false
+    @State private var showIpadSyncDebug = false
 #endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
@@ -1675,6 +1676,11 @@ struct ContentView: View {
         .sheet(isPresented: $isManualSessionPresented) {
             manualSessionEditor
         }
+#if DEBUG
+        .sheet(isPresented: $showIpadSyncDebug) {
+            ipadSyncView
+        }
+#endif
         .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
@@ -1799,6 +1805,9 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     ipadCloudStatusView
+#if DEBUG
+                    ipadCloudDebugPanel(records: sessions)
+#endif
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
@@ -1906,11 +1915,73 @@ struct ContentView: View {
 
     private var ipadCloudStatusView: some View {
         let syncText = cloudStore.lastCloudSyncAt.map(formatSessionTimeWithSeconds) ?? "--"
-        return Text("lastCloudSyncAt \(syncText) · lastRevision \(cloudStore.lastRevision) · pendingCount \(cloudStore.pendingCount)")
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .monospacedDigit()
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("lastCloudSyncAt \(syncText)")
+            Text("pendingCount \(cloudStore.pendingCount) · lastRevision \(cloudStore.lastRevision)")
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
     }
+
+#if DEBUG
+    private func ipadCloudDebugPanel(records: [CloudDataStore.SessionRecord]) -> some View {
+        let memoPrefix = "cloud-test-memo-"
+        let testMemos = cloudStore.dayMemos.values
+            .filter { ($0.text ?? "").contains(memoPrefix) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        let testSessions = records.filter { $0.id.hasPrefix("cloud-test-session-") }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Debug Cloud Test")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if !isReadOnlyDevice {
+                HStack(spacing: 8) {
+                    Button("Create Cloud Test Memo") {
+                        createCloudTestMemo()
+                    }
+                    Button("Create Cloud Test Session") {
+                        createCloudTestSession()
+                    }
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Text("iPad 只读：请在 iPhone 端创建测试记录")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if testMemos.isEmpty {
+                Text("No cloud-test-memo")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(testMemos.prefix(3), id: \.dayKey) { memo in
+                    let text = memo.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    Text("\(memo.dayKey) · \(text)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            if testSessions.isEmpty {
+                Text("No cloud-test-session")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("cloud-test-session ×\(testSessions.count)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+#endif
 
     private func cloudSessionDurations(
         for record: CloudDataStore.SessionRecord
@@ -2179,6 +2250,11 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .textSelection(.enabled)
 
+                                Button("Debug: Open iPad Sync") {
+                                    showIpadSyncDebug = true
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             }
                             .padding(8)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3475,6 +3551,38 @@ struct ContentView: View {
         formatter.dateFormat = "H:mm:ss"
         return formatter.string(from: date)
     }
+
+#if DEBUG
+    private func createCloudTestMemo() {
+        let dayKey = dailyMemoStore.dayKey(for: now)
+        let token = shortDebugToken()
+        let text = "cloud-test-memo-\(token)"
+        let revision = debugNowMillis()
+        cloudStore.upsertDayMemo(dayKey: dayKey, text: text, revision: revision)
+    }
+
+    private func createCloudTestSession() {
+        let token = shortDebugToken()
+        let sessionId = "cloud-test-session-\(token)"
+        let revision = debugNowMillis()
+        cloudStore.upsertSessionTiming(
+            sessionId: sessionId,
+            stage: WatchSyncStore.StageSyncKey.stageShooting,
+            shootingStart: now,
+            selectingStart: nil,
+            endedAt: nil,
+            revision: revision
+        )
+    }
+
+    private func shortDebugToken() -> String {
+        String(UUID().uuidString.prefix(6)).lowercased()
+    }
+
+    private func debugNowMillis() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
+    }
+#endif
 
     private func updateSessionSummary(for stage: Stage, at timestamp: Date, sessionIdOverride: String? = nil) {
         if let overrideId = sessionIdOverride,
