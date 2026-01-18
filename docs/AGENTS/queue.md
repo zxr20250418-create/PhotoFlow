@@ -290,8 +290,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-SYNC-TRI-DEVICE-V1
-Status: ACTIVE
+## DONE — TC-SYNC-TRI-DEVICE-V1
+Status: DONE (merged in PR #138)
 ID: TC-SYNC-TRI-DEVICE-V1
 Title: 三端同步 V1（iPhone 权威写入 + watch 事件上报 + ACK）
 AssignedTo: Coordinator1/Codex
@@ -330,8 +330,8 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## PAUSED — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
-Status: PAUSED
+## ACTIVE — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+Status: ACTIVE
 ID: TC-IOS-WIDGET-COMPLICATION-TIMER-V1
 Title: Widget/Complication 计时实时走（不再卡 00:00）
 AssignedTo: Executor
