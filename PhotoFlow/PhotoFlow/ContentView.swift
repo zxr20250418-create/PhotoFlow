@@ -1783,7 +1783,7 @@ struct ContentView: View {
                     } else {
                         ForEach(memos, id: \.dayKey) { memo in
                             NavigationLink {
-                                IpadMemoEditor(cloudStore: cloudStore, dayKey: memo.dayKey)
+                                ipadMemoDetail(memo: memo)
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(memo.dayKey)
@@ -1903,50 +1903,23 @@ struct ContentView: View {
         .navigationTitle("Session")
     }
 
-    private struct IpadMemoEditor: View {
-        @ObservedObject var cloudStore: CloudDataStore
-        let dayKey: String
-        @State private var draft: String = ""
-
-        var body: some View {
-            let latest = cloudStore.dayMemos[dayKey]?.text ?? ""
-            return Form {
-                Section("Day") {
-                    Text(dayKey)
-                }
-                Section("Memo") {
-                    TextEditor(text: $draft)
-                        .frame(minHeight: 160)
-                }
-                Section("Sync") {
-                    Text("revision: \(cloudStore.dayMemos[dayKey]?.revision ?? 0)")
-                    Text("updatedAt: \(formatTime(cloudStore.dayMemos[dayKey]?.updatedAt))")
-                    Text("source: \(cloudStore.dayMemos[dayKey]?.sourceDevice ?? "unknown")")
-                }
+    private func ipadMemoDetail(memo: CloudDataStore.DayMemoSnapshot) -> some View {
+        let trimmed = memo.text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let memoText = trimmed?.isEmpty == false ? trimmed ?? "" : "—"
+        return List {
+            Section("Day") {
+                Text(memo.dayKey)
             }
-            .navigationTitle("Memo")
-            .onAppear {
-                draft = latest
+            Section("Memo") {
+                Text(memoText)
             }
-            .onReceive(cloudStore.$dayMemos) { memos in
-                let incoming = memos[dayKey]?.text ?? ""
-                if incoming != draft {
-                    draft = incoming
-                }
-            }
-            .onChange(of: draft) { _, newValue in
-                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                cloudStore.upsertDayMemo(dayKey: dayKey, text: trimmed.isEmpty ? nil : newValue)
+            Section("Sync") {
+                Text("revision: \(memo.revision)")
+                Text("updatedAt: \(formatSessionTimeWithSeconds(memo.updatedAt))")
+                Text("source: \(memo.sourceDevice)")
             }
         }
-
-        private func formatTime(_ date: Date?) -> String {
-            guard let date else { return "—" }
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-            return formatter.string(from: date)
-        }
+        .navigationTitle("Memo")
     }
 
     private var homeView: some View {
@@ -2063,11 +2036,6 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .textSelection(.enabled)
 
-                                Button("Debug: Import legacy data to Cloud") {
-                                    importLegacyDataToCloud()
-                                }
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
                             }
                             .padding(8)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2153,52 +2121,6 @@ struct ContentView: View {
         sessionSummaries.removeAll { $0.id == id }
     }
 
-    private func importLegacyDataToCloud() {
-        let defaults = UserDefaults.standard
-        if let data = defaults.data(forKey: "pf_session_meta_v1"),
-           let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) {
-            for (id, meta) in decoded {
-                cloudStore.updateSessionMeta(sessionId: id, meta: meta)
-            }
-        }
-        if let data = defaults.data(forKey: "pf_shift_records_v1"),
-           let decoded = try? JSONDecoder().decode([String: ShiftRecord].self, from: data) {
-            for (dayKey, record) in decoded {
-                cloudStore.upsertShiftRecord(dayKey: dayKey, startAt: record.startAt, endAt: record.endAt)
-            }
-        }
-        if let data = defaults.data(forKey: "pf_daily_memos_v1"),
-           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-            for (dayKey, memo) in decoded {
-                let trimmed = memo.trimmingCharacters(in: .whitespacesAndNewlines)
-                cloudStore.upsertDayMemo(dayKey: dayKey, text: trimmed.isEmpty ? nil : memo)
-            }
-        }
-        if let data = defaults.data(forKey: "pf_session_voided_v1"),
-           let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            for id in decoded {
-                cloudStore.updateSessionVisibility(sessionId: id, isVoided: true)
-            }
-        }
-        if let data = defaults.data(forKey: "pf_session_deleted_v1"),
-           let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            for id in decoded {
-                cloudStore.updateSessionVisibility(sessionId: id, isVoided: false, isDeleted: true)
-            }
-        }
-        if let data = defaults.data(forKey: "pf_manual_sessions_v1"),
-           let decoded = try? JSONDecoder().decode([String: ManualSession].self, from: data) {
-            for session in decoded.values {
-                cloudStore.upsertSessionTiming(
-                    sessionId: session.id,
-                    stage: WatchSyncStore.StageSyncKey.stageStopped,
-                    shootingStart: session.shootingStart,
-                    selectingStart: session.selectingStart,
-                    endedAt: session.endedAt
-                )
-            }
-        }
-    }
 
     private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
         let meta = metaStore.meta(for: summary.id)
