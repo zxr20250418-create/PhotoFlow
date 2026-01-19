@@ -1936,6 +1936,7 @@ struct ContentView: View {
                     if shouldShowDebugControls {
                         ipadCloudDebugPanel(records: sessions)
                     }
+                    ipadBuildFingerprintFooter
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
@@ -2053,6 +2054,13 @@ struct ContentView: View {
         .onTapGesture {
             registerDebugTap()
         }
+    }
+
+    private var ipadBuildFingerprintFooter: some View {
+        Text("buildFingerprint: \(buildFingerprintText)")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
     }
 
     private func ipadCloudDebugPanel(records: [CloudDataStore.SessionRecord]) -> some View {
@@ -3468,9 +3476,13 @@ struct ContentView: View {
         let info = Bundle.main.infoDictionary
         let shortVersion = info?["CFBundleShortVersionString"] as? String ?? "?"
         let buildNumber = info?["CFBundleVersion"] as? String ?? "?"
-        let gitHash = (info?["GitHash"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let versionText = (gitHash?.isEmpty == false) ? gitHash ?? "" : "v\(shortVersion) (\(buildNumber))"
+        let rawHash = (info?["GitHash"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let shortHash = rawHash.isEmpty ? nil : String(rawHash.prefix(7))
+        let versionText = "v\(shortVersion) (\(buildNumber))"
         let buildLabel = isDebugBuild ? "BUILD=DEBUG" : "BUILD=RELEASE"
+        if let shortHash {
+            return "\(buildLabel) · \(versionText) · \(shortHash)"
+        }
         return "\(buildLabel) · \(versionText)"
     }
 
