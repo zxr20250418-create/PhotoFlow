@@ -2029,6 +2029,7 @@ struct ContentView: View {
     @State private var isShiftCalendarPresented = false
     @State private var selectedIpadSessionId: String?
     @State private var ipadDashboardSnapshot = IpadDashboardSnapshot.empty
+    @State private var ipadDashboardRange: StatsRange = .today
     @State private var ipadMemoSelectedKey = ""
     @State private var ipadMemoDraft = ""
     @State private var ipadMemoStatus: String?
@@ -2273,18 +2274,22 @@ struct ContentView: View {
             .navigationTitle("iPad Sync")
         }
         .onAppear {
+            ipadDashboardRange = .today
             if selectedIpadSessionId == nil {
                 selectedIpadSessionId = sessions.first?.id
             }
-            refreshIpadDashboard(records: sessions)
+            refreshIpadDashboard(records: sessions, range: .today)
         }
         .onChange(of: sessionIds) { _, newIds in
             if let selected = selectedIpadSessionId, newIds.contains(selected) {
-                refreshIpadDashboard(records: sessions)
+                refreshIpadDashboard(records: sessions, range: ipadDashboardRange)
                 return
             }
             selectedIpadSessionId = newIds.first
-            refreshIpadDashboard(records: sessions)
+            refreshIpadDashboard(records: sessions, range: ipadDashboardRange)
+        }
+        .onChange(of: ipadDashboardRange) { _, newRange in
+            refreshIpadDashboard(records: sessions, range: newRange)
         }
     }
 
@@ -2304,11 +2309,20 @@ struct ContentView: View {
         )
     }
 
-    private func refreshIpadDashboard(records: [CloudDataStore.SessionRecord]) {
+    private func refreshIpadDashboard(records: [CloudDataStore.SessionRecord], range: StatsRange) {
         let isoCal = Calendar(identifier: .iso8601)
         let filtered = records.filter { record in
             guard let shootingStart = record.shootingStart else { return false }
-            return isoCal.isDateInToday(shootingStart)
+            switch range {
+            case .today:
+                return isoCal.isDateInToday(shootingStart)
+            case .week:
+                guard let interval = isoCal.dateInterval(of: .weekOfYear, for: now) else { return false }
+                return interval.contains(shootingStart)
+            case .month:
+                guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
+                return interval.contains(shootingStart)
+            }
         }
 
         var totalDuration: TimeInterval = 0
@@ -2351,9 +2365,15 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 8) {
             Text("统计看板")
                 .font(.headline)
+            Picker("范围", selection: $ipadDashboardRange) {
+                ForEach(StatsRange.allCases, id: \.self) { range in
+                    Text(range.title).tag(range)
+                }
+            }
+            .pickerStyle(.segmented)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("今日")
+                Text(ipadDashboardRange.title)
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
@@ -2368,7 +2388,7 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Top3（收入）")
+                Text("Top3（收入·\(ipadDashboardRange.title)）")
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 if snapshot.topRecords.isEmpty {
