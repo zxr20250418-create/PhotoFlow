@@ -581,7 +581,11 @@ final class CloudDataStore: ObservableObject {
     @Published private(set) var isRefreshing: Bool = false
     @Published private(set) var storeCloudEnabled: Bool = false
     @Published private(set) var cloudAccountStatus: String = "unknown"
+    @Published private(set) var storeLoadError: String?
+    @Published private(set) var cloudSyncError: String?
     @Published private(set) var lastCloudError: String?
+    @Published private(set) var lastRefreshStatus: String = "idle"
+    @Published private(set) var lastRefreshError: String?
     @Published private(set) var cloudTestMemoCount: Int?
     @Published private(set) var cloudTestSessionCount: Int?
     @Published private(set) var isCloudEnabled: Bool = true
@@ -646,7 +650,9 @@ final class CloudDataStore: ObservableObject {
         isCloudEnabled = setup.cloudEnabled
         storeCloudEnabled = setup.storeCloudEnabled
         if let error = setup.loadError {
-            lastCloudError = Self.formatError(error)
+            let detail = Self.formatError(error)
+            storeLoadError = detail
+            lastCloudError = detail
         }
         context.automaticallyMergesChangesFromParent = true
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
@@ -829,7 +835,10 @@ final class CloudDataStore: ObservableObject {
             try context.save()
             refreshAll()
         } catch {
-            print("CloudDataStore save failed: \(error.localizedDescription)")
+            let detail = Self.formatError(error)
+            cloudSyncError = detail
+            lastCloudError = detail
+            print("CloudDataStore save failed: \(detail)")
             context.rollback()
         }
     }
@@ -880,7 +889,9 @@ final class CloudDataStore: ObservableObject {
                 lastCloudSyncAt = event.endDate ?? Date()
             }
             if let error = event.error {
-                lastCloudError = Self.formatError(error)
+                let detail = Self.formatError(error)
+                cloudSyncError = detail
+                lastCloudError = detail
             }
             pendingCount = activeCloudEvents.count
         }
@@ -890,29 +901,50 @@ final class CloudDataStore: ObservableObject {
     func forceCloudRefreshAsync() async {
         guard !isRefreshing else { return }
         isRefreshing = true
+        lastRefreshStatus = "refreshing"
+        lastRefreshError = nil
         defer { isRefreshing = false }
         print("CloudDataStore force refresh requested")
         refreshAll()
-        await refreshAccountStatusAsync()
-        await fetchCloudDebugCountsAsync()
+        var errors: [Error] = []
+        if let error = await refreshAccountStatusAsync() {
+            errors.append(error)
+        }
+        if let error = await fetchCloudDebugCountsAsync() {
+            errors.append(error)
+        }
+        if errors.isEmpty {
+            lastRefreshStatus = "success"
+            lastRefreshError = nil
+        } else {
+            let detail = errors.map { Self.formatError($0) }.joined(separator: " | ")
+            lastRefreshStatus = "fail"
+            lastRefreshError = detail
+            cloudSyncError = detail
+            lastCloudError = detail
+        }
     }
 
-    private func refreshAccountStatusAsync() async {
+    private func refreshAccountStatusAsync() async -> Error? {
         let container = CKContainer(identifier: Self.cloudContainerIdentifier)
         do {
             let status = try await container.accountStatus()
             cloudAccountStatus = Self.accountStatusLabel(status)
+            return nil
         } catch {
-            lastCloudError = Self.formatError(error)
+            let detail = Self.formatError(error)
+            cloudSyncError = detail
+            lastCloudError = detail
             cloudAccountStatus = "error"
+            return error
         }
     }
 
-    private func fetchCloudDebugCountsAsync() async {
+    private func fetchCloudDebugCountsAsync() async -> Error? {
         guard storeCloudEnabled else {
             cloudTestMemoCount = nil
             cloudTestSessionCount = nil
-            return
+            return nil
         }
         let container = CKContainer(identifier: Self.cloudContainerIdentifier)
         let database = container.privateCloudDatabase
@@ -930,8 +962,12 @@ final class CloudDataStore: ObservableObject {
             let (memoValue, sessionValue) = try await (memoCount, sessionCount)
             cloudTestMemoCount = memoValue
             cloudTestSessionCount = sessionValue
+            return nil
         } catch {
-            lastCloudError = Self.formatError(error)
+            let detail = Self.formatError(error)
+            cloudSyncError = detail
+            lastCloudError = detail
+            return error
         }
     }
 
@@ -977,7 +1013,53 @@ final class CloudDataStore: ObservableObject {
 
     private static func formatError(_ error: Error) -> String {
         let nsError = error as NSError
-        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
+        var components: [String] = ["\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"]
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            components.append("underlying=\(formatNSError(underlying))")
+        }
+        let userInfoPairs = formatUserInfoPairs(nsError.userInfo)
+        if !userInfoPairs.isEmpty {
+            components.append("userInfo: " + userInfoPairs.joined(separator: ", "))
+        }
+        return components.joined(separator: " | ")
+    }
+
+    private static func formatNSError(_ error: NSError) -> String {
+        "\(error.domain)(\(error.code)): \(error.localizedDescription)"
+    }
+
+    private static func formatUserInfoPairs(_ userInfo: [String: Any]) -> [String] {
+        let entries = userInfo.compactMap { key, value -> (String, Any)? in
+            guard key != NSUnderlyingErrorKey else { return nil }
+            return (key, value)
+        }
+        let sorted = entries.sorted { $0.0 < $1.0 }
+        let filtered = sorted.filter { key, _ in
+            key.contains("NSPersistentStore") || key.contains("CloudKit") || key.contains("CK") || key.contains("NSDetailedErrors")
+        }
+        let candidates = filtered.isEmpty ? sorted : filtered
+        return candidates.prefix(3).map { key, value in
+            "\(key)=\(formatUserInfoValue(value))"
+        }
+    }
+
+    private static func formatUserInfoValue(_ value: Any) -> String {
+        if let error = value as? NSError {
+            return formatNSError(error)
+        }
+        if let error = value as? Error {
+            return formatNSError(error as NSError)
+        }
+        if let errors = value as? [NSError] {
+            return errors.prefix(2).map(formatNSError).joined(separator: "; ")
+        }
+        if let values = value as? [Any] {
+            return values.prefix(2).map { String(describing: $0) }.joined(separator: "; ")
+        }
+        if let url = value as? URL {
+            return url.path
+        }
+        return String(describing: value)
     }
 
     private func fetchSessionRecords() -> [SessionRecord] {
@@ -2071,8 +2153,12 @@ struct ContentView: View {
         let testSessions = records.filter { $0.id.hasPrefix(CloudDataStore.cloudTestSessionPrefix) }
         let bundleId = Bundle.main.bundleIdentifier ?? "unknown"
         let storeCloudEnabledText = cloudStore.storeCloudEnabled ? "true" : "false"
+        let cloudLoadEnabledText = cloudStore.isCloudEnabled ? "true" : "false"
         let accountStatusText = cloudStore.cloudAccountStatus
-        let lastCloudErrorText = cloudStore.lastCloudError ?? "—"
+        let storeLoadErrorText = cloudStore.storeLoadError ?? "—"
+        let cloudSyncErrorText = cloudStore.cloudSyncError ?? "—"
+        let refreshStatusText = cloudStore.lastRefreshStatus
+        let refreshErrorText = cloudStore.lastRefreshError ?? "—"
         let cloudMemoCountText = cloudStore.cloudTestMemoCount.map(String.init) ?? "--"
         let cloudSessionCountText = cloudStore.cloudTestSessionCount.map(String.init) ?? "--"
         return VStack(alignment: .leading, spacing: 8) {
@@ -2143,8 +2229,12 @@ struct ContentView: View {
                 Text("bundleId: \(bundleId)")
                 Text("cloudKitContainerIdentifier: \(CloudDataStore.cloudContainerIdentifier)")
                 Text("storeCloudEnabled: \(storeCloudEnabledText)")
+                Text("cloudLoadEnabled: \(cloudLoadEnabledText)")
                 Text("CKAccountStatus: \(accountStatusText)")
-                Text("lastCloudError: \(lastCloudErrorText)")
+                Text("storeLoadError: \(storeLoadErrorText)")
+                Text("cloudSyncError: \(cloudSyncErrorText)")
+                Text("refreshStatus: \(refreshStatusText)")
+                Text("refreshError: \(refreshErrorText)")
                 Text("localCounts: memo \(testMemos.count) · session \(testSessions.count)")
                 Text("cloudCounts: memo \(cloudMemoCountText) · session \(cloudSessionCountText)")
             }
