@@ -61,6 +61,7 @@
 		AC0B078E2F035061002F32BE /* PhotoFlowWatch Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "PhotoFlowWatch Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A98B2891110D48A7B0F00ADC /* PhotoFlowWatchWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = PhotoFlowWatchWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoFlowWatchWidget.swift; sourceTree = "<group>"; };
+		C2E9E8A3B1D64A2F9C5B8D7E /* PhotoFlowWatchWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PhotoFlowWatchWidget.entitlements; sourceTree = "<group>"; };
 		4A95CF753F384D118C977302 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		19D185F1705B4A10A9FB513A /* WidgetKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		83010CC62EA54C53B3033CF7 /* SwiftUI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
@@ -132,6 +133,7 @@
 			children = (
 				7477882A29A941B79B12FA9C /* PhotoFlowWatchWidget.swift */,
 				4A95CF753F384D118C977302 /* Info.plist */,
+				C2E9E8A3B1D64A2F9C5B8D7E /* PhotoFlowWatchWidget.entitlements */,
 			);
 			path = PhotoFlowWatchWidget;
 			sourceTree = "<group>";
@@ -519,6 +521,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+			CODE_SIGN_ENTITLEMENTS = "PhotoFlowWatch Watch App/PhotoFlowWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
@@ -552,6 +555,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+			CODE_SIGN_ENTITLEMENTS = "PhotoFlowWatch Watch App/PhotoFlowWatch.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
@@ -583,6 +587,7 @@
 		BAD21626C1274EB8AFC00427 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PhotoFlowWatchWidget/PhotoFlowWatchWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
@@ -612,6 +617,7 @@
 		2CE62DD7EACA4C28B26CB0D8 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PhotoFlowWatchWidget/PhotoFlowWatchWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KXMLG2TV28;
