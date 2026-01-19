@@ -10,6 +10,30 @@ Status: ABANDONED (rollback; PR #33 closed)
 ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
+## ACTIVE — TC-IOS-IPAD-DASHBOARD-V1
+Status: ACTIVE
+ID: TC-IOS-IPAD-DASHBOARD-V1
+Title: iPad 统计看板增强 V1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- iPad 只读看板：今日 KPI + Top3（收入）+ 会话详情。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+
+Guardrails:
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- 默认范围：今日（每次进入回到今日）
+- Top3 默认按收入降序
+- iPad 只读（不做编辑）
+- 不引入启动重计算，不把重计算放 View body 同步执行
+- ios_safe PASS；0 配置改动
+
 ## DONE — TC-SYNC-PHONE-TO-WATCH-V1
 ID: TC-SYNC-PHONE-TO-WATCH-V1
 Status: DONE (merged)
