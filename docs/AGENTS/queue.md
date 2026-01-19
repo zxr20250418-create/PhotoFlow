@@ -10,8 +10,8 @@ Status: ABANDONED (rollback; PR #33 closed)
 ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
-## ACTIVE — TC-IOS-IPAD-DASHBOARD-V1
-Status: ACTIVE
+## DONE — TC-IOS-IPAD-DASHBOARD-V1
+Status: DONE (merged in PR #152)
 ID: TC-IOS-IPAD-DASHBOARD-V1
 Title: iPad 统计看板增强 V1
 AssignedTo: Coordinator1/Codex
@@ -32,6 +32,30 @@ Acceptance:
 - Top3 默认按收入降序
 - iPad 只读（不做编辑）
 - 不引入启动重计算，不把重计算放 View body 同步执行
+- ios_safe PASS；0 配置改动
+
+## ACTIVE — TC-IOS-IPAD-DASHBOARD-RANGE-V1_1
+Status: ACTIVE
+ID: TC-IOS-IPAD-DASHBOARD-RANGE-V1_1
+Title: iPad 看板范围切换 V1.1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- 增加范围切换：今日 / 本周 / 本月（默认仍为今日）。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+
+Guardrails:
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- 增加范围切换：今日 / 本周 / 本月（默认仍为今日）
+- KPI 仅显示 3 项：收入 / 单数 / 总时长
+- Top3 按收入排序，并随范围变化
+- 不做图表，不改数据模型
 - ios_safe PASS；0 配置改动
 
 ## DONE — TC-SYNC-PHONE-TO-WATCH-V1
