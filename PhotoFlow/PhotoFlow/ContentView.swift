@@ -2028,6 +2028,7 @@ struct ContentView: View {
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
     @State private var selectedIpadSessionId: String?
+    @State private var ipadDashboardSnapshot = IpadDashboardSnapshot.empty
     @State private var ipadMemoSelectedKey = ""
     @State private var ipadMemoDraft = ""
     @State private var ipadMemoStatus: String?
@@ -2240,7 +2241,7 @@ struct ContentView: View {
         } detail: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    ipadStatsDashboard(records: sessions)
+                    ipadStatsDashboard
                     Divider()
                     if sessions.isEmpty {
                         Text("暂无会话")
@@ -2275,87 +2276,115 @@ struct ContentView: View {
             if selectedIpadSessionId == nil {
                 selectedIpadSessionId = sessions.first?.id
             }
+            refreshIpadDashboard(records: sessions)
         }
         .onChange(of: sessionIds) { _, newIds in
             if let selected = selectedIpadSessionId, newIds.contains(selected) {
+                refreshIpadDashboard(records: sessions)
                 return
             }
             selectedIpadSessionId = newIds.first
+            refreshIpadDashboard(records: sessions)
         }
     }
 
-    private struct IpadStatsSnapshot {
+    private struct IpadDashboardSnapshot {
         let count: Int
         let totalDuration: TimeInterval
         let revenueCents: Int
         let hasRevenue: Bool
-        let rphText: String
-    }
+        let topRecords: [CloudDataStore.SessionRecord]
 
-    private func ipadStatsSnapshot(
-        for range: StatsRange,
-        records: [CloudDataStore.SessionRecord]
-    ) -> IpadStatsSnapshot {
-        let isoCal = Calendar(identifier: .iso8601)
-        let filtered = records.filter { record in
-            guard let shootingStart = record.shootingStart else { return false }
-            switch range {
-            case .today:
-                return isoCal.isDateInToday(shootingStart)
-            case .week:
-                guard let interval = isoCal.dateInterval(of: .weekOfYear, for: now) else { return false }
-                return interval.contains(shootingStart)
-            case .month:
-                guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
-                return interval.contains(shootingStart)
-            }
-        }
-        let totals = filtered.reduce(into: (duration: TimeInterval(0), revenue: 0, hasRevenue: false)) { result, record in
-            result.duration += cloudSessionDurations(for: record).total
-            if let amount = record.amountCents {
-                result.revenue += amount
-                result.hasRevenue = true
-            }
-        }
-        let rphText: String = {
-            guard totals.hasRevenue, totals.duration > 0 else { return "--" }
-            let revenue = Double(totals.revenue) / 100
-            let hours = totals.duration / 3600
-            return String(format: "¥%.0f/小时", revenue / hours)
-        }()
-        return IpadStatsSnapshot(
-            count: filtered.count,
-            totalDuration: totals.duration,
-            revenueCents: totals.revenue,
-            hasRevenue: totals.hasRevenue,
-            rphText: rphText
+        static let empty = IpadDashboardSnapshot(
+            count: 0,
+            totalDuration: 0,
+            revenueCents: 0,
+            hasRevenue: false,
+            topRecords: []
         )
     }
 
-    private func ipadStatsDashboard(records: [CloudDataStore.SessionRecord]) -> some View {
-        let columns = [GridItem(.flexible()), GridItem(.flexible())]
+    private func refreshIpadDashboard(records: [CloudDataStore.SessionRecord]) {
+        let isoCal = Calendar(identifier: .iso8601)
+        let filtered = records.filter { record in
+            guard let shootingStart = record.shootingStart else { return false }
+            return isoCal.isDateInToday(shootingStart)
+        }
+
+        var totalDuration: TimeInterval = 0
+        var revenueCents = 0
+        var hasRevenue = false
+        for record in filtered {
+            totalDuration += cloudSessionDurations(for: record).total
+            if let amount = record.amountCents {
+                revenueCents += amount
+                hasRevenue = true
+            }
+        }
+
+        let sortedTopRecords = filtered.sorted { lhs, rhs in
+            let left = lhs.amountCents ?? -1
+            let right = rhs.amountCents ?? -1
+            if left != right {
+                return left > right
+            }
+            return sessionSortKey(for: lhs) > sessionSortKey(for: rhs)
+        }
+
+        ipadDashboardSnapshot = IpadDashboardSnapshot(
+            count: filtered.count,
+            totalDuration: totalDuration,
+            revenueCents: revenueCents,
+            hasRevenue: hasRevenue,
+            topRecords: Array(sortedTopRecords.prefix(3))
+        )
+    }
+
+    private var ipadStatsDashboard: some View {
+        let snapshot = ipadDashboardSnapshot
+        let revenueText = snapshot.hasRevenue ? formatAmount(cents: snapshot.revenueCents) : "--"
+        let columns = [
+            GridItem(.flexible()),
+            GridItem(.flexible()),
+            GridItem(.flexible())
+        ]
         return VStack(alignment: .leading, spacing: 8) {
             Text("统计看板")
                 .font(.headline)
-            ForEach(StatsRange.allCases, id: \.self) { range in
-                let stats = ipadStatsSnapshot(for: range, records: records)
-                let revenueText = stats.hasRevenue ? formatAmount(cents: stats.revenueCents) : "--"
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(range.title)
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
-                        ipadStatItem(title: "收入", value: revenueText)
-                        ipadStatItem(title: "单数", value: "\(stats.count)")
-                        ipadStatItem(title: "总时长", value: format(stats.totalDuration))
-                        ipadStatItem(title: "RPH", value: stats.rphText)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("今日")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                    ipadStatItem(title: "收入", value: revenueText)
+                    ipadStatItem(title: "单数", value: "\(snapshot.count)")
+                    ipadStatItem(title: "总时长", value: format(snapshot.totalDuration))
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Top3（收入）")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                if snapshot.topRecords.isEmpty {
+                    Text("暂无记录")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(snapshot.topRecords.enumerated()), id: \.element.id) { index, record in
+                        ipadTop3Row(record: record, rank: index + 1)
                     }
                 }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -2370,11 +2399,40 @@ struct ContentView: View {
         }
     }
 
+    private func ipadTop3Row(record: CloudDataStore.SessionRecord, rank: Int) -> some View {
+        let timeText = sessionStart(for: record).map(formatSessionTime) ?? "--"
+        let amountText = record.amountCents.map { formatAmount(cents: $0) } ?? "--"
+        return Button {
+            selectedIpadSessionId = record.id
+        } label: {
+            HStack(spacing: 8) {
+                Text("#\(rank)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(timeText)
+                        .font(.caption)
+                        .monospacedDigit()
+                    Text(stageLabel(for: record.stage))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Text(amountText)
+                    .font(.caption)
+                    .monospacedDigit()
+            }
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+    }
+
     private var ipadCloudStatusView: some View {
         let syncText = cloudStore.lastCloudSyncAt.map(formatSessionTimeWithSeconds) ?? "--"
         return VStack(alignment: .leading, spacing: 2) {
             Text("lastCloudSyncAt \(syncText)")
-            Text("pendingCount \(cloudStore.pendingCount) · lastRevision \(cloudStore.lastRevision)")
+            Text("lastRevision \(cloudStore.lastRevision)")
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
