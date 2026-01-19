@@ -6,6 +6,7 @@
 //
 
 import Combine
+import CloudKit
 import CoreData
 import SwiftUI
 import UIKit
@@ -577,6 +578,11 @@ final class CloudDataStore: ObservableObject {
     @Published private(set) var lastCloudSyncAt: Date?
     @Published private(set) var lastRevision: Int64 = 0
     @Published private(set) var pendingCount: Int = 0
+    @Published private(set) var storeCloudEnabled: Bool = false
+    @Published private(set) var cloudAccountStatus: String = "unknown"
+    @Published private(set) var lastCloudError: String?
+    @Published private(set) var cloudTestMemoCount: Int?
+    @Published private(set) var cloudTestSessionCount: Int?
     @Published private(set) var isCloudEnabled: Bool = true
 
     private enum EntityName {
@@ -584,6 +590,10 @@ final class CloudDataStore: ObservableObject {
         static let shift = "ShiftRecord"
         static let memo = "DayMemo"
     }
+
+    static let cloudContainerIdentifier = "iCloud.com.zhengxinrong.PhotoFlow"
+    static let cloudTestMemoPrefix = "cloud-test-memo-"
+    static let cloudTestSessionPrefix = "cloud-test-session-"
 
     private static let defaultStage = "stopped"
 
@@ -633,10 +643,15 @@ final class CloudDataStore: ObservableObject {
         container = setup.container
         context = container.viewContext
         isCloudEnabled = setup.cloudEnabled
+        storeCloudEnabled = setup.storeCloudEnabled
+        if let error = setup.loadError {
+            lastCloudError = Self.formatError(error)
+        }
         context.automaticallyMergesChangesFromParent = true
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         observeRemoteChanges()
         observeCloudEvents()
+        refreshAccountStatus()
         refreshAll()
     }
 
@@ -840,7 +855,9 @@ final class CloudDataStore: ObservableObject {
         )
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in
-            self?.lastCloudSyncAt = Date()
+            let timestamp = Date()
+            print("CloudDataStore remote change notification received at \(timestamp)")
+            self?.lastCloudSyncAt = timestamp
             self?.refreshAll()
         }
         .store(in: &cancellables)
@@ -862,9 +879,105 @@ final class CloudDataStore: ObservableObject {
                 activeCloudEvents.remove(event.identifier)
                 lastCloudSyncAt = event.endDate ?? Date()
             }
+            if let error = event.error {
+                lastCloudError = Self.formatError(error)
+            }
             pendingCount = activeCloudEvents.count
         }
         .store(in: &cancellables)
+    }
+
+    func forceCloudRefresh() {
+        print("CloudDataStore force refresh requested")
+        refreshAll()
+        refreshAccountStatus()
+        fetchCloudDebugCounts()
+    }
+
+    private func refreshAccountStatus() {
+        let container = CKContainer(identifier: Self.cloudContainerIdentifier)
+        container.accountStatus { [weak self] status, error in
+            Task { @MainActor in
+                if let error {
+                    self?.lastCloudError = Self.formatError(error)
+                }
+                self?.cloudAccountStatus = Self.accountStatusLabel(status)
+            }
+        }
+    }
+
+    private func fetchCloudDebugCounts() {
+        guard storeCloudEnabled else {
+            cloudTestMemoCount = nil
+            cloudTestSessionCount = nil
+            return
+        }
+        let container = CKContainer(identifier: Self.cloudContainerIdentifier)
+        let database = container.privateCloudDatabase
+        queryCloudCount(
+            database: database,
+            recordType: EntityName.memo,
+            predicate: NSPredicate(format: "text CONTAINS %@", Self.cloudTestMemoPrefix)
+        ) { [weak self] count, error in
+            Task { @MainActor in
+                if let error {
+                    self?.lastCloudError = Self.formatError(error)
+                }
+                self?.cloudTestMemoCount = count
+            }
+        }
+        queryCloudCount(
+            database: database,
+            recordType: EntityName.session,
+            predicate: NSPredicate(format: "sessionId BEGINSWITH %@", Self.cloudTestSessionPrefix)
+        ) { [weak self] count, error in
+            Task { @MainActor in
+                if let error {
+                    self?.lastCloudError = Self.formatError(error)
+                }
+                self?.cloudTestSessionCount = count
+            }
+        }
+    }
+
+    private func queryCloudCount(
+        database: CKDatabase,
+        recordType: String,
+        predicate: NSPredicate,
+        completion: @escaping (Int?, Error?) -> Void
+    ) {
+        let query = CKQuery(recordType: recordType, predicate: predicate)
+        let operation = CKQueryOperation(query: query)
+        operation.desiredKeys = []
+        operation.resultsLimit = 200
+        var count = 0
+        operation.recordFetchedBlock = { _ in
+            count += 1
+        }
+        operation.queryCompletionBlock = { _, error in
+            completion(error == nil ? count : nil, error)
+        }
+        database.add(operation)
+    }
+
+    private static func accountStatusLabel(_ status: CKAccountStatus) -> String {
+        switch status {
+        case .available:
+            return "available"
+        case .noAccount:
+            return "noAccount"
+        case .restricted:
+            return "restricted"
+        case .couldNotDetermine:
+            return "couldNotDetermine"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private static func formatError(_ error: Error) -> String {
+        let nsError = error as NSError
+        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
     }
 
     private func fetchSessionRecords() -> [SessionRecord] {
@@ -1040,29 +1153,38 @@ final class CloudDataStore: ObservableObject {
         return root.appendingPathComponent("PhotoFlowCloud.sqlite")
     }
 
-    private static func makeContainer() -> (container: NSPersistentCloudKitContainer, cloudEnabled: Bool) {
+    private static func makeContainer() -> (
+        container: NSPersistentCloudKitContainer,
+        cloudEnabled: Bool,
+        storeCloudEnabled: Bool,
+        loadError: Error?
+    ) {
         let model = makeModel()
         let container = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
         let description = NSPersistentStoreDescription(url: storeURL())
-        description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(containerIdentifier: "iCloud.com.zhengxinrong.PhotoFlow")
+        description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
+            containerIdentifier: cloudContainerIdentifier
+        )
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
         container.persistentStoreDescriptions = [description]
-        if loadStores(container: container) {
-            return (container, true)
+        let cloudLoad = loadStores(container: container)
+        if cloudLoad.success {
+            return (container, true, true, cloudLoad.error)
         }
         let fallback = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
         let fallbackDescription = NSPersistentStoreDescription(url: storeURL())
         fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
         fallback.persistentStoreDescriptions = [fallbackDescription]
-        if !loadStores(container: fallback) {
+        let fallbackLoad = loadStores(container: fallback)
+        if !fallbackLoad.success {
             print("CloudDataStore fallback load failed.")
         }
-        return (fallback, false)
+        return (fallback, false, false, cloudLoad.error ?? fallbackLoad.error)
     }
 
-    private static func loadStores(container: NSPersistentCloudKitContainer) -> Bool {
+    private static func loadStores(container: NSPersistentCloudKitContainer) -> (success: Bool, error: Error?) {
         let semaphore = DispatchSemaphore(value: 0)
         var loadError: Error?
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1073,14 +1195,19 @@ final class CloudDataStore: ObservableObject {
         }
         let result = semaphore.wait(timeout: .now() + 30)
         if result == .timedOut {
+            let timeoutError = NSError(
+                domain: "CloudDataStore",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "load timed out"]
+            )
             print("CloudDataStore load timed out.")
-            return false
+            return (false, timeoutError)
         }
         if let error = loadError {
             print("CloudDataStore load failed: \(error.localizedDescription)")
-            return false
+            return (false, error)
         }
-        return true
+        return (true, nil)
     }
 
     private static func makeModel() -> NSManagedObjectModel {
@@ -1923,18 +2050,32 @@ struct ContentView: View {
         .font(.caption2)
         .foregroundStyle(.secondary)
         .monospacedDigit()
+        .onTapGesture {
+            registerDebugTap()
+        }
     }
 
     private func ipadCloudDebugPanel(records: [CloudDataStore.SessionRecord]) -> some View {
-        let memoPrefix = "cloud-test-memo-"
+        let memoPrefix = CloudDataStore.cloudTestMemoPrefix
         let testMemos = cloudStore.dayMemos.values
             .filter { ($0.text ?? "").contains(memoPrefix) }
             .sorted { $0.updatedAt > $1.updatedAt }
-        let testSessions = records.filter { $0.id.hasPrefix("cloud-test-session-") }
+        let testSessions = records.filter { $0.id.hasPrefix(CloudDataStore.cloudTestSessionPrefix) }
+        let bundleId = Bundle.main.bundleIdentifier ?? "unknown"
+        let storeCloudEnabledText = cloudStore.storeCloudEnabled ? "true" : "false"
+        let accountStatusText = cloudStore.cloudAccountStatus
+        let lastCloudErrorText = cloudStore.lastCloudError ?? "—"
+        let cloudMemoCountText = cloudStore.cloudTestMemoCount.map(String.init) ?? "--"
+        let cloudSessionCountText = cloudStore.cloudTestSessionCount.map(String.init) ?? "--"
         return VStack(alignment: .leading, spacing: 8) {
             Text("Debug Cloud Test")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Button("Force Cloud Refresh") {
+                cloudStore.forceCloudRefresh()
+            }
+            .buttonStyle(.bordered)
 
             if !isReadOnlyDevice {
                 HStack(spacing: 8) {
@@ -1975,11 +2116,27 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("buildFingerprint: \(buildFingerprintText)")
+                Text("bundleId: \(bundleId)")
+                Text("cloudKitContainerIdentifier: \(CloudDataStore.cloudContainerIdentifier)")
+                Text("storeCloudEnabled: \(storeCloudEnabledText)")
+                Text("CKAccountStatus: \(accountStatusText)")
+                Text("lastCloudError: \(lastCloudErrorText)")
+                Text("localCounts: memo \(testMemos.count) · session \(testSessions.count)")
+                Text("cloudCounts: memo \(cloudMemoCountText) · session \(cloudSessionCountText)")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onAppear {
+            cloudStore.forceCloudRefresh()
+        }
     }
 
     private func cloudSessionDurations(
@@ -3629,14 +3786,14 @@ struct ContentView: View {
     private func createCloudTestMemo() {
         let dayKey = dailyMemoStore.dayKey(for: now)
         let token = shortDebugToken()
-        let text = "cloud-test-memo-\(token)"
+        let text = "\(CloudDataStore.cloudTestMemoPrefix)\(token)"
         let revision = debugNowMillis()
         cloudStore.upsertDayMemo(dayKey: dayKey, text: text, revision: revision)
     }
 
     private func createCloudTestSession() {
         let token = shortDebugToken()
-        let sessionId = "cloud-test-session-\(token)"
+        let sessionId = "\(CloudDataStore.cloudTestSessionPrefix)\(token)"
         let revision = debugNowMillis()
         cloudStore.upsertSessionTiming(
             sessionId: sessionId,
