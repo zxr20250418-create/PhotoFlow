@@ -2017,6 +2017,12 @@ struct ContentView: View {
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
     @State private var selectedIpadSessionId: String?
+    @State private var ipadMemoSelectedKey = ""
+    @State private var ipadMemoDraft = ""
+    @State private var ipadMemoStatus: String?
+    @State private var ipadMemoConflictNotice: String?
+    @State private var ipadMemoLastRevision: Int64 = 0
+    @State private var ipadMemoLastSource = ""
     @AppStorage("pf_debug_mode_enabled") private var debugModeEnabled = false
     @State private var debugTapCount = 0
     @State private var lastDebugTapAt: Date?
@@ -2236,6 +2242,10 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if isReadOnlyDevice {
+                        Divider()
+                        ipadDayMemoEditor
+                    }
                     ipadCloudStatusView
                     if isReadOnlyDevice {
                         filesTransferPanel
@@ -2361,6 +2371,116 @@ struct ContentView: View {
         .onTapGesture {
             registerDebugTap()
         }
+    }
+
+    private var ipadDayMemoEditor: some View {
+        let todayKey = dailyMemoStore.dayKey(for: now)
+        let keys = ipadMemoKeys(todayKey: todayKey)
+        let selectedKey = ipadMemoSelectedKey.isEmpty ? todayKey : ipadMemoSelectedKey
+        let snapshot = cloudStore.dayMemos[selectedKey]
+        let revisionText = snapshot.map { String($0.revision) } ?? "--"
+        let sourceText = snapshot?.sourceDevice ?? "--"
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("DayMemo（可编辑）")
+                .font(.headline)
+            Picker(
+                "日期",
+                selection: Binding(
+                    get: { ipadMemoSelectedKey.isEmpty ? todayKey : ipadMemoSelectedKey },
+                    set: { ipadMemoSelectedKey = $0 }
+                )
+            ) {
+                ForEach(keys, id: \.self) { key in
+                    Text(key).tag(key)
+                }
+            }
+            .pickerStyle(.menu)
+
+            TextEditor(text: $ipadMemoDraft)
+                .frame(minHeight: 100)
+                .padding(6)
+                .background(Color.secondary.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            HStack(spacing: 8) {
+                Button("保存") {
+                    saveIpadMemo(for: selectedKey)
+                }
+                .buttonStyle(.bordered)
+                Text("revision \(revisionText) · \(sourceText)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let notice = ipadMemoConflictNotice {
+                Text(notice)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let status = ipadMemoStatus {
+                Text(status)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear {
+            if ipadMemoSelectedKey.isEmpty {
+                setIpadMemoSelection(todayKey)
+            }
+        }
+        .onChange(of: ipadMemoSelectedKey) { _, newKey in
+            guard !newKey.isEmpty else { return }
+            setIpadMemoSelection(newKey)
+        }
+        .onReceive(cloudStore.$dayMemos) { _ in
+            syncIpadMemoDraft()
+        }
+    }
+
+    private func ipadMemoKeys(todayKey: String) -> [String] {
+        var keySet = Set(cloudStore.dayMemos.keys)
+        keySet.insert(todayKey)
+        return keySet.sorted(by: >)
+    }
+
+    private func setIpadMemoSelection(_ key: String) {
+        ipadMemoSelectedKey = key
+        let memo = dailyMemoStore.memo(for: key)
+        ipadMemoDraft = memo
+        ipadMemoStatus = nil
+        ipadMemoConflictNotice = nil
+        let snapshot = cloudStore.dayMemos[key]
+        ipadMemoLastRevision = snapshot?.revision ?? 0
+        ipadMemoLastSource = snapshot?.sourceDevice ?? ""
+    }
+
+    private func saveIpadMemo(for key: String) {
+        guard !key.isEmpty else { return }
+        dailyMemoStore.setMemo(ipadMemoDraft, for: key)
+        ipadMemoStatus = "已保存"
+        ipadMemoConflictNotice = nil
+    }
+
+    private func syncIpadMemoDraft() {
+        let todayKey = dailyMemoStore.dayKey(for: now)
+        let key = ipadMemoSelectedKey.isEmpty ? todayKey : ipadMemoSelectedKey
+        guard !key.isEmpty else { return }
+        let latestText = dailyMemoStore.memo(for: key)
+        let latestRevision = cloudStore.dayMemos[key]?.revision ?? 0
+        let latestSource = cloudStore.dayMemos[key]?.sourceDevice ?? ""
+        let dirty = memoIsDirty(draft: ipadMemoDraft, stored: latestText)
+        if !dirty {
+            ipadMemoDraft = latestText
+            ipadMemoConflictNotice = nil
+        } else if latestRevision != ipadMemoLastRevision || latestSource != ipadMemoLastSource {
+            ipadMemoConflictNotice = "提示：该备注已被其他设备更新"
+        }
+        ipadMemoLastRevision = latestRevision
+        ipadMemoLastSource = latestSource
+    }
+
+    private func memoIsDirty(draft: String, stored: String) -> Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            != stored.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var ipadBuildFingerprintFooter: some View {
