@@ -34,8 +34,8 @@ Acceptance:
 - 不引入启动重计算，不把重计算放 View body 同步执行
 - ios_safe PASS；0 配置改动
 
-## ACTIVE — TC-IOS-IPAD-DASHBOARD-RANGE-V1_1
-Status: ACTIVE
+## DONE — TC-IOS-IPAD-DASHBOARD-RANGE-V1_1
+Status: DONE (merged in PR #154)
 ID: TC-IOS-IPAD-DASHBOARD-RANGE-V1_1
 Title: iPad 看板范围切换 V1.1
 AssignedTo: Coordinator1/Codex
@@ -56,6 +56,33 @@ Acceptance:
 - KPI 仅显示 3 项：收入 / 单数 / 总时长
 - Top3 按收入排序，并随范围变化
 - 不做图表，不改数据模型
+- ios_safe PASS；0 配置改动
+
+## ACTIVE — TC-IOS-IPAD-DASHBOARD-BOTTOM1-V1
+Status: ACTIVE
+ID: TC-IOS-IPAD-DASHBOARD-BOTTOM1-V1
+Title: iPad 看板 Bottom1 提示 V1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- iPad 看板新增 Bottom1（最大损耗源），范围同步（今日/本周/本月），每天只提示一个最差点。
+
+Scope:
+- 在 iPad 看板 KPI/Top3 下方新增 Bottom1 卡片（只显示 1 条）
+- Bottom1 默认按“最低 RPH（收入/总时长）”筛选
+- 若收入为空或总时长为 0：跳过该单（避免噪音）
+- 点击 Bottom1 跳到该会话详情（只读）
+
+Guardrails:
+- Allowed files: PhotoFlow/PhotoFlow/**/*.swift
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- 默认显示 Bottom1（最低 RPH），并随范围切换同步变化
+- Bottom1 的计算不放在启动同步路径里，不引入卡顿
+- 点击可跳到会话详情
 - ios_safe PASS；0 配置改动
 
 ## DONE — TC-SYNC-PHONE-TO-WATCH-V1
