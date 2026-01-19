@@ -6,6 +6,8 @@
 //
 
 import Combine
+import CloudKit
+import CoreData
 import SwiftUI
 import UIKit
 import WatchConnectivity
@@ -535,13 +537,1055 @@ struct SessionTimeOverride: Codable, Equatable {
 }
 
 @MainActor
-final class SessionMetaStore: ObservableObject {
-    @Published private(set) var metas: [String: SessionMeta] = [:]
-    private let storageKey = "pf_session_meta_v1"
-    private let defaults = UserDefaults.standard
+final class CloudDataStore: ObservableObject {
+    struct SessionRecord: Identifiable, Equatable {
+        let id: String
+        let stage: String
+        let shootingStart: Date?
+        let selectingStart: Date?
+        let endedAt: Date?
+        let amountCents: Int?
+        let shotCount: Int?
+        let selectedCount: Int?
+        let reviewNote: String?
+        let revision: Int64
+        let updatedAt: Date
+        let sourceDevice: String
+        let isVoided: Bool
+        let isDeleted: Bool
+    }
+
+    struct ShiftRecordSnapshot: Equatable {
+        let dayKey: String
+        let startAt: Date?
+        let endAt: Date?
+        let revision: Int64
+        let updatedAt: Date
+        let sourceDevice: String
+    }
+
+    struct DayMemoSnapshot: Equatable {
+        let dayKey: String
+        let text: String?
+        let revision: Int64
+        let updatedAt: Date
+        let sourceDevice: String
+    }
+
+    @Published private(set) var sessionRecords: [SessionRecord] = []
+    @Published private(set) var shiftRecords: [String: ShiftRecordSnapshot] = [:]
+    @Published private(set) var dayMemos: [String: DayMemoSnapshot] = [:]
+    @Published private(set) var lastCloudSyncAt: Date?
+    @Published private(set) var lastRevision: Int64 = 0
+    @Published private(set) var pendingCount: Int = 0
+    @Published private(set) var isRefreshing: Bool = false
+    @Published private(set) var storeCloudEnabled: Bool = false
+    @Published private(set) var cloudAccountStatus: String = "unknown"
+    @Published private(set) var storeLoadError: String?
+    @Published private(set) var cloudSyncError: String?
+    @Published private(set) var lastCloudError: String?
+    @Published private(set) var lastRefreshStatus: String = "idle"
+    @Published private(set) var lastRefreshError: String?
+    @Published private(set) var cloudTestMemoCount: Int?
+    @Published private(set) var cloudTestSessionCount: Int?
+    @Published private(set) var isCloudEnabled: Bool = true
+
+    private enum EntityName {
+        static let session = "SessionRecord"
+        static let shift = "ShiftRecord"
+        static let memo = "DayMemo"
+    }
+
+    static let cloudContainerIdentifier = "iCloud.com.zhengxinrong.PhotoFlow"
+    static let cloudTestMemoPrefix = "cloud-test-memo-"
+    static let cloudTestSessionPrefix = "cloud-test-session-"
+
+    private static let defaultStage = "stopped"
+
+    private enum SessionField {
+        static let sessionId = "sessionId"
+        static let stage = "stage"
+        static let shootingStart = "shootingStart"
+        static let selectingStart = "selectingStart"
+        static let endedAt = "endedAt"
+        static let amountCents = "amountCents"
+        static let shotCount = "shotCount"
+        static let selectedCount = "selectedCount"
+        static let reviewNote = "reviewNote"
+        static let revision = "revision"
+        static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+        static let isVoided = "isVoided"
+        static let isDeleted = "isDeleted"
+    }
+
+    private enum ShiftField {
+        static let dayKey = "dayKey"
+        static let startAt = "startAt"
+        static let endAt = "endAt"
+        static let revision = "revision"
+        static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+    }
+
+    private enum MemoField {
+        static let dayKey = "dayKey"
+        static let text = "text"
+        static let revision = "revision"
+        static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+    }
+
+    let localSourceDevice: String
+    private let container: NSPersistentCloudKitContainer
+    private let context: NSManagedObjectContext
+    private var cancellables: Set<AnyCancellable> = []
+    private var activeCloudEvents: Set<UUID> = []
 
     init() {
-        load()
+        localSourceDevice = CloudDataStore.deviceSource()
+        let setup = Self.makeContainer()
+        container = setup.container
+        context = container.viewContext
+        isCloudEnabled = setup.cloudEnabled
+        storeCloudEnabled = setup.storeCloudEnabled
+        if let error = setup.loadError {
+            let detail = Self.formatError(error)
+            storeLoadError = detail
+            lastCloudError = detail
+        }
+        context.automaticallyMergesChangesFromParent = true
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        observeRemoteChanges()
+        observeCloudEvents()
+        refreshAll()
+    }
+
+    func sessionRecord(for sessionId: String) -> SessionRecord? {
+        sessionRecords.first { $0.id == sessionId }
+    }
+
+    func upsertSessionTiming(
+        sessionId: String,
+        stage: String,
+        shootingStart: Date?,
+        selectingStart: Date?,
+        endedAt: Date?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingRevision = int64Value(record, key: SessionField.revision)
+        let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+        target.setValue(sessionId, forKey: SessionField.sessionId)
+        target.setValue(stage, forKey: SessionField.stage)
+        target.setValue(shootingStart, forKey: SessionField.shootingStart)
+        target.setValue(selectingStart, forKey: SessionField.selectingStart)
+        target.setValue(endedAt, forKey: SessionField.endedAt)
+        target.setValue(nextRevisionValue, forKey: SessionField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+        target.setValue(source, forKey: SessionField.sourceDevice)
+        if record == nil {
+            target.setValue(false, forKey: SessionField.isVoided)
+            target.setValue(false, forKey: SessionField.isDeleted)
+        }
+        saveContext()
+    }
+
+    func updateSessionMeta(
+        sessionId: String,
+        meta: SessionMeta,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingRevision = int64Value(record, key: SessionField.revision)
+        let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+        target.setValue(sessionId, forKey: SessionField.sessionId)
+        target.setValue(meta.amountCents, forKey: SessionField.amountCents)
+        target.setValue(meta.shotCount, forKey: SessionField.shotCount)
+        target.setValue(meta.selectedCount, forKey: SessionField.selectedCount)
+        target.setValue(meta.reviewNote, forKey: SessionField.reviewNote)
+        target.setValue(nextRevisionValue, forKey: SessionField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+        target.setValue(source, forKey: SessionField.sourceDevice)
+        if record == nil {
+            target.setValue(Self.defaultStage, forKey: SessionField.stage)
+            target.setValue(false, forKey: SessionField.isVoided)
+            target.setValue(false, forKey: SessionField.isDeleted)
+        }
+        saveContext()
+    }
+
+    func updateSessionVisibility(
+        sessionId: String,
+        isVoided: Bool? = nil,
+        isDeleted: Bool? = nil,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingRevision = int64Value(record, key: SessionField.revision)
+        let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+        target.setValue(sessionId, forKey: SessionField.sessionId)
+        if let isVoided {
+            target.setValue(isVoided, forKey: SessionField.isVoided)
+        }
+        if let isDeleted {
+            target.setValue(isDeleted, forKey: SessionField.isDeleted)
+        }
+        target.setValue(nextRevisionValue, forKey: SessionField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+        target.setValue(source, forKey: SessionField.sourceDevice)
+        if record == nil {
+            target.setValue(Self.defaultStage, forKey: SessionField.stage)
+        }
+        saveContext()
+    }
+
+    func upsertShiftRecord(
+        dayKey: String,
+        startAt: Date?,
+        endAt: Date?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        guard !dayKey.isEmpty else {
+            assertionFailure("dayKey is required")
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchShiftManagedObject(dayKey: dayKey)
+        let existingRevision = int64Value(record, key: ShiftField.revision)
+        let existingSource = stringValue(record, key: ShiftField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.shift, into: context)
+        target.setValue(dayKey, forKey: ShiftField.dayKey)
+        target.setValue(startAt, forKey: ShiftField.startAt)
+        target.setValue(endAt, forKey: ShiftField.endAt)
+        target.setValue(nextRevisionValue, forKey: ShiftField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: ShiftField.updatedAt)
+        target.setValue(source, forKey: ShiftField.sourceDevice)
+        saveContext()
+    }
+
+    func upsertDayMemo(
+        dayKey: String,
+        text: String?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        guard !dayKey.isEmpty else {
+            assertionFailure("dayKey is required")
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchMemoManagedObject(dayKey: dayKey)
+        let existingRevision = int64Value(record, key: MemoField.revision)
+        let existingSource = stringValue(record, key: MemoField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.memo, into: context)
+        target.setValue(dayKey, forKey: MemoField.dayKey)
+        target.setValue(text, forKey: MemoField.text)
+        target.setValue(nextRevisionValue, forKey: MemoField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: MemoField.updatedAt)
+        target.setValue(source, forKey: MemoField.sourceDevice)
+        saveContext()
+    }
+
+    private func saveContext() {
+        guard context.hasChanges else { return }
+        do {
+            try context.save()
+            refreshAll()
+        } catch {
+            let detail = Self.formatError(error)
+            cloudSyncError = detail
+            lastCloudError = detail
+            print("CloudDataStore save failed: \(detail)")
+            context.rollback()
+        }
+    }
+
+    private func refreshAll() {
+        sessionRecords = fetchSessionRecords()
+        shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
+        dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
+        updateRevisionSnapshot()
+    }
+
+    private func updateRevisionSnapshot() {
+        let sessionMax = sessionRecords.map(\.revision).max() ?? 0
+        let shiftMax = shiftRecords.values.map(\.revision).max() ?? 0
+        let memoMax = dayMemos.values.map(\.revision).max() ?? 0
+        lastRevision = max(sessionMax, max(shiftMax, memoMax))
+    }
+
+    private func observeRemoteChanges() {
+        NotificationCenter.default.publisher(
+            for: .NSPersistentStoreRemoteChange,
+            object: container.persistentStoreCoordinator
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            let timestamp = Date()
+            print("CloudDataStore remote change notification received at \(timestamp)")
+            self?.lastCloudSyncAt = timestamp
+            self?.refreshAll()
+        }
+        .store(in: &cancellables)
+    }
+
+    private func observeCloudEvents() {
+        NotificationCenter.default.publisher(
+            for: NSPersistentCloudKitContainer.eventChangedNotification,
+            object: container
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] notification in
+            guard let self,
+                  let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey]
+                    as? NSPersistentCloudKitContainer.Event else { return }
+            if event.endDate == nil {
+                activeCloudEvents.insert(event.identifier)
+            } else {
+                activeCloudEvents.remove(event.identifier)
+                lastCloudSyncAt = event.endDate ?? Date()
+            }
+            if let error = event.error {
+                let detail = Self.formatError(error)
+                cloudSyncError = detail
+                lastCloudError = detail
+            }
+            pendingCount = activeCloudEvents.count
+        }
+        .store(in: &cancellables)
+    }
+
+    func forceCloudRefreshAsync() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        lastRefreshStatus = "refreshing"
+        lastRefreshError = nil
+        defer { isRefreshing = false }
+        print("CloudDataStore force refresh requested")
+        refreshAll()
+        var errors: [Error] = []
+        if !storeCloudEnabled {
+            let error = NSError(
+                domain: "CloudDataStore",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "storeCloudEnabled=false"]
+            )
+            errors.append(error)
+        }
+        if let error = await refreshAccountStatusAsync() {
+            errors.append(error)
+        }
+        if let error = await fetchCloudDebugCountsAsync() {
+            errors.append(error)
+        }
+        if errors.isEmpty {
+            lastRefreshStatus = "success"
+            lastRefreshError = nil
+            cloudSyncError = nil
+            lastCloudError = nil
+        } else {
+            let detail = errors.map { Self.formatError($0) }.joined(separator: " | ")
+            lastRefreshStatus = "fail"
+            lastRefreshError = detail
+            cloudSyncError = detail
+            lastCloudError = detail
+        }
+    }
+
+    func resetLocalStoreAsync() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        lastRefreshStatus = "resetting"
+        lastRefreshError = nil
+        let result = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: ResetResult(success: false, error: nil))
+                    return
+                }
+                let output = self.performResetLocalStore()
+                continuation.resume(returning: output)
+            }
+        }
+        if result.success {
+            lastRefreshStatus = "reset-success"
+            lastRefreshError = nil
+            storeCloudEnabled = true
+            storeLoadError = nil
+            lastCloudError = nil
+        } else {
+            let detail = result.error.map { Self.formatError($0) } ?? "unknown reset error"
+            lastRefreshStatus = "reset-fail"
+            lastRefreshError = detail
+            storeCloudEnabled = false
+            storeLoadError = detail
+            lastCloudError = detail
+        }
+        isRefreshing = false
+        refreshAll()
+    }
+
+    private struct ResetResult {
+        let success: Bool
+        let error: Error?
+    }
+
+    private func performResetLocalStore() -> ResetResult {
+        let coordinator = container.persistentStoreCoordinator
+        let stores = coordinator.persistentStores
+        for store in stores {
+            if let url = store.url {
+                do {
+                    try coordinator.remove(store)
+                    try coordinator.destroyPersistentStore(at: url, ofType: NSSQLiteStoreType, options: store.options)
+                    deleteStoreFiles(at: url)
+                } catch {
+                    return ResetResult(success: false, error: error)
+                }
+            }
+        }
+        let load = Self.loadStores(container: container)
+        return ResetResult(success: load.success, error: load.error)
+    }
+
+    private func deleteStoreFiles(at url: URL) {
+        let fm = FileManager.default
+        let base = url.deletingPathExtension().path
+        let candidates = [url.path, "\(base)-shm", "\(base)-wal"]
+        for path in candidates {
+            if fm.fileExists(atPath: path) {
+                try? fm.removeItem(atPath: path)
+            }
+        }
+    }
+
+    private func refreshAccountStatusAsync() async -> Error? {
+        let container = CKContainer(identifier: Self.cloudContainerIdentifier)
+        do {
+            let status = try await container.accountStatus()
+            cloudAccountStatus = Self.accountStatusLabel(status)
+            return nil
+        } catch {
+            let detail = Self.formatError(error)
+            cloudSyncError = detail
+            lastCloudError = detail
+            cloudAccountStatus = "error"
+            return error
+        }
+    }
+
+    private func fetchCloudDebugCountsAsync() async -> Error? {
+        guard storeCloudEnabled else {
+            cloudTestMemoCount = nil
+            cloudTestSessionCount = nil
+            return nil
+        }
+        let container = CKContainer(identifier: Self.cloudContainerIdentifier)
+        let database = container.privateCloudDatabase
+        do {
+            async let memoCount = queryCloudCountAsync(
+                database: database,
+                recordType: EntityName.memo,
+                predicate: NSPredicate(format: "text CONTAINS %@", Self.cloudTestMemoPrefix)
+            )
+            async let sessionCount = queryCloudCountAsync(
+                database: database,
+                recordType: EntityName.session,
+                predicate: NSPredicate(format: "sessionId BEGINSWITH %@", Self.cloudTestSessionPrefix)
+            )
+            let (memoValue, sessionValue) = try await (memoCount, sessionCount)
+            cloudTestMemoCount = memoValue
+            cloudTestSessionCount = sessionValue
+            return nil
+        } catch {
+            let detail = Self.formatError(error)
+            cloudSyncError = detail
+            lastCloudError = detail
+            return error
+        }
+    }
+
+    private func queryCloudCountAsync(
+        database: CKDatabase,
+        recordType: String,
+        predicate: NSPredicate
+    ) async throws -> Int {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = CKQuery(recordType: recordType, predicate: predicate)
+            let operation = CKQueryOperation(query: query)
+            operation.desiredKeys = []
+            operation.resultsLimit = 200
+            var count = 0
+            operation.recordFetchedBlock = { _ in
+                count += 1
+            }
+            operation.queryCompletionBlock = { _, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: count)
+                }
+            }
+            database.add(operation)
+        }
+    }
+
+    private static func accountStatusLabel(_ status: CKAccountStatus) -> String {
+        switch status {
+        case .available:
+            return "available"
+        case .noAccount:
+            return "noAccount"
+        case .restricted:
+            return "restricted"
+        case .couldNotDetermine:
+            return "couldNotDetermine"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private static func formatError(_ error: Error) -> String {
+        let nsError = error as NSError
+        var components: [String] = ["\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"]
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            components.append("underlying=\(formatNSError(underlying))")
+        }
+        let userInfoPairs = formatUserInfoPairs(nsError.userInfo)
+        if !userInfoPairs.isEmpty {
+            components.append("userInfo: " + userInfoPairs.joined(separator: ", "))
+        }
+        return components.joined(separator: " | ")
+    }
+
+    private static func formatNSError(_ error: NSError) -> String {
+        "\(error.domain)(\(error.code)): \(error.localizedDescription)"
+    }
+
+    private static func formatUserInfoPairs(_ userInfo: [String: Any]) -> [String] {
+        let entries = userInfo.compactMap { key, value -> (String, Any)? in
+            guard key != NSUnderlyingErrorKey else { return nil }
+            return (key, value)
+        }
+        let sorted = entries.sorted { $0.0 < $1.0 }
+        let filtered = sorted.filter { key, _ in
+            key.contains("NSPersistentStore") || key.contains("CloudKit") || key.contains("CK") || key.contains("NSDetailedErrors")
+        }
+        let candidates = filtered.isEmpty ? sorted : filtered
+        return candidates.prefix(3).map { key, value in
+            "\(key)=\(formatUserInfoValue(value))"
+        }
+    }
+
+    private static func formatUserInfoValue(_ value: Any) -> String {
+        if let error = value as? NSError {
+            return formatNSError(error)
+        }
+        if let error = value as? Error {
+            return formatNSError(error as NSError)
+        }
+        if let errors = value as? [NSError] {
+            return errors.prefix(2).map(formatNSError).joined(separator: "; ")
+        }
+        if let values = value as? [Any] {
+            return values.prefix(2).map { String(describing: $0) }.joined(separator: "; ")
+        }
+        if let url = value as? URL {
+            return url.path
+        }
+        return String(describing: value)
+    }
+
+    private func fetchSessionRecords() -> [SessionRecord] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
+        let objects = (try? context.fetch(request)) ?? []
+        let deduped = dedupeObjects(
+            objects,
+            idKey: SessionField.sessionId,
+            revisionKey: SessionField.revision,
+            sourceKey: SessionField.sourceDevice
+        )
+        return deduped.values.compactMap { object in
+            guard let sessionId = object.value(forKey: SessionField.sessionId) as? String,
+                  !sessionId.isEmpty else { return nil }
+            let stage = stringValue(object, key: SessionField.stage, fallback: Self.defaultStage)
+            let updatedAtSeconds = doubleValue(object, key: SessionField.updatedAt)
+            return SessionRecord(
+                id: sessionId,
+                stage: stage,
+                shootingStart: object.value(forKey: SessionField.shootingStart) as? Date,
+                selectingStart: object.value(forKey: SessionField.selectingStart) as? Date,
+                endedAt: object.value(forKey: SessionField.endedAt) as? Date,
+                amountCents: intValue(object, key: SessionField.amountCents),
+                shotCount: intValue(object, key: SessionField.shotCount),
+                selectedCount: intValue(object, key: SessionField.selectedCount),
+                reviewNote: object.value(forKey: SessionField.reviewNote) as? String,
+                revision: int64Value(object, key: SessionField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: SessionField.sourceDevice, fallback: "unknown"),
+                isVoided: boolValue(object, key: SessionField.isVoided),
+                isDeleted: boolValue(object, key: SessionField.isDeleted)
+            )
+        }
+    }
+
+    private func fetchShiftRecords() -> [ShiftRecordSnapshot] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.shift)
+        let objects = (try? context.fetch(request)) ?? []
+        let deduped = dedupeObjects(
+            objects,
+            idKey: ShiftField.dayKey,
+            revisionKey: ShiftField.revision,
+            sourceKey: ShiftField.sourceDevice
+        )
+        return deduped.values.compactMap { object in
+            guard let dayKey = object.value(forKey: ShiftField.dayKey) as? String,
+                  !dayKey.isEmpty else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: ShiftField.updatedAt)
+            return ShiftRecordSnapshot(
+                dayKey: dayKey,
+                startAt: object.value(forKey: ShiftField.startAt) as? Date,
+                endAt: object.value(forKey: ShiftField.endAt) as? Date,
+                revision: int64Value(object, key: ShiftField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: ShiftField.sourceDevice, fallback: "unknown")
+            )
+        }
+    }
+
+    private func fetchDayMemos() -> [DayMemoSnapshot] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.memo)
+        let objects = (try? context.fetch(request)) ?? []
+        let deduped = dedupeObjects(
+            objects,
+            idKey: MemoField.dayKey,
+            revisionKey: MemoField.revision,
+            sourceKey: MemoField.sourceDevice
+        )
+        return deduped.values.compactMap { object in
+            guard let dayKey = object.value(forKey: MemoField.dayKey) as? String,
+                  !dayKey.isEmpty else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: MemoField.updatedAt)
+            return DayMemoSnapshot(
+                dayKey: dayKey,
+                text: object.value(forKey: MemoField.text) as? String,
+                revision: int64Value(object, key: MemoField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: MemoField.sourceDevice, fallback: "unknown")
+            )
+        }
+    }
+
+    private func fetchSessionManagedObject(sessionId: String) -> NSManagedObject? {
+        fetchUniqueManagedObject(
+            entityName: EntityName.session,
+            idKey: SessionField.sessionId,
+            idValue: sessionId,
+            revisionKey: SessionField.revision,
+            sourceKey: SessionField.sourceDevice
+        )
+    }
+
+    private func fetchShiftManagedObject(dayKey: String) -> NSManagedObject? {
+        fetchUniqueManagedObject(
+            entityName: EntityName.shift,
+            idKey: ShiftField.dayKey,
+            idValue: dayKey,
+            revisionKey: ShiftField.revision,
+            sourceKey: ShiftField.sourceDevice
+        )
+    }
+
+    private func fetchMemoManagedObject(dayKey: String) -> NSManagedObject? {
+        fetchUniqueManagedObject(
+            entityName: EntityName.memo,
+            idKey: MemoField.dayKey,
+            idValue: dayKey,
+            revisionKey: MemoField.revision,
+            sourceKey: MemoField.sourceDevice
+        )
+    }
+
+    private func fetchUniqueManagedObject(
+        entityName: String,
+        idKey: String,
+        idValue: String,
+        revisionKey: String,
+        sourceKey: String
+    ) -> NSManagedObject? {
+        guard !idValue.isEmpty else { return nil }
+        let request = NSFetchRequest<NSManagedObject>(entityName: entityName)
+        request.predicate = NSPredicate(format: "%K == %@", idKey, idValue)
+        let objects = (try? context.fetch(request)) ?? []
+        guard let winner = selectPreferredObject(objects, revisionKey: revisionKey, sourceKey: sourceKey) else {
+            return nil
+        }
+        for object in objects where object != winner {
+            context.delete(object)
+        }
+        return winner
+    }
+
+    private func dedupeObjects(
+        _ objects: [NSManagedObject],
+        idKey: String,
+        revisionKey: String,
+        sourceKey: String
+    ) -> [String: NSManagedObject] {
+        var winners: [String: NSManagedObject] = [:]
+        var revisions: [String: Int64] = [:]
+        var sources: [String: String] = [:]
+        for object in objects {
+            guard let id = object.value(forKey: idKey) as? String, !id.isEmpty else { continue }
+            let revision = int64Value(object, key: revisionKey)
+            let source = stringValue(object, key: sourceKey, fallback: "unknown")
+            if let existingRevision = revisions[id], let existingSource = sources[id] {
+                if shouldApply(
+                    incomingRevision: revision,
+                    incomingSource: source,
+                    existingRevision: existingRevision,
+                    existingSource: existingSource
+                ) {
+                    winners[id] = object
+                    revisions[id] = revision
+                    sources[id] = source
+                }
+            } else {
+                winners[id] = object
+                revisions[id] = revision
+                sources[id] = source
+            }
+        }
+        return winners
+    }
+
+    private func selectPreferredObject(
+        _ objects: [NSManagedObject],
+        revisionKey: String,
+        sourceKey: String
+    ) -> NSManagedObject? {
+        var winner: NSManagedObject?
+        var winnerRevision: Int64 = 0
+        var winnerSource: String = "unknown"
+        for object in objects {
+            let revision = int64Value(object, key: revisionKey)
+            let source = stringValue(object, key: sourceKey, fallback: "unknown")
+            if winner == nil {
+                winner = object
+                winnerRevision = revision
+                winnerSource = source
+                continue
+            }
+            if shouldApply(
+                incomingRevision: revision,
+                incomingSource: source,
+                existingRevision: winnerRevision,
+                existingSource: winnerSource
+            ) {
+                winner = object
+                winnerRevision = revision
+                winnerSource = source
+            }
+        }
+        return winner
+    }
+
+    private func nextRevision(existing: Int64) -> Int64 {
+        let candidate = Int64(Date().timeIntervalSince1970 * 1000)
+        return max(candidate, existing + 1)
+    }
+
+    private func shouldApply(
+        incomingRevision: Int64,
+        incomingSource: String,
+        existingRevision: Int64,
+        existingSource: String
+    ) -> Bool {
+        if incomingRevision > existingRevision {
+            return true
+        }
+        if incomingRevision < existingRevision {
+            return false
+        }
+        return sourcePriority(incomingSource) >= sourcePriority(existingSource)
+    }
+
+    private func sourcePriority(_ source: String) -> Int {
+        switch source {
+        case "phone":
+            return 3
+        case "ipad":
+            return 2
+        case "watch":
+            return 1
+        default:
+            return 0
+        }
+    }
+
+    private func int64Value(_ object: NSManagedObject?, key: String) -> Int64 {
+        guard let object else { return 0 }
+        if let value = object.value(forKey: key) as? Int64 {
+            return value
+        }
+        if let value = object.value(forKey: key) as? NSNumber {
+            return value.int64Value
+        }
+        return 0
+    }
+
+    private func intValue(_ object: NSManagedObject?, key: String) -> Int? {
+        guard let object else { return nil }
+        if let value = object.value(forKey: key) as? Int {
+            return value
+        }
+        if let value = object.value(forKey: key) as? NSNumber {
+            return value.intValue
+        }
+        return nil
+    }
+
+    private func doubleValue(_ object: NSManagedObject?, key: String) -> Double {
+        guard let object else { return 0 }
+        if let value = object.value(forKey: key) as? Double {
+            return value
+        }
+        if let value = object.value(forKey: key) as? NSNumber {
+            return value.doubleValue
+        }
+        return 0
+    }
+
+    private func boolValue(_ object: NSManagedObject?, key: String) -> Bool {
+        guard let object else { return false }
+        if let value = object.value(forKey: key) as? Bool {
+            return value
+        }
+        if let value = object.value(forKey: key) as? NSNumber {
+            return value.boolValue
+        }
+        return false
+    }
+
+    private func stringValue(_ object: NSManagedObject?, key: String, fallback: String) -> String {
+        guard let object else { return fallback }
+        return (object.value(forKey: key) as? String) ?? fallback
+    }
+
+    private static func deviceSource() -> String {
+        UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "phone"
+    }
+
+    private static func storeURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let root = base?.appendingPathComponent("PhotoFlow", isDirectory: true) ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root.appendingPathComponent("PhotoFlowCloud.sqlite")
+    }
+
+    private static func makeContainer() -> (
+        container: NSPersistentCloudKitContainer,
+        cloudEnabled: Bool,
+        storeCloudEnabled: Bool,
+        loadError: Error?
+    ) {
+        let model = makeModel()
+        let container = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
+        let description = NSPersistentStoreDescription(url: storeURL())
+        description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
+            containerIdentifier: cloudContainerIdentifier
+        )
+        description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+        description.shouldMigrateStoreAutomatically = true
+        description.shouldInferMappingModelAutomatically = true
+        container.persistentStoreDescriptions = [description]
+        let cloudLoad = loadStores(container: container)
+        if cloudLoad.success {
+            return (container, true, true, cloudLoad.error)
+        }
+        let fallback = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
+        let fallbackDescription = NSPersistentStoreDescription(url: storeURL())
+        fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+        fallbackDescription.shouldMigrateStoreAutomatically = true
+        fallbackDescription.shouldInferMappingModelAutomatically = true
+        fallback.persistentStoreDescriptions = [fallbackDescription]
+        let fallbackLoad = loadStores(container: fallback)
+        if !fallbackLoad.success {
+            print("CloudDataStore fallback load failed.")
+        }
+        return (fallback, false, false, cloudLoad.error ?? fallbackLoad.error)
+    }
+
+    private static func loadStores(container: NSPersistentCloudKitContainer) -> (success: Bool, error: Error?) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var loadError: Error?
+        DispatchQueue.global(qos: .userInitiated).async {
+            container.loadPersistentStores { _, error in
+                loadError = error
+                semaphore.signal()
+            }
+        }
+        let result = semaphore.wait(timeout: .now() + 30)
+        if result == .timedOut {
+            let timeoutError = NSError(
+                domain: "CloudDataStore",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "load timed out"]
+            )
+            print("CloudDataStore load timed out.")
+            return (false, timeoutError)
+        }
+        if let error = loadError {
+            print("CloudDataStore load failed: \(error.localizedDescription)")
+            return (false, error)
+        }
+        return (true, nil)
+    }
+
+    private static func makeModel() -> NSManagedObjectModel {
+        let model = NSManagedObjectModel()
+        let session = NSEntityDescription()
+        session.name = EntityName.session
+        session.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        session.properties = [
+            attribute(SessionField.sessionId, type: .stringAttributeType, optional: true),
+            attribute(SessionField.stage, type: .stringAttributeType, defaultValue: Self.defaultStage),
+            attribute(SessionField.shootingStart, type: .dateAttributeType, optional: true),
+            attribute(SessionField.selectingStart, type: .dateAttributeType, optional: true),
+            attribute(SessionField.endedAt, type: .dateAttributeType, optional: true),
+            attribute(SessionField.amountCents, type: .integer64AttributeType, optional: true),
+            attribute(SessionField.shotCount, type: .integer64AttributeType, optional: true),
+            attribute(SessionField.selectedCount, type: .integer64AttributeType, optional: true),
+            attribute(SessionField.reviewNote, type: .stringAttributeType, optional: true),
+            attribute(SessionField.revision, type: .integer64AttributeType, defaultValue: 0),
+            attribute(SessionField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(SessionField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown"),
+            attribute(SessionField.isVoided, type: .booleanAttributeType, defaultValue: false),
+            attribute(SessionField.isDeleted, type: .booleanAttributeType, defaultValue: false)
+        ]
+
+        let shift = NSEntityDescription()
+        shift.name = EntityName.shift
+        shift.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        shift.properties = [
+            attribute(ShiftField.dayKey, type: .stringAttributeType, optional: true),
+            attribute(ShiftField.startAt, type: .dateAttributeType, optional: true),
+            attribute(ShiftField.endAt, type: .dateAttributeType, optional: true),
+            attribute(ShiftField.revision, type: .integer64AttributeType, defaultValue: 0),
+            attribute(ShiftField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(ShiftField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
+        ]
+
+        let memo = NSEntityDescription()
+        memo.name = EntityName.memo
+        memo.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        memo.properties = [
+            attribute(MemoField.dayKey, type: .stringAttributeType, optional: true),
+            attribute(MemoField.text, type: .stringAttributeType, optional: true),
+            attribute(MemoField.revision, type: .integer64AttributeType, defaultValue: 0),
+            attribute(MemoField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(MemoField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
+        ]
+
+        model.entities = [session, shift, memo]
+        return model
+    }
+
+    private static func attribute(
+        _ name: String,
+        type: NSAttributeType,
+        optional: Bool = false,
+        defaultValue: Any? = nil
+    ) -> NSAttributeDescription {
+        let attribute = NSAttributeDescription()
+        attribute.name = name
+        attribute.attributeType = type
+        attribute.isOptional = optional
+        attribute.defaultValue = defaultValue
+        return attribute
+    }
+}
+
+@MainActor
+final class SessionMetaStore: ObservableObject {
+    @Published private(set) var metas: [String: SessionMeta] = [:]
+    private let cloudStore: CloudDataStore
+    private var cancellables: Set<AnyCancellable> = []
+
+    init(cloudStore: CloudDataStore) {
+        self.cloudStore = cloudStore
+        apply(records: cloudStore.sessionRecords)
+        cloudStore.$sessionRecords
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records in
+                self?.apply(records: records)
+            }
+            .store(in: &cancellables)
     }
 
     func meta(for id: String) -> SessionMeta {
@@ -549,25 +1593,23 @@ final class SessionMetaStore: ObservableObject {
     }
 
     func update(_ meta: SessionMeta, for id: String) {
-        if meta.isEmpty {
-            metas.removeValue(forKey: id)
-        } else {
-            metas[id] = meta
-        }
-        save()
+        cloudStore.updateSessionMeta(sessionId: id, meta: meta)
     }
 
-    private func load() {
-        guard let data = defaults.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([String: SessionMeta].self, from: data) else {
-            return
+    private func apply(records: [CloudDataStore.SessionRecord]) {
+        var mapped: [String: SessionMeta] = [:]
+        for record in records {
+            let meta = SessionMeta(
+                amountCents: record.amountCents,
+                shotCount: record.shotCount,
+                selectedCount: record.selectedCount,
+                reviewNote: record.reviewNote
+            )
+            if !meta.isEmpty {
+                mapped[record.id] = meta
+            }
         }
-        metas = decoded
-    }
-
-    private func save() {
-        guard let data = try? JSONEncoder().encode(metas) else { return }
-        defaults.set(data, forKey: storageKey)
+        metas = mapped
     }
 }
 
@@ -666,19 +1708,26 @@ struct ShiftRecord: Codable, Equatable {
 @MainActor
 final class ShiftRecordStore: ObservableObject {
     @Published private(set) var records: [String: ShiftRecord] = [:]
-    private let storageKey = "pf_shift_records_v1"
-    private let defaults = UserDefaults.standard
+    private let cloudStore: CloudDataStore
+    private var cancellables: Set<AnyCancellable> = []
     private let calendar: Calendar
     private let formatter: DateFormatter
 
-    init() {
+    init(cloudStore: CloudDataStore) {
+        self.cloudStore = cloudStore
         calendar = Calendar(identifier: .iso8601)
         formatter = DateFormatter()
         formatter.calendar = calendar
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
-        load()
+        apply(records: cloudStore.shiftRecords)
+        cloudStore.$shiftRecords
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records in
+                self?.apply(records: records)
+            }
+            .store(in: &cancellables)
     }
 
     func dayKey(for date: Date) -> String {
@@ -691,11 +1740,10 @@ final class ShiftRecordStore: ObservableObject {
 
     func upsert(_ record: ShiftRecord, for key: String) {
         if record.isEmpty {
-            records.removeValue(forKey: key)
+            cloudStore.upsertShiftRecord(dayKey: key, startAt: nil, endAt: nil)
         } else {
-            records[key] = record
+            cloudStore.upsertShiftRecord(dayKey: key, startAt: record.startAt, endAt: record.endAt)
         }
-        save()
     }
 
     func setStartIfNeeded(_ start: Date, for key: String) {
@@ -726,35 +1774,40 @@ final class ShiftRecordStore: ObservableObject {
         upsert(record, for: key)
     }
 
-    private func load() {
-        guard let data = defaults.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([String: ShiftRecord].self, from: data) else {
-            return
+    private func apply(records: [String: CloudDataStore.ShiftRecordSnapshot]) {
+        var mapped: [String: ShiftRecord] = [:]
+        for (key, record) in records {
+            let value = ShiftRecord(startAt: record.startAt, endAt: record.endAt)
+            if !value.isEmpty {
+                mapped[key] = value
+            }
         }
-        records = decoded
-    }
-
-    private func save() {
-        guard let data = try? JSONEncoder().encode(records) else { return }
-        defaults.set(data, forKey: storageKey)
+        self.records = mapped
     }
 }
 
 @MainActor
 final class DailyMemoStore: ObservableObject {
     @Published private(set) var memos: [String: String] = [:]
-    private let storageKey = "pf_daily_memos_v1"
-    private let defaults = UserDefaults.standard
+    private let cloudStore: CloudDataStore
+    private var cancellables: Set<AnyCancellable> = []
     private let formatter: DateFormatter
 
-    init() {
+    init(cloudStore: CloudDataStore) {
+        self.cloudStore = cloudStore
         let calendar = Calendar(identifier: .iso8601)
         formatter = DateFormatter()
         formatter.calendar = calendar
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "yyyy-MM-dd"
-        load()
+        apply(records: cloudStore.dayMemos)
+        cloudStore.$dayMemos
+            .receive(on: RunLoop.main)
+            .sink { [weak self] memos in
+                self?.apply(records: memos)
+            }
+            .store(in: &cancellables)
     }
 
     func dayKey(for date: Date) -> String {
@@ -768,24 +1821,20 @@ final class DailyMemoStore: ObservableObject {
     func setMemo(_ memo: String, for key: String) {
         let trimmed = memo.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            memos.removeValue(forKey: key)
+            cloudStore.upsertDayMemo(dayKey: key, text: nil)
         } else {
-            memos[key] = memo
+            cloudStore.upsertDayMemo(dayKey: key, text: memo)
         }
-        save()
     }
 
-    private func load() {
-        guard let data = defaults.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
-            return
+    private func apply(records: [String: CloudDataStore.DayMemoSnapshot]) {
+        var mapped: [String: String] = [:]
+        for (key, memo) in records {
+            if let text = memo.text, !text.isEmpty {
+                mapped[key] = text
+            }
         }
-        memos = decoded
-    }
-
-    private func save() {
-        guard let data = try? JSONEncoder().encode(memos) else { return }
-        defaults.set(data, forKey: storageKey)
+        memos = mapped
     }
 }
 
@@ -793,12 +1842,18 @@ final class DailyMemoStore: ObservableObject {
 final class SessionVisibilityStore: ObservableObject {
     @Published private(set) var voidedIds: Set<String> = []
     @Published private(set) var deletedIds: Set<String> = []
-    private let voidedKey = "pf_session_voided_v1"
-    private let deletedKey = "pf_session_deleted_v1"
-    private let defaults = UserDefaults.standard
+    private let cloudStore: CloudDataStore
+    private var cancellables: Set<AnyCancellable> = []
 
-    init() {
-        load()
+    init(cloudStore: CloudDataStore) {
+        self.cloudStore = cloudStore
+        apply(records: cloudStore.sessionRecords)
+        cloudStore.$sessionRecords
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records in
+                self?.apply(records: records)
+            }
+            .store(in: &cancellables)
     }
 
     func isVoided(_ id: String) -> Bool {
@@ -811,38 +1866,18 @@ final class SessionVisibilityStore: ObservableObject {
 
     func setVoided(_ id: String, isVoided: Bool) {
         guard !deletedIds.contains(id) else { return }
-        if isVoided {
-            voidedIds.insert(id)
-        } else {
-            voidedIds.remove(id)
-        }
-        save()
+        cloudStore.updateSessionVisibility(sessionId: id, isVoided: isVoided)
     }
 
     func markDeleted(_ id: String) {
-        deletedIds.insert(id)
-        voidedIds.remove(id)
-        save()
+        cloudStore.updateSessionVisibility(sessionId: id, isVoided: false, isDeleted: true)
     }
 
-    private func load() {
-        if let data = defaults.data(forKey: voidedKey),
-           let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            voidedIds = Set(decoded)
-        }
-        if let data = defaults.data(forKey: deletedKey),
-           let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            deletedIds = Set(decoded)
-        }
-    }
-
-    private func save() {
-        if let data = try? JSONEncoder().encode(Array(voidedIds)) {
-            defaults.set(data, forKey: voidedKey)
-        }
-        if let data = try? JSONEncoder().encode(Array(deletedIds)) {
-            defaults.set(data, forKey: deletedKey)
-        }
+    private func apply(records: [CloudDataStore.SessionRecord]) {
+        let voided = records.filter { $0.isVoided }.map(\.id)
+        let deleted = records.filter { $0.isDeleted }.map(\.id)
+        voidedIds = Set(voided)
+        deletedIds = Set(deleted)
     }
 }
 
@@ -944,6 +1979,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
+    @StateObject private var cloudStore: CloudDataStore
     @StateObject private var metaStore: SessionMetaStore
     @StateObject private var timeOverrideStore: SessionTimeOverrideStore
     @StateObject private var manualSessionStore: ManualSessionStore
@@ -979,6 +2015,11 @@ struct ContentView: View {
     @State private var isReviewDigestPresented = false
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
+    @State private var selectedIpadSessionId: String?
+    @AppStorage("pf_debug_mode_enabled") private var debugModeEnabled = false
+    @State private var debugTapCount = 0
+    @State private var lastDebugTapAt: Date?
+    @State private var showIpadSyncDebug = false
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -987,13 +2028,15 @@ struct ContentView: View {
 
     init(syncStore: WatchSyncStore) {
         self.syncStore = syncStore
-        _metaStore = StateObject(wrappedValue: SessionMetaStore())
+        let cloud = CloudDataStore()
+        _cloudStore = StateObject(wrappedValue: cloud)
+        _metaStore = StateObject(wrappedValue: SessionMetaStore(cloudStore: cloud))
         _timeOverrideStore = StateObject(wrappedValue: SessionTimeOverrideStore())
         _manualSessionStore = StateObject(wrappedValue: ManualSessionStore())
-        let shiftStore = ShiftRecordStore()
+        let shiftStore = ShiftRecordStore(cloudStore: cloud)
         _shiftRecordStore = StateObject(wrappedValue: shiftStore)
-        _dailyMemoStore = StateObject(wrappedValue: DailyMemoStore())
-        _sessionVisibilityStore = StateObject(wrappedValue: SessionVisibilityStore())
+        _dailyMemoStore = StateObject(wrappedValue: DailyMemoStore(cloudStore: cloud))
+        _sessionVisibilityStore = StateObject(wrappedValue: SessionVisibilityStore(cloudStore: cloud))
         let defaults = UserDefaults.standard
         let start = defaults.object(forKey: "pf_shift_start") as? Date
         let end = defaults.object(forKey: "pf_shift_end") as? Date
@@ -1003,6 +2046,9 @@ struct ContentView: View {
     }
 
     var body: some View {
+        if isReadOnlyDevice {
+            ipadSyncView
+        } else {
         ZStack {
             if selectedTab == .home {
                 homeView
@@ -1054,6 +2100,9 @@ struct ContentView: View {
         .sheet(isPresented: $isManualSessionPresented) {
             manualSessionEditor
         }
+        .sheet(isPresented: $showIpadSyncDebug) {
+            ipadSyncView
+        }
         .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
@@ -1062,6 +2111,16 @@ struct ContentView: View {
         .onReceive(syncStore.$incomingCanonicalState) { state in
             guard let state else { return }
             applyCanonicalState(state, shouldPrompt: false)
+        }
+        .onReceive(cloudStore.$sessionRecords) { records in
+            syncSessionSummaries(from: records)
+        }
+        .onReceive(dailyMemoStore.$memos) { memos in
+            let dayKey = dailyMemoStore.dayKey(for: now)
+            let latest = memos[dayKey] ?? ""
+            if latest != memoDraft {
+                memoDraft = latest
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -1078,6 +2137,22 @@ struct ContentView: View {
                 syncStageState(now: now)
             }
         }
+        }
+    }
+
+    private func syncSessionSummaries(from records: [CloudDataStore.SessionRecord]) {
+        let summaries = records
+            .filter { !$0.isDeleted }
+            .filter { $0.shootingStart != nil || $0.selectingStart != nil || $0.endedAt != nil }
+            .map { record in
+                SessionSummary(
+                    id: record.id,
+                    shootingStart: record.shootingStart,
+                    selectingStart: record.selectingStart,
+                    endedAt: record.endedAt
+                )
+            }
+        sessionSummaries = summaries
     }
 
     private var effectiveSessionSummaries: [SessionSummary] {
@@ -1120,6 +2195,431 @@ struct ContentView: View {
 
     private func effectiveSessionSortKey(for summary: SessionSummary) -> Date {
         effectiveSessionStartTime(for: summary) ?? Date.distantPast
+    }
+
+    private var ipadSyncView: some View {
+        let sessions = cloudStore.sessionRecords
+            .filter { !$0.isDeleted && !$0.isVoided }
+            .sorted { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
+        let sessionIds = sessions.map(\.id)
+        let selectedRecord = sessions.first { $0.id == selectedIpadSessionId } ?? sessions.first
+        return NavigationSplitView {
+            List(sessions, selection: $selectedIpadSessionId) { record in
+                ipadSessionRow(record: record)
+                    .tag(record.id)
+            }
+            .listStyle(.sidebar)
+            .navigationTitle("会话列表")
+        } detail: {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ipadStatsDashboard(records: sessions)
+                    Divider()
+                    if sessions.isEmpty {
+                        Text("暂无会话")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if let record = selectedRecord {
+                        ipadSessionDetail(record: record)
+                    } else {
+                        Text("请选择会话")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ipadCloudStatusView
+                    if shouldShowDebugControls {
+                        ipadCloudDebugPanel(records: sessions)
+                    }
+                    ipadBuildFingerprintFooter
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+            }
+            .navigationTitle("iPad Sync")
+        }
+        .onAppear {
+            if selectedIpadSessionId == nil {
+                selectedIpadSessionId = sessions.first?.id
+            }
+        }
+        .onChange(of: sessionIds) { _, newIds in
+            if let selected = selectedIpadSessionId, newIds.contains(selected) {
+                return
+            }
+            selectedIpadSessionId = newIds.first
+        }
+    }
+
+    private struct IpadStatsSnapshot {
+        let count: Int
+        let totalDuration: TimeInterval
+        let revenueCents: Int
+        let hasRevenue: Bool
+        let rphText: String
+    }
+
+    private func ipadStatsSnapshot(
+        for range: StatsRange,
+        records: [CloudDataStore.SessionRecord]
+    ) -> IpadStatsSnapshot {
+        let isoCal = Calendar(identifier: .iso8601)
+        let filtered = records.filter { record in
+            guard let shootingStart = record.shootingStart else { return false }
+            switch range {
+            case .today:
+                return isoCal.isDateInToday(shootingStart)
+            case .week:
+                guard let interval = isoCal.dateInterval(of: .weekOfYear, for: now) else { return false }
+                return interval.contains(shootingStart)
+            case .month:
+                guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
+                return interval.contains(shootingStart)
+            }
+        }
+        let totals = filtered.reduce(into: (duration: TimeInterval(0), revenue: 0, hasRevenue: false)) { result, record in
+            result.duration += cloudSessionDurations(for: record).total
+            if let amount = record.amountCents {
+                result.revenue += amount
+                result.hasRevenue = true
+            }
+        }
+        let rphText: String = {
+            guard totals.hasRevenue, totals.duration > 0 else { return "--" }
+            let revenue = Double(totals.revenue) / 100
+            let hours = totals.duration / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        return IpadStatsSnapshot(
+            count: filtered.count,
+            totalDuration: totals.duration,
+            revenueCents: totals.revenue,
+            hasRevenue: totals.hasRevenue,
+            rphText: rphText
+        )
+    }
+
+    private func ipadStatsDashboard(records: [CloudDataStore.SessionRecord]) -> some View {
+        let columns = [GridItem(.flexible()), GridItem(.flexible())]
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("统计看板")
+                .font(.headline)
+            ForEach(StatsRange.allCases, id: \.self) { range in
+                let stats = ipadStatsSnapshot(for: range, records: records)
+                let revenueText = stats.hasRevenue ? formatAmount(cents: stats.revenueCents) : "--"
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(range.title)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                        ipadStatItem(title: "收入", value: revenueText)
+                        ipadStatItem(title: "单数", value: "\(stats.count)")
+                        ipadStatItem(title: "总时长", value: format(stats.totalDuration))
+                        ipadStatItem(title: "RPH", value: stats.rphText)
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private func ipadStatItem(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .monospacedDigit()
+        }
+    }
+
+    private var ipadCloudStatusView: some View {
+        let syncText = cloudStore.lastCloudSyncAt.map(formatSessionTimeWithSeconds) ?? "--"
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("lastCloudSyncAt \(syncText)")
+            Text("pendingCount \(cloudStore.pendingCount) · lastRevision \(cloudStore.lastRevision)")
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
+        .onTapGesture {
+            registerDebugTap()
+        }
+    }
+
+    private var ipadBuildFingerprintFooter: some View {
+        Text("buildFingerprint: \(buildFingerprintText)")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+    }
+
+    private func ipadCloudDebugPanel(records: [CloudDataStore.SessionRecord]) -> some View {
+        let memoPrefix = CloudDataStore.cloudTestMemoPrefix
+        let testMemos = cloudStore.dayMemos.values
+            .filter { ($0.text ?? "").contains(memoPrefix) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        let testSessions = records.filter { $0.id.hasPrefix(CloudDataStore.cloudTestSessionPrefix) }
+        let bundleId = Bundle.main.bundleIdentifier ?? "unknown"
+        let storeCloudEnabledText = cloudStore.storeCloudEnabled ? "true" : "false"
+        let cloudLoadEnabledText = cloudStore.isCloudEnabled ? "true" : "false"
+        let accountStatusText = cloudStore.cloudAccountStatus
+        let storeLoadErrorText = cloudStore.storeLoadError ?? "—"
+        let cloudSyncErrorText = cloudStore.cloudSyncError ?? "—"
+        let lastCloudErrorText = cloudStore.lastCloudError ?? "—"
+        let refreshStatusText = cloudStore.lastRefreshStatus
+        let refreshErrorText = cloudStore.lastRefreshError ?? "—"
+        let cloudMemoCountText = cloudStore.cloudTestMemoCount.map(String.init) ?? "--"
+        let cloudSessionCountText = cloudStore.cloudTestSessionCount.map(String.init) ?? "--"
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Debug Cloud Test")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Force Cloud Refresh") {
+                Task {
+                    await cloudStore.forceCloudRefreshAsync()
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(cloudStore.isRefreshing)
+
+            Button("Reset Local Store") {
+                Task {
+                    await cloudStore.resetLocalStoreAsync()
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(cloudStore.isRefreshing)
+
+            if cloudStore.isRefreshing {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Refreshing...")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if !isReadOnlyDevice {
+                HStack(spacing: 8) {
+                    Button("Create Cloud Test Memo") {
+                        createCloudTestMemo()
+                    }
+                    Button("Create Cloud Test Session") {
+                        createCloudTestSession()
+                    }
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Text("iPad 只读：请在 iPhone 端创建测试记录")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if testMemos.isEmpty {
+                Text("No cloud-test-memo")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(testMemos.prefix(3), id: \.dayKey) { memo in
+                    let text = memo.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    Text("\(memo.dayKey) · \(text)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            if testSessions.isEmpty {
+                Text("No cloud-test-session")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("cloud-test-session ×\(testSessions.count)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("buildFingerprint: \(buildFingerprintText)")
+                Text("bundleId: \(bundleId)")
+                Text("cloudKitContainerIdentifier: \(CloudDataStore.cloudContainerIdentifier)")
+                Text("storeCloudEnabled: \(storeCloudEnabledText)")
+                Text("cloudLoadEnabled: \(cloudLoadEnabledText)")
+                Text("CKAccountStatus: \(accountStatusText)")
+                Text("storeLoadError: \(storeLoadErrorText)")
+                Text("cloudSyncError: \(cloudSyncErrorText)")
+                Text("lastCloudError: \(lastCloudErrorText)")
+                Text("refreshStatus: \(refreshStatusText)")
+                Text("refreshError: \(refreshErrorText)")
+                Text("localCounts: memo \(testMemos.count) · session \(testSessions.count)")
+                Text("cloudCounts: memo \(cloudMemoCountText) · session \(cloudSessionCountText)")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func cloudSessionDurations(
+        for record: CloudDataStore.SessionRecord
+    ) -> (total: TimeInterval, shooting: TimeInterval, selecting: TimeInterval?) {
+        guard let shootingStart = record.shootingStart else {
+            return (0, 0, nil)
+        }
+        let endTime = record.endedAt ?? now
+        let total = max(0, endTime.timeIntervalSince(shootingStart))
+
+        let shooting: TimeInterval
+        if let selectingStart = record.selectingStart {
+            shooting = max(0, selectingStart.timeIntervalSince(shootingStart))
+        } else if let endedAt = record.endedAt {
+            shooting = max(0, endedAt.timeIntervalSince(shootingStart))
+        } else {
+            shooting = max(0, now.timeIntervalSince(shootingStart))
+        }
+
+        let selecting: TimeInterval?
+        if let selectingStart = record.selectingStart {
+            let selectingEnd = record.endedAt ?? now
+            selecting = max(0, selectingEnd.timeIntervalSince(selectingStart))
+        } else {
+            selecting = nil
+        }
+
+        return (total, shooting, selecting)
+    }
+
+    private func sessionStart(for record: CloudDataStore.SessionRecord) -> Date? {
+        [record.shootingStart, record.selectingStart, record.endedAt].compactMap { $0 }.min()
+    }
+
+    private func sessionSortKey(for record: CloudDataStore.SessionRecord) -> Date {
+        sessionStart(for: record) ?? record.updatedAt
+    }
+
+    private func stageLabel(for stage: String) -> String {
+        switch stage {
+        case WatchSyncStore.StageSyncKey.stageShooting:
+            return "拍摄中"
+        case WatchSyncStore.StageSyncKey.stageSelecting:
+            return "选片中"
+        case WatchSyncStore.StageSyncKey.stageStopped:
+            return "已结束"
+        default:
+            return stage
+        }
+    }
+
+    private func shiftTimeText(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        return formatSessionTime(date)
+    }
+
+    private func ipadSessionRow(record: CloudDataStore.SessionRecord) -> some View {
+        let timeText = sessionStart(for: record).map(formatSessionTime) ?? "--"
+        let amountText = record.amountCents.map { formatAmount(cents: $0) } ?? "--"
+        var counts: [String] = []
+        if let shotCount = record.shotCount {
+            counts.append("拍\(shotCount)")
+        }
+        if let selectedCount = record.selectedCount {
+            counts.append("选\(selectedCount)")
+        }
+        let countsText = counts.joined(separator: " · ")
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(timeText)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .monospacedDigit()
+                    Text(stageLabel(for: record.stage))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Text(amountText)
+                    .font(.headline)
+                    .monospacedDigit()
+            }
+            if !countsText.isEmpty {
+                Text(countsText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let note = record.reviewNote, !note.isEmpty {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    private func ipadSessionDetail(record: CloudDataStore.SessionRecord) -> some View {
+        let amountText = record.amountCents.map { formatAmount(cents: $0) } ?? "—"
+        let shotText = record.shotCount.map(String.init) ?? "—"
+        let selectedText = record.selectedCount.map(String.init) ?? "—"
+        let noteText = record.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("会话详情")
+                .font(.headline)
+            GroupBox("基础") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ID: \(record.id)")
+                        .font(.caption)
+                    Text("阶段: \(stageLabel(for: record.stage))")
+                        .font(.caption)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("时间") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("拍摄开始: \(shiftTimeText(record.shootingStart))")
+                    Text("选片开始: \(shiftTimeText(record.selectingStart))")
+                    Text("结束: \(shiftTimeText(record.endedAt))")
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("结算") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("金额: \(amountText)")
+                    Text("拍摄: \(shotText)")
+                    Text("选片: \(selectedText)")
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("备注") {
+                Text(noteText?.isEmpty == false ? noteText ?? "" : "—")
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("同步") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("revision: \(record.revision)")
+                    Text("updatedAt: \(formatSessionTimeWithSeconds(record.updatedAt))")
+                    Text("source: \(record.sourceDevice)")
+                    Text("voided: \(record.isVoided ? "yes" : "no")")
+                    Text("deleted: \(record.isDeleted ? "yes" : "no")")
+                }
+                .font(.caption2)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     private var homeView: some View {
@@ -1203,45 +2703,7 @@ struct ContentView: View {
                                 }
                             }
                         }
-#if DEBUG
-                        Button(action: { showDebugPanel.toggle() }) {
-                            Text("Debug")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, 8)
-                        .opacity(0.4)
-
-                        if showDebugPanel {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("lastSentPayload")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text(syncStore.debugLastSentPayload)
-                                    .font(.caption2)
-                                    .textSelection(.enabled)
-
-                                Text("lastSyncAt / pending / lastRevision")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text("\(formatDebugSyncTime(syncStore.lastSyncAt)) · \(syncStore.pendingEventCount) · \(syncStore.lastRevision)")
-                                    .font(.caption2)
-                                    .textSelection(.enabled)
-
-                                Text("sessionStatus")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text(syncStore.debugSessionStatus)
-                                    .font(.caption2)
-                                    .textSelection(.enabled)
-                            }
-                            .padding(8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.thinMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                        }
-#endif
+                        homeDebugFooter
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1263,6 +2725,9 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(Self.homeDateFormatter.string(from: now))
                 .font(.headline)
+                .onTapGesture {
+                    registerDebugTap()
+                }
             todayBanner
             memoEditor
         }
@@ -1299,6 +2764,86 @@ struct ContentView: View {
         }
     }
 
+    private var homeDebugFooter: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+#if DEBUG
+                Button("Debug: Open iPad Sync") {
+                    showIpadSyncDebug = true
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .padding(.vertical, 4)
+
+                Button(showDebugPanel ? "Debug: Hide Details" : "Debug: Show Details") {
+                    showDebugPanel.toggle()
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .padding(.vertical, 4)
+#endif
+                Spacer(minLength: 8)
+                Text(buildFingerprintText)
+                    .monospacedDigit()
+            }
+
+            if debugModeEnabled && !isReadOnlyDevice && !isDebugBuild {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Debug Mode")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Open iPad Sync") {
+                            showIpadSyncDebug = true
+                        }
+                        Button("Create Cloud Test Memo") {
+                            createCloudTestMemo()
+                        }
+                        Button("Create Cloud Test Session") {
+                            createCloudTestSession()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
+#if DEBUG
+            if showDebugPanel {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("lastSentPayload")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugLastSentPayload)
+                        .font(.caption2)
+                        .textSelection(.enabled)
+
+                    Text("lastSyncAt / pending / lastRevision")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("\(formatDebugSyncTime(syncStore.lastSyncAt)) · \(syncStore.pendingEventCount) · \(syncStore.lastRevision)")
+                        .font(.caption2)
+                        .textSelection(.enabled)
+
+                    Text("sessionStatus")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugSessionStatus)
+                        .font(.caption2)
+                        .textSelection(.enabled)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.thinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+#endif
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(.top, 8)
+        .opacity(0.6)
+    }
+
     private func isSessionVisible(_ id: String) -> Bool {
         !sessionVisibilityStore.isDeleted(id) && !sessionVisibilityStore.isVoided(id)
     }
@@ -1319,6 +2864,7 @@ struct ContentView: View {
         manualSessionStore.remove(id)
         sessionSummaries.removeAll { $0.id == id }
     }
+
 
     private func sessionDetailView(summary: SessionSummary, order: Int) -> some View {
         let meta = metaStore.meta(for: summary.id)
@@ -1519,6 +3065,13 @@ struct ContentView: View {
             reviewNote: normalizedNote(from: draftManualReviewNote)
         )
         metaStore.update(meta, for: sessionId)
+        cloudStore.upsertSessionTiming(
+            sessionId: sessionId,
+            stage: WatchSyncStore.StageSyncKey.stageStopped,
+            shootingStart: manual.shootingStart,
+            selectingStart: manual.selectingStart,
+            endedAt: manual.endedAt
+        )
         isManualSessionPresented = false
     }
 
@@ -2219,6 +3772,32 @@ struct ContentView: View {
         UIDevice.current.userInterfaceIdiom == .pad
     }
 
+    private var isDebugBuild: Bool {
+#if DEBUG
+        return true
+#else
+        return false
+#endif
+    }
+
+    private var shouldShowDebugControls: Bool {
+        debugModeEnabled
+    }
+
+    private var buildFingerprintText: String {
+        let info = Bundle.main.infoDictionary
+        let shortVersion = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let buildNumber = info?["CFBundleVersion"] as? String ?? "?"
+        let rawHash = (info?["GitHash"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let shortHash = rawHash.isEmpty ? nil : String(rawHash.prefix(7))
+        let versionText = "v\(shortVersion) (\(buildNumber))"
+        let buildLabel = isDebugBuild ? "BUILD=DEBUG" : "BUILD=RELEASE"
+        if let shortHash {
+            return "\(buildLabel) · \(versionText) · \(shortHash)"
+        }
+        return "\(buildLabel) · \(versionText)"
+    }
+
     private var effectiveOnDuty: Bool {
         if isReadOnlyDevice {
             return stage != .idle
@@ -2403,6 +3982,17 @@ struct ContentView: View {
         let resolvedSelectingStart = state.selectingStart ?? (stageValue == WatchSyncStore.StageSyncKey.stageSelecting ? state.updatedAt : nil)
         let resolvedEndedAt = state.endedAt ?? (stageValue == WatchSyncStore.StageSyncKey.stageStopped && resolvedShootingStart != nil ? state.updatedAt : nil)
 
+        cloudStore.upsertSessionTiming(
+            sessionId: state.sessionId,
+            stage: state.stage,
+            shootingStart: resolvedShootingStart,
+            selectingStart: resolvedSelectingStart,
+            endedAt: resolvedEndedAt,
+            revision: state.revision,
+            updatedAt: state.updatedAt,
+            sourceDevice: state.sourceDevice
+        )
+
         switch stageValue {
         case WatchSyncStore.StageSyncKey.stageShooting:
             stage = .shooting
@@ -2511,6 +4101,50 @@ struct ContentView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "H:mm:ss"
         return formatter.string(from: date)
+    }
+
+    private func registerDebugTap() {
+        guard !debugModeEnabled else { return }
+        let now = Date()
+        if let lastDebugTapAt, now.timeIntervalSince(lastDebugTapAt) > 1.5 {
+            debugTapCount = 0
+        }
+        debugTapCount += 1
+        lastDebugTapAt = now
+        if debugTapCount >= 7 {
+            debugModeEnabled = true
+            debugTapCount = 0
+        }
+    }
+
+    private func createCloudTestMemo() {
+        let dayKey = dailyMemoStore.dayKey(for: now)
+        let token = shortDebugToken()
+        let text = "\(CloudDataStore.cloudTestMemoPrefix)\(token)"
+        let revision = debugNowMillis()
+        cloudStore.upsertDayMemo(dayKey: dayKey, text: text, revision: revision)
+    }
+
+    private func createCloudTestSession() {
+        let token = shortDebugToken()
+        let sessionId = "\(CloudDataStore.cloudTestSessionPrefix)\(token)"
+        let revision = debugNowMillis()
+        cloudStore.upsertSessionTiming(
+            sessionId: sessionId,
+            stage: WatchSyncStore.StageSyncKey.stageShooting,
+            shootingStart: now,
+            selectingStart: nil,
+            endedAt: nil,
+            revision: revision
+        )
+    }
+
+    private func shortDebugToken() -> String {
+        String(UUID().uuidString.prefix(6)).lowercased()
+    }
+
+    private func debugNowMillis() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
     }
 
     private func updateSessionSummary(for stage: Stage, at timestamp: Date, sessionIdOverride: String? = nil) {
@@ -2926,6 +4560,16 @@ struct ContentView: View {
     private func syncStageState(now: Date, sessionIdOverride: String? = nil) -> WatchSyncStore.CanonicalState {
         let state = makeCanonicalState(now: now, sessionIdOverride: sessionIdOverride)
         syncStore.updateCanonicalState(state, send: true)
+        cloudStore.upsertSessionTiming(
+            sessionId: state.sessionId,
+            stage: state.stage,
+            shootingStart: state.shootingStart,
+            selectingStart: state.selectingStart,
+            endedAt: state.endedAt,
+            revision: state.revision,
+            updatedAt: state.updatedAt,
+            sourceDevice: state.sourceDevice
+        )
         return state
     }
 
