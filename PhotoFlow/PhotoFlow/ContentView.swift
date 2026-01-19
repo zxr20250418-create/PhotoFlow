@@ -919,6 +919,10 @@ final class CloudDataStore: ObservableObject {
         updateRevisionSnapshot()
     }
 
+    func refreshLocalCache() {
+        refreshAll()
+    }
+
     private func updateRevisionSnapshot() {
         let sessionMax = sessionRecords.map(\.revision).max() ?? 0
         let shiftMax = shiftRecords.values.map(\.revision).max() ?? 0
@@ -1920,6 +1924,7 @@ final class SessionVisibilityStore: ObservableObject {
 
     func markDeleted(_ id: String) {
         cloudStore.tombstoneSession(sessionId: id)
+        cloudStore.refreshLocalCache()
     }
 
     private func apply(records: [CloudDataStore.SessionRecord]) {
@@ -2970,6 +2975,7 @@ struct ContentView: View {
                     Text("source: \(record.sourceDevice)")
                     Text("voided: \(record.isVoided ? "yes" : "no")")
                     Text("deleted: \(record.isDeleted ? "yes" : "no")")
+                    Text("build: \(buildFingerprintText)")
                 }
                 .font(.caption2)
                 .monospacedDigit()
@@ -3229,6 +3235,7 @@ struct ContentView: View {
             resetSession()
         }
         sessionVisibilityStore.markDeleted(id)
+        syncSessionSummaries(from: cloudStore.sessionRecords)
         metaStore.update(SessionMeta(), for: id)
         timeOverrideStore.clear(for: id)
         manualSessionStore.remove(id)
@@ -3249,7 +3256,7 @@ struct ContentView: View {
         let revisionText = record.map { String($0.revision) } ?? "--"
         let updatedText = record.map { formatSessionTimeWithSeconds($0.updatedAt) } ?? "--"
         let sourceText = record?.sourceDevice ?? "--"
-        let deletedText = (record?.isDeleted ?? false) ? "yes" : "no"
+        let deletedText = (record?.isDeleted ?? sessionVisibilityStore.isDeleted(summary.id)) ? "yes" : "no"
         let deleteBinding = Binding<Bool>(
             get: { deleteCandidateId == summary.id },
             set: { isPresented in
@@ -3381,6 +3388,13 @@ struct ContentView: View {
                         Text("deleted")
                         Spacer()
                         Text(deletedText)
+                    }
+                    HStack {
+                        Text("build")
+                        Spacer()
+                        Text(buildFingerprintText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
                 .font(.footnote)
@@ -4191,12 +4205,15 @@ struct ContentView: View {
         debugModeEnabled
     }
 
+    private let buildShortHashOverride = "fix158a"
+
     private var buildFingerprintText: String {
         let info = Bundle.main.infoDictionary
         let shortVersion = info?["CFBundleShortVersionString"] as? String ?? "?"
         let buildNumber = info?["CFBundleVersion"] as? String ?? "?"
         let rawHash = (info?["GitHash"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let shortHash = rawHash.isEmpty ? nil : String(rawHash.prefix(7))
+        let overrideHash = buildShortHashOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortHash = rawHash.isEmpty ? (overrideHash.isEmpty ? nil : overrideHash) : String(rawHash.prefix(7))
         let versionText = "v\(shortVersion) (\(buildNumber))"
         let buildLabel = isDebugBuild ? "BUILD=DEBUG" : "BUILD=RELEASE"
         if let shortHash {
