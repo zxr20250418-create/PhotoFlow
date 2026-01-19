@@ -365,8 +365,8 @@ Manual Verification:
 - iPhone 导出 -> iPad 导入后能看到同样记录
 - iPad 导出 -> iPhone 导入后能看到同样记录
 
-## ACTIVE — TC-IOS-IPAD-DAYMEMO-EDIT-V1_1
-Status: ACTIVE
+## DONE — TC-IOS-IPAD-DAYMEMO-EDIT-V1_1
+Status: DONE (merged in PR #146)
 ID: TC-IOS-IPAD-DAYMEMO-EDIT-V1_1
 Title: iPad DayMemo 编辑 V1.1
 AssignedTo: Coordinator1/Codex
@@ -390,8 +390,8 @@ B 联网后 iPhone 端出现更新（允许几十秒）
 C 冲突按 revision 规则合并
 D ios_safe PASS；0 配置改动
 
-## PAUSED — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
-Status: PAUSED (widget complication 仍未修通，避免阻塞主线)
+## ACTIVE — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+Status: ACTIVE
 ID: TC-IOS-WIDGET-COMPLICATION-TIMER-V1
 Title: Widget/Complication 计时实时走（不再卡 00:00）
 AssignedTo: Executor
