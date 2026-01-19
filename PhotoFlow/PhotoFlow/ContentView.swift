@@ -584,9 +584,19 @@ final class CloudDataStore: ObservableObject {
         let sourceDevice: String
     }
 
+    struct StageEventSnapshot: Identifiable, Equatable {
+        let id: String
+        let sessionId: String?
+        let action: String
+        let clientAt: Date
+        let createdAt: Date
+        let sourceDevice: String
+    }
+
     @Published private(set) var sessionRecords: [SessionRecord] = []
     @Published private(set) var shiftRecords: [String: ShiftRecordSnapshot] = [:]
     @Published private(set) var dayMemos: [String: DayMemoSnapshot] = [:]
+    @Published private(set) var stageEvents: [StageEventSnapshot] = []
     @Published private(set) var lastCloudSyncAt: Date?
     @Published private(set) var lastRevision: Int64 = 0
     @Published private(set) var pendingCount: Int = 0
@@ -606,6 +616,7 @@ final class CloudDataStore: ObservableObject {
         static let session = "SessionRecord"
         static let shift = "ShiftRecord"
         static let memo = "DayMemo"
+        static let stageEvent = "StageEvent"
     }
 
     static let cloudContainerIdentifier = "iCloud.com.zhengxinrong.PhotoFlow"
@@ -645,6 +656,15 @@ final class CloudDataStore: ObservableObject {
         static let text = "text"
         static let revision = "revision"
         static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+    }
+
+    private enum StageEventField {
+        static let eventId = "eventId"
+        static let sessionId = "sessionId"
+        static let action = "action"
+        static let clientAt = "clientAt"
+        static let createdAt = "createdAt"
         static let sourceDevice = "sourceDevice"
     }
 
@@ -861,6 +881,57 @@ final class CloudDataStore: ObservableObject {
         saveContext()
     }
 
+    func createStageEvent(
+        sessionId: String?,
+        action: String,
+        clientAt: Date,
+        sourceDevice: String? = nil
+    ) -> StageEventSnapshot? {
+        let trimmedAction = action.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAction.isEmpty else {
+            assertionFailure("action is required")
+            return nil
+        }
+        let normalizedSessionId = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let eventId = makeStageEventId(action: trimmedAction, clientAt: clientAt)
+        let source = sourceDevice ?? localSourceDevice
+        let createdAt = Date()
+        let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.stageEvent, into: context)
+        target.setValue(eventId, forKey: StageEventField.eventId)
+        target.setValue(normalizedSessionId?.isEmpty == false ? normalizedSessionId : nil, forKey: StageEventField.sessionId)
+        target.setValue(trimmedAction, forKey: StageEventField.action)
+        target.setValue(clientAt, forKey: StageEventField.clientAt)
+        target.setValue(createdAt, forKey: StageEventField.createdAt)
+        target.setValue(source, forKey: StageEventField.sourceDevice)
+        saveContext()
+        return StageEventSnapshot(
+            id: eventId,
+            sessionId: normalizedSessionId?.isEmpty == false ? normalizedSessionId : nil,
+            action: trimmedAction,
+            clientAt: clientAt,
+            createdAt: createdAt,
+            sourceDevice: source
+        )
+    }
+
+    func deleteStageEvents(ids: [String]) {
+        let uniqueIds = Array(Set(ids.filter { !$0.isEmpty }))
+        guard !uniqueIds.isEmpty else { return }
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.stageEvent)
+        request.predicate = NSPredicate(format: "%K IN %@", StageEventField.eventId, uniqueIds)
+        let objects = (try? context.fetch(request)) ?? []
+        for object in objects {
+            context.delete(object)
+        }
+        saveContext()
+    }
+
+    private func makeStageEventId(action: String, clientAt: Date) -> String {
+        let millis = Int64(clientAt.timeIntervalSince1970 * 1000)
+        let token = String(UUID().uuidString.prefix(6)).lowercased()
+        return "stage-\(action)-\(millis)-\(token)"
+    }
+
     private func saveContext() {
         guard context.hasChanges else { return }
         do {
@@ -879,6 +950,7 @@ final class CloudDataStore: ObservableObject {
         sessionRecords = fetchSessionRecords()
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
         dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
+        stageEvents = fetchStageEvents()
         updateRevisionSnapshot()
     }
 
@@ -1251,6 +1323,40 @@ final class CloudDataStore: ObservableObject {
         }
     }
 
+    private func fetchStageEvents() -> [StageEventSnapshot] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.stageEvent)
+        let objects = (try? context.fetch(request)) ?? []
+        var byId: [String: StageEventSnapshot] = [:]
+        for object in objects {
+            guard let eventId = object.value(forKey: StageEventField.eventId) as? String,
+                  !eventId.isEmpty else { continue }
+            let action = stringValue(object, key: StageEventField.action, fallback: "")
+            guard !action.isEmpty else { continue }
+            let clientAt = object.value(forKey: StageEventField.clientAt) as? Date
+                ?? object.value(forKey: StageEventField.createdAt) as? Date
+                ?? Date.distantPast
+            let createdAt = object.value(forKey: StageEventField.createdAt) as? Date ?? clientAt
+            let sessionId = object.value(forKey: StageEventField.sessionId) as? String
+            let sourceDevice = stringValue(object, key: StageEventField.sourceDevice, fallback: "unknown")
+            let snapshot = StageEventSnapshot(
+                id: eventId,
+                sessionId: sessionId,
+                action: action,
+                clientAt: clientAt,
+                createdAt: createdAt,
+                sourceDevice: sourceDevice
+            )
+            if let existing = byId[eventId] {
+                if snapshot.createdAt > existing.createdAt {
+                    byId[eventId] = snapshot
+                }
+            } else {
+                byId[eventId] = snapshot
+            }
+        }
+        return byId.values.sorted { $0.createdAt < $1.createdAt }
+    }
+
     private func fetchSessionManagedObject(sessionId: String) -> NSManagedObject? {
         fetchUniqueManagedObject(
             entityName: EntityName.session,
@@ -1564,7 +1670,19 @@ final class CloudDataStore: ObservableObject {
             attribute(MemoField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
         ]
 
-        model.entities = [session, shift, memo]
+        let stageEvent = NSEntityDescription()
+        stageEvent.name = EntityName.stageEvent
+        stageEvent.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        stageEvent.properties = [
+            attribute(StageEventField.eventId, type: .stringAttributeType, optional: true),
+            attribute(StageEventField.sessionId, type: .stringAttributeType, optional: true),
+            attribute(StageEventField.action, type: .stringAttributeType, optional: true),
+            attribute(StageEventField.clientAt, type: .dateAttributeType, optional: true),
+            attribute(StageEventField.createdAt, type: .dateAttributeType, optional: true),
+            attribute(StageEventField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
+        ]
+
+        model.entities = [session, shift, memo, stageEvent]
         return model
     }
 
@@ -1901,6 +2019,12 @@ struct ContentView: View {
         case ended
     }
 
+    enum StageAction: String {
+        case startShooting
+        case startSelecting
+        case end
+    }
+
     enum Tab {
         case home
         case stats
@@ -2030,12 +2154,19 @@ struct ContentView: View {
     @State private var selectedIpadSessionId: String?
     @State private var ipadDashboardSnapshot = IpadDashboardSnapshot.empty
     @State private var ipadDashboardRange: StatsRange = .today
+    @State private var ipadStageValue: Stage = .idle
+    @State private var ipadStageSessionId: String?
+    @State private var ipadStagePendingCount: Int = 0
+    @State private var ipadStagePendingAction: StageAction?
     @State private var ipadMemoSelectedKey = ""
     @State private var ipadMemoDraft = ""
     @State private var ipadMemoStatus: String?
     @State private var ipadMemoConflictNotice: String?
     @State private var ipadMemoLastRevision: Int64 = 0
     @State private var ipadMemoLastSource = ""
+    @State private var isProcessingStageEvents = false
+    @State private var processedStageEventIds: [String] = []
+    @State private var processedStageEventIdSet: Set<String> = []
     @AppStorage("pf_debug_mode_enabled") private var debugModeEnabled = false
     @State private var debugTapCount = 0
     @State private var lastDebugTapAt: Date?
@@ -2052,6 +2183,8 @@ struct ContentView: View {
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
+    private let stageEventProcessedIdsKey = "pf_stage_event_processed_ids_v1"
+    private let stageEventProcessedLimit = 200
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
 
@@ -2072,6 +2205,9 @@ struct ContentView: View {
         _shiftStart = State(initialValue: start)
         _shiftEnd = State(initialValue: end)
         shiftStore.seedFromLegacy(start: start, end: end)
+        let stageEventIds = loadStageEventProcessedIds()
+        _processedStageEventIds = State(initialValue: stageEventIds)
+        _processedStageEventIdSet = State(initialValue: Set(stageEventIds))
     }
 
     var body: some View {
@@ -2143,6 +2279,12 @@ struct ContentView: View {
         }
         .onReceive(cloudStore.$sessionRecords) { records in
             syncSessionSummaries(from: records)
+            if isReadOnlyDevice {
+                refreshIpadStageState(records: records, events: cloudStore.stageEvents)
+            }
+        }
+        .onReceive(cloudStore.$stageEvents) { events in
+            handleStageEventsUpdate(events)
         }
         .onReceive(dailyMemoStore.$memos) { memos in
             let dayKey = dailyMemoStore.dayKey(for: now)
@@ -2182,6 +2324,80 @@ struct ContentView: View {
                 )
             }
         sessionSummaries = summaries
+    }
+
+    private func handleStageEventsUpdate(_ events: [CloudDataStore.StageEventSnapshot]) {
+        if isReadOnlyDevice {
+            refreshIpadStageState(records: cloudStore.sessionRecords, events: events)
+            return
+        }
+        processStageEvents(events)
+    }
+
+    private func processStageEvents(_ events: [CloudDataStore.StageEventSnapshot]) {
+        guard !isProcessingStageEvents else { return }
+        let candidates = events.filter { event in
+            event.sourceDevice != cloudStore.localSourceDevice && !isStageEventProcessed(event.id)
+        }
+        guard !candidates.isEmpty else { return }
+        isProcessingStageEvents = true
+        defer { isProcessingStageEvents = false }
+        let sorted = candidates.sorted { lhs, rhs in
+            if lhs.clientAt == rhs.clientAt {
+                return lhs.createdAt < rhs.createdAt
+            }
+            return lhs.clientAt < rhs.clientAt
+        }
+        var processedIds: [String] = []
+        for event in sorted {
+            if shouldApplyStageEvent(event) {
+                _ = applyStageAction(
+                    action: event.action,
+                    eventTime: event.clientAt,
+                    sessionIdOverride: event.sessionId
+                )
+            }
+            markStageEventProcessed(event.id)
+            processedIds.append(event.id)
+        }
+        if !processedIds.isEmpty {
+            cloudStore.deleteStageEvents(ids: processedIds)
+        }
+    }
+
+    private func shouldApplyStageEvent(_ event: CloudDataStore.StageEventSnapshot) -> Bool {
+        guard let canonical = syncStore.canonicalState else { return true }
+        return event.clientAt >= canonical.updatedAt
+    }
+
+    private func isStageEventProcessed(_ eventId: String) -> Bool {
+        processedStageEventIdSet.contains(eventId)
+    }
+
+    private func markStageEventProcessed(_ eventId: String) {
+        guard !processedStageEventIdSet.contains(eventId) else { return }
+        processedStageEventIds.append(eventId)
+        processedStageEventIdSet.insert(eventId)
+        if processedStageEventIds.count > stageEventProcessedLimit {
+            let overflow = processedStageEventIds.count - stageEventProcessedLimit
+            let removed = processedStageEventIds.prefix(overflow)
+            removed.forEach { processedStageEventIdSet.remove($0) }
+            processedStageEventIds.removeFirst(overflow)
+        }
+        saveStageEventProcessedIds()
+    }
+
+    private func loadStageEventProcessedIds() -> [String] {
+        guard let data = UserDefaults.standard.data(forKey: stageEventProcessedIdsKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    private func saveStageEventProcessedIds() {
+        guard let data = try? JSONEncoder().encode(processedStageEventIds) else { return }
+        UserDefaults.standard.set(data, forKey: stageEventProcessedIdsKey)
     }
 
     private var effectiveSessionSummaries: [SessionSummary] {
@@ -2243,6 +2459,9 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ipadStatsDashboard
+                    if isReadOnlyDevice {
+                        ipadStageActionsCard
+                    }
                     Divider()
                     if sessions.isEmpty {
                         Text("暂无会话")
@@ -2279,14 +2498,23 @@ struct ContentView: View {
                 selectedIpadSessionId = sessions.first?.id
             }
             refreshIpadDashboard(records: sessions, range: .today)
+            if isReadOnlyDevice {
+                refreshIpadStageState(records: sessions, events: cloudStore.stageEvents)
+            }
         }
         .onChange(of: sessionIds) { _, newIds in
             if let selected = selectedIpadSessionId, newIds.contains(selected) {
                 refreshIpadDashboard(records: sessions, range: ipadDashboardRange)
+                if isReadOnlyDevice {
+                    refreshIpadStageState(records: sessions, events: cloudStore.stageEvents)
+                }
                 return
             }
             selectedIpadSessionId = newIds.first
             refreshIpadDashboard(records: sessions, range: ipadDashboardRange)
+            if isReadOnlyDevice {
+                refreshIpadStageState(records: sessions, events: cloudStore.stageEvents)
+            }
         }
         .onChange(of: ipadDashboardRange) { _, newRange in
             refreshIpadDashboard(records: sessions, range: newRange)
@@ -2354,6 +2582,178 @@ struct ContentView: View {
         )
     }
 
+    private func refreshIpadStageState(
+        records: [CloudDataStore.SessionRecord],
+        events: [CloudDataStore.StageEventSnapshot]
+    ) {
+        let validRecords = records.filter { !$0.isDeleted && !$0.isVoided }
+        let sortedRecords = validRecords.sorted { $0.updatedAt > $1.updatedAt }
+        let liveRecord = sortedRecords.first { $0.stage != WatchSyncStore.StageSyncKey.stageStopped }
+        let canonicalStage: Stage
+        let canonicalSessionId: String?
+        if let liveRecord {
+            canonicalStage = stageFromSessionRecord(liveRecord)
+            canonicalSessionId = liveRecord.id
+        } else if sortedRecords.isEmpty {
+            canonicalStage = .idle
+            canonicalSessionId = nil
+        } else {
+            canonicalStage = .ended
+            canonicalSessionId = nil
+        }
+
+        let pending = pendingStageEvents(events: events, records: records)
+        ipadStagePendingCount = pending.count
+        if let lastPending = pending.last, let pendingAction = stageAction(from: lastPending.action) {
+            ipadStagePendingAction = pendingAction
+            ipadStageValue = stageFromAction(pendingAction)
+            ipadStageSessionId = lastPending.sessionId ?? canonicalSessionId
+        } else {
+            ipadStagePendingAction = nil
+            ipadStageValue = canonicalStage
+            ipadStageSessionId = canonicalSessionId
+        }
+    }
+
+    private func pendingStageEvents(
+        events: [CloudDataStore.StageEventSnapshot],
+        records: [CloudDataStore.SessionRecord]
+    ) -> [CloudDataStore.StageEventSnapshot] {
+        let localSource = cloudStore.localSourceDevice
+        let recordById = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+        return events
+            .filter { $0.sourceDevice == localSource }
+            .filter { event in
+                guard let sessionId = event.sessionId,
+                      let record = recordById[sessionId] else { return true }
+                if let action = stageAction(from: event.action) {
+                    let recordOrder = stageOrder(for: record.stage)
+                    if recordOrder >= stageOrder(for: action) {
+                        return false
+                    }
+                }
+                return record.updatedAt < event.clientAt
+            }
+            .sorted { $0.clientAt < $1.clientAt }
+    }
+
+    private func stageFromSessionRecord(_ record: CloudDataStore.SessionRecord) -> Stage {
+        switch record.stage {
+        case WatchSyncStore.StageSyncKey.stageShooting:
+            return .shooting
+        case WatchSyncStore.StageSyncKey.stageSelecting:
+            return .selecting
+        default:
+            return .ended
+        }
+    }
+
+    private func stageFromAction(_ action: StageAction) -> Stage {
+        switch action {
+        case .startShooting:
+            return .shooting
+        case .startSelecting:
+            return .selecting
+        case .end:
+            return .ended
+        }
+    }
+
+    private func stageOrder(for stage: String) -> Int {
+        switch stage {
+        case WatchSyncStore.StageSyncKey.stageShooting:
+            return 1
+        case WatchSyncStore.StageSyncKey.stageSelecting:
+            return 2
+        case WatchSyncStore.StageSyncKey.stageStopped:
+            return 3
+        default:
+            return 0
+        }
+    }
+
+    private func stageOrder(for action: StageAction) -> Int {
+        switch action {
+        case .startShooting:
+            return 1
+        case .startSelecting:
+            return 2
+        case .end:
+            return 3
+        }
+    }
+
+    private func stageAction(from action: String) -> StageAction? {
+        StageAction(rawValue: action)
+    }
+
+    private func stageTitle(for stage: Stage) -> String {
+        switch stage {
+        case .idle:
+            return "未开始"
+        case .shooting:
+            return "拍摄中"
+        case .selecting:
+            return "选片中"
+        case .ended:
+            return "已结束"
+        }
+    }
+
+    private func stageActionTitle(_ action: StageAction) -> String {
+        switch action {
+        case .startShooting:
+            return "拍摄"
+        case .startSelecting:
+            return "选片"
+        case .end:
+            return "结束"
+        }
+    }
+
+    private var ipadCanStartShooting: Bool {
+        ipadStageValue == .idle || ipadStageValue == .ended
+    }
+
+    private var ipadCanStartSelecting: Bool {
+        ipadStageValue == .shooting
+    }
+
+    private var ipadCanEndSession: Bool {
+        ipadStageValue == .shooting || ipadStageValue == .selecting
+    }
+
+    private func resolveIpadStageSessionId(for action: StageAction, at timestamp: Date) -> String {
+        switch action {
+        case .startShooting:
+            let newId = makeSessionId(startedAt: timestamp)
+            ipadStageSessionId = newId
+            return newId
+        case .startSelecting, .end:
+            if let existing = ipadStageSessionId {
+                return existing
+            }
+            if let resolved = sessionIdForTimestamp(timestamp) {
+                ipadStageSessionId = resolved
+                return resolved
+            }
+            let fallback = makeSessionId(startedAt: timestamp)
+            ipadStageSessionId = fallback
+            return fallback
+        }
+    }
+
+    private func sendIpadStageAction(_ action: StageAction) {
+        let timestamp = Date()
+        let sessionId = resolveIpadStageSessionId(for: action, at: timestamp)
+        _ = cloudStore.createStageEvent(
+            sessionId: sessionId,
+            action: action.rawValue,
+            clientAt: timestamp
+        )
+        refreshIpadStageState(records: cloudStore.sessionRecords, events: cloudStore.stageEvents)
+    }
+
     private var ipadStatsDashboard: some View {
         let snapshot = ipadDashboardSnapshot
         let revenueText = snapshot.hasRevenue ? formatAmount(cents: snapshot.revenueCents) : "--"
@@ -2405,6 +2805,44 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.secondary.opacity(0.08))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private var ipadStageActionsCard: some View {
+        GroupBox("阶段推进") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("当前: \(stageTitle(for: ipadStageValue))")
+                        .font(.caption)
+                    Spacer()
+                    if ipadStagePendingCount > 0 {
+                        Text("待同步 \(ipadStagePendingCount)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                HStack(spacing: 8) {
+                    Button(stageActionTitle(.startShooting)) {
+                        sendIpadStageAction(.startShooting)
+                    }
+                    .disabled(!ipadCanStartShooting)
+                    Button(stageActionTitle(.startSelecting)) {
+                        sendIpadStageAction(.startSelecting)
+                    }
+                    .disabled(!ipadCanStartSelecting)
+                    Button(stageActionTitle(.end)) {
+                        sendIpadStageAction(.end)
+                    }
+                    .disabled(!ipadCanEndSession)
+                }
+                .buttonStyle(.bordered)
+                if let pendingAction = ipadStagePendingAction {
+                    Text("待同步：\(stageActionTitle(pendingAction))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -4251,12 +4689,14 @@ struct ContentView: View {
         syncStageState(now: now, sessionIdOverride: endedSessionId)
     }
 
-    private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
-        let eventSeconds = normalizeEpochSeconds(event.clientAt)
-        let eventTime = Date(timeIntervalSince1970: eventSeconds)
+    @discardableResult
+    private func applyStageAction(
+        action: String,
+        eventTime: Date,
+        sessionIdOverride: String?
+    ) -> WatchSyncStore.CanonicalState {
         let processedAt = Date()
-        let sessionIdOverride = event.sessionId
-        switch event.action {
+        switch action {
         case "startShooting":
             session = Session()
             session.shootingStart = eventTime
@@ -4278,7 +4718,17 @@ struct ContentView: View {
         default:
             break
         }
-        let state = syncStageState(now: processedAt, sessionIdOverride: sessionIdOverride)
+        return syncStageState(now: processedAt, sessionIdOverride: sessionIdOverride)
+    }
+
+    private func applySessionEvent(_ event: WatchSyncStore.SessionEvent) {
+        let eventSeconds = normalizeEpochSeconds(event.clientAt)
+        let eventTime = Date(timeIntervalSince1970: eventSeconds)
+        let state = applyStageAction(
+            action: event.action,
+            eventTime: eventTime,
+            sessionIdOverride: event.sessionId
+        )
         syncStore.completeEvent(eventId: event.id, state: state)
     }
 
