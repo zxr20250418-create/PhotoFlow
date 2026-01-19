@@ -1595,9 +1595,12 @@ struct ContentView: View {
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
     @State private var selectedIpadSessionId: String?
+    @AppStorage("pf_debug_mode_enabled") private var debugModeEnabled = false
+    @State private var debugTapCount = 0
+    @State private var lastDebugTapAt: Date?
+    @State private var showIpadSyncDebug = false
 #if DEBUG
     @State private var showDebugPanel = false
-    @State private var showIpadSyncDebug = false
 #endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
@@ -1676,11 +1679,9 @@ struct ContentView: View {
         .sheet(isPresented: $isManualSessionPresented) {
             manualSessionEditor
         }
-#if DEBUG
         .sheet(isPresented: $showIpadSyncDebug) {
             ipadSyncView
         }
-#endif
         .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
@@ -1805,9 +1806,9 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     ipadCloudStatusView
-#if DEBUG
-                    ipadCloudDebugPanel(records: sessions)
-#endif
+                    if shouldShowDebugControls {
+                        ipadCloudDebugPanel(records: sessions)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
@@ -1924,7 +1925,6 @@ struct ContentView: View {
         .monospacedDigit()
     }
 
-#if DEBUG
     private func ipadCloudDebugPanel(records: [CloudDataStore.SessionRecord]) -> some View {
         let memoPrefix = "cloud-test-memo-"
         let testMemos = cloudStore.dayMemos.values
@@ -1981,7 +1981,6 @@ struct ContentView: View {
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
-#endif
 
     private func cloudSessionDurations(
         for record: CloudDataStore.SessionRecord
@@ -2217,51 +2216,7 @@ struct ContentView: View {
                                 }
                             }
                         }
-#if DEBUG
-                        Button(action: { showDebugPanel.toggle() }) {
-                            Text("Debug")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, 8)
-                        .opacity(0.4)
-
-                        if showDebugPanel {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("lastSentPayload")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text(syncStore.debugLastSentPayload)
-                                    .font(.caption2)
-                                    .textSelection(.enabled)
-
-                                Text("lastSyncAt / pending / lastRevision")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text("\(formatDebugSyncTime(syncStore.lastSyncAt)) · \(syncStore.pendingEventCount) · \(syncStore.lastRevision)")
-                                    .font(.caption2)
-                                    .textSelection(.enabled)
-
-                                Text("sessionStatus")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text(syncStore.debugSessionStatus)
-                                    .font(.caption2)
-                                    .textSelection(.enabled)
-
-                                Button("Debug: Open iPad Sync") {
-                                    showIpadSyncDebug = true
-                                }
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            }
-                            .padding(8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.thinMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                        }
-#endif
+                        homeDebugFooter
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -2283,6 +2238,9 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(Self.homeDateFormatter.string(from: now))
                 .font(.headline)
+                .onTapGesture {
+                    registerDebugTap()
+                }
             todayBanner
             memoEditor
         }
@@ -2317,6 +2275,86 @@ struct ContentView: View {
         .onChange(of: memoDraft) { _, newValue in
             dailyMemoStore.setMemo(newValue, for: dayKey)
         }
+    }
+
+    private var homeDebugFooter: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+#if DEBUG
+                Button("Debug: Open iPad Sync") {
+                    showIpadSyncDebug = true
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .padding(.vertical, 4)
+
+                Button(showDebugPanel ? "Debug: Hide Details" : "Debug: Show Details") {
+                    showDebugPanel.toggle()
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .padding(.vertical, 4)
+#endif
+                Spacer(minLength: 8)
+                Text(buildFingerprintText)
+                    .monospacedDigit()
+            }
+
+            if debugModeEnabled && !isReadOnlyDevice && !isDebugBuild {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Debug Mode")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Open iPad Sync") {
+                            showIpadSyncDebug = true
+                        }
+                        Button("Create Cloud Test Memo") {
+                            createCloudTestMemo()
+                        }
+                        Button("Create Cloud Test Session") {
+                            createCloudTestSession()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
+#if DEBUG
+            if showDebugPanel {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("lastSentPayload")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugLastSentPayload)
+                        .font(.caption2)
+                        .textSelection(.enabled)
+
+                    Text("lastSyncAt / pending / lastRevision")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("\(formatDebugSyncTime(syncStore.lastSyncAt)) · \(syncStore.pendingEventCount) · \(syncStore.lastRevision)")
+                        .font(.caption2)
+                        .textSelection(.enabled)
+
+                    Text("sessionStatus")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(syncStore.debugSessionStatus)
+                        .font(.caption2)
+                        .textSelection(.enabled)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.thinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+#endif
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(.top, 8)
+        .opacity(0.6)
     }
 
     private func isSessionVisible(_ id: String) -> Bool {
@@ -3247,6 +3285,28 @@ struct ContentView: View {
         UIDevice.current.userInterfaceIdiom == .pad
     }
 
+    private var isDebugBuild: Bool {
+#if DEBUG
+        return true
+#else
+        return false
+#endif
+    }
+
+    private var shouldShowDebugControls: Bool {
+        isDebugBuild || debugModeEnabled
+    }
+
+    private var buildFingerprintText: String {
+        let info = Bundle.main.infoDictionary
+        let shortVersion = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let buildNumber = info?["CFBundleVersion"] as? String ?? "?"
+        let gitHash = (info?["GitHash"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let versionText = (gitHash?.isEmpty == false) ? gitHash ?? "" : "v\(shortVersion) (\(buildNumber))"
+        let buildLabel = isDebugBuild ? "BUILD=DEBUG" : "BUILD=RELEASE"
+        return "\(buildLabel) · \(versionText)"
+    }
+
     private var effectiveOnDuty: Bool {
         if isReadOnlyDevice {
             return stage != .idle
@@ -3552,7 +3612,20 @@ struct ContentView: View {
         return formatter.string(from: date)
     }
 
-#if DEBUG
+    private func registerDebugTap() {
+        guard !debugModeEnabled else { return }
+        let now = Date()
+        if let lastDebugTapAt, now.timeIntervalSince(lastDebugTapAt) > 1.5 {
+            debugTapCount = 0
+        }
+        debugTapCount += 1
+        lastDebugTapAt = now
+        if debugTapCount >= 7 {
+            debugModeEnabled = true
+            debugTapCount = 0
+        }
+    }
+
     private func createCloudTestMemo() {
         let dayKey = dailyMemoStore.dayKey(for: now)
         let token = shortDebugToken()
@@ -3582,7 +3655,6 @@ struct ContentView: View {
     private func debugNowMillis() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
     }
-#endif
 
     private func updateSessionSummary(for stage: Stage, at timestamp: Date, sessionIdOverride: String? = nil) {
         if let overrideId = sessionIdOverride,
