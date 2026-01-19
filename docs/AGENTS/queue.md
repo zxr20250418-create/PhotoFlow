@@ -330,42 +330,65 @@ StopCondition:
 - exec.md 更新（若有）
 - STOP
 
-## ACTIVE — TC-IOS-IPAD-CLOUDSYNC-V1
-Status: ACTIVE
+## DONE — TC-IOS-IPAD-CLOUDSYNC-V1
+Status: DONE (merged in PR #142)
 ID: TC-IOS-IPAD-CLOUDSYNC-V1
 Title: iPad 同步 + iCloud CloudKit V1
 AssignedTo: Coordinator1/Codex
 
-Goal:
-- iPhone/iPad 共用 CloudKit 同步数据，iCloud 不可用时仍可本地读写。
-- watch 仍为事件上报端，iPhone 继续作为权威写入端。
+## ACTIVE — TC-IOS-FILES-EXPORTIMPORT-V1_1
+Status: ACTIVE
+ID: TC-IOS-FILES-EXPORTIMPORT-V1_1
+Title: Files 导入导出 V1.1
+AssignedTo: Coordinator1/Codex
 
-Scope (Allowed files ONLY):
-- PhotoFlow/PhotoFlow/**/*.swift
-- 配置卡（独立 PR）：PhotoFlow/PhotoFlow/PhotoFlow.entitlements + PhotoFlow/PhotoFlow.xcodeproj/project.pbxproj（仅 iOS app capability 最小改动）
-- docs/AGENTS/exec.md（可选）
+Priority: P1
+Goal: 无 iCloud 模式补齐。支持 Files 导出/导入，按 revision 合并。
+
+Scope:
+- iPhone+iPad 都提供导出与导入入口
+- 导出格式: JSON 或 zip(JSON)，包含 schemaVersion/exportedAt/deviceId/records
+- 导入: 选择文件 -> 预览新增/更新/冲突数量 -> 确认 -> 按 revision 合并
 
 Guardrails:
-- 配置改动必须走独立 config PR（不走默认 PASS，需明确 PASS）。
-- 禁止修改 watch/widget/appex 相关 entitlements/targets；禁止改其他 plist 设置。
-- PR 前必跑并贴：`bash scripts/ios_safe.sh --clean-deriveddata`。
+- Allowed files: PhotoFlow/PhotoFlow/**/*.swift
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
 
-Requirements:
-- Config PR：启用 iCloud CloudKit capability，container 复用 `iCloud.com.zhengxinrong.PhotoFlow`。
-- Code PR：NSPersistentCloudKitContainer + 本地 fallback + remote change 通知；iPad V1 先只读 UI。
-- 冲突规则：revision 大者覆盖，小者丢弃；相等按 sourceDevice 固定排序。
+Acceptance:
+A 导出到 Files 成功，可在 Files 看到文件
+B 导入后数据可恢复，不重复写入
+C 冲突合并: revision 大覆盖小；相等按 sourceDevice tie-break
+D ios_safe PASS；0 配置改动
 
-Acceptance (Device):
-- A：iPhone 离线新增/编辑 SessionRecord，上线后 iPad 自动出现。
-- B：iPad 离线编辑 DayMemo，上线后 iPhone 自动出现。
-- C：iCloud 未登录时 App 可本地使用，不崩。
-- D：同一条冲突时以 revision 大的为准。
+Manual Verification:
+- iPhone 导出 -> iPad 导入后能看到同样记录
+- iPad 导出 -> iPhone 导入后能看到同样记录
 
-StopCondition:
-- 配置 PR opened（不合并）
-- 代码 PR opened（不合并）
-- CI green
-- STOP
+## QUEUED — TC-IOS-IPAD-DAYMEMO-EDIT-V1_1
+Status: QUEUED
+ID: TC-IOS-IPAD-DAYMEMO-EDIT-V1_1
+Title: iPad DayMemo 编辑 V1.1
+AssignedTo: Coordinator1/Codex
+
+Priority: P1
+Goal: iPad 端仅开放 DayMemo 编辑，离线可编辑，联网后自动合并。
+
+Scope:
+- iPad DayMemo 可编辑保存
+- 只做 DayMemo，不开放 Session 编辑
+- 冲突策略: revision 大覆盖小，给轻提示即可
+
+Guardrails:
+- Allowed files: PhotoFlow/PhotoFlow/**/*.swift
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A iPad 离线编辑 DayMemo 保存成功
+B 联网后 iPhone 端出现更新（允许几十秒）
+C 冲突按 revision 规则合并
+D ios_safe PASS；0 配置改动
 
 ## PAUSED — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
 Status: PAUSED (widget complication 仍未修通，避免阻塞主线)
