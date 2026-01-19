@@ -10,6 +10,7 @@ import CloudKit
 import CoreData
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import WatchConnectivity
 
 @MainActor
@@ -2020,6 +2021,15 @@ struct ContentView: View {
     @State private var debugTapCount = 0
     @State private var lastDebugTapAt: Date?
     @State private var showIpadSyncDebug = false
+    @State private var isExportingFiles = false
+    @State private var exportDocument = ExportDocument(data: Data())
+    @State private var exportFilename = "PhotoFlow-export.json"
+    @State private var exportStatus: String?
+    @State private var isImportingFiles = false
+    @State private var importPreview: ImportPreview?
+    @State private var pendingImportBundle: ExportBundle?
+    @State private var importStatus: String?
+    @State private var importError: String?
 #if DEBUG
     @State private var showDebugPanel = false
 #endif
@@ -2227,6 +2237,9 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     ipadCloudStatusView
+                    if isReadOnlyDevice {
+                        filesTransferPanel
+                    }
                     if shouldShowDebugControls {
                         ipadCloudDebugPanel(records: sessions)
                     }
@@ -2355,6 +2368,74 @@ struct ContentView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
             .monospacedDigit()
+    }
+
+    private var filesTransferPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("文件导入导出")
+                .font(.headline)
+            HStack(spacing: 12) {
+                Button("Export to Files") {
+                    prepareExport()
+                }
+                Button("Import from Files") {
+                    importError = nil
+                    importStatus = nil
+                    isImportingFiles = true
+                }
+            }
+            .buttonStyle(.bordered)
+
+            if let exportStatus {
+                Text(exportStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let importStatus {
+                Text(importStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let importError {
+                Text(importError)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .fileExporter(
+            isPresented: $isExportingFiles,
+            document: exportDocument,
+            contentType: .json,
+            defaultFilename: exportFilename
+        ) { result in
+            switch result {
+            case .success(let url):
+                exportStatus = "导出成功：\(url.lastPathComponent)"
+            case .failure(let error):
+                exportStatus = "导出失败：\(error.localizedDescription)"
+            }
+        }
+        .fileImporter(
+            isPresented: $isImportingFiles,
+            allowedContentTypes: [.json],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else {
+                    importError = "未选择文件"
+                    return
+                }
+                Task {
+                    await prepareImport(from: url)
+                }
+            case .failure(let error):
+                importError = "导入失败：\(error.localizedDescription)"
+            }
+        }
+        .sheet(item: $importPreview) { preview in
+            importPreviewSheet(preview)
+        }
     }
 
     private func ipadCloudDebugPanel(records: [CloudDataStore.SessionRecord]) -> some View {
@@ -2718,6 +2799,20 @@ struct ContentView: View {
         formatter.calendar = Calendar(identifier: .iso8601)
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy年M月d日 EEEE"
+        return formatter
+    }()
+
+    private static let exportTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let exportFilenameFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter
     }()
 
@@ -3701,6 +3796,10 @@ struct ContentView: View {
                     orderById: orderById
                 )
             }
+            if !isReadOnlyDevice {
+                Divider()
+                filesTransferPanel
+            }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
@@ -4137,6 +4236,538 @@ struct ContentView: View {
             endedAt: nil,
             revision: revision
         )
+    }
+
+    private func prepareExport() {
+        importError = nil
+        exportStatus = nil
+        do {
+            let bundle = makeExportBundle()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(bundle)
+            exportDocument = ExportDocument(data: data)
+            exportFilename = exportFileName(for: now)
+            isExportingFiles = true
+        } catch {
+            exportStatus = "导出失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func prepareImport(from url: URL) async {
+        await MainActor.run {
+            importError = nil
+            importPreview = nil
+            pendingImportBundle = nil
+        }
+        let access = url.startAccessingSecurityScopedResource()
+        defer {
+            if access {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        do {
+            let bundle = try await Task.detached(priority: .userInitiated) {
+                let data = try Data(contentsOf: url)
+                return try JSONDecoder().decode(ExportBundle.self, from: data)
+            }.value
+            guard bundle.schemaVersion == 1 else {
+                throw NSError(
+                    domain: "PhotoFlowExport",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "schemaVersion 不支持"]
+                )
+            }
+            let deduped = dedupeEnvelopes(bundle.records)
+            let normalized = ExportBundle(
+                schemaVersion: bundle.schemaVersion,
+                exportedAt: bundle.exportedAt,
+                deviceId: bundle.deviceId,
+                records: deduped
+            )
+            let preview = makeImportPreview(for: normalized)
+            await MainActor.run {
+                pendingImportBundle = normalized
+                importPreview = preview
+            }
+        } catch {
+            await MainActor.run {
+                importError = "解析失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func importPreviewSheet(_ preview: ImportPreview) -> some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("导入预览")
+                    .font(.headline)
+                Text("总记录 \(preview.totalCount)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("新增 \(preview.newCount) · 更新 \(preview.updateCount) · 跳过 \(preview.skipCount) · 冲突 \(preview.conflictCount)")
+                    .font(.footnote)
+                Text("冲突：revision 相等且 payload 不同。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Files Import")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        importPreview = nil
+                        pendingImportBundle = nil
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("导入") {
+                        applyImport(preview: preview)
+                    }
+                }
+            }
+        }
+    }
+
+    private func applyImport(preview: ImportPreview) {
+        guard let bundle = pendingImportBundle else { return }
+        let counts = applyImportBundle(bundle)
+        importStatus = "导入完成：新增 \(counts.newCount) · 更新 \(counts.updateCount) · 跳过 \(counts.skipCount) · 冲突 \(counts.conflictCount)"
+        importPreview = nil
+        pendingImportBundle = nil
+    }
+
+    private func makeExportBundle() -> ExportBundle {
+        let exportedAt = Self.exportTimestampFormatter.string(from: now)
+        let records = exportRecords().sorted { lhs, rhs in
+            if lhs.type == rhs.type {
+                return lhs.key < rhs.key
+            }
+            return lhs.type.rawValue < rhs.type.rawValue
+        }
+        return ExportBundle(
+            schemaVersion: 1,
+            exportedAt: exportedAt,
+            deviceId: exportDeviceId(),
+            records: records
+        )
+    }
+
+    private func exportRecords() -> [RecordEnvelope] {
+        var records: [RecordEnvelope] = []
+        records.append(contentsOf: cloudStore.sessionRecords.map { record in
+            let payload = RecordPayload(
+                sessionId: record.id,
+                stage: record.stage,
+                shootingStart: record.shootingStart?.timeIntervalSince1970,
+                selectingStart: record.selectingStart?.timeIntervalSince1970,
+                endedAt: record.endedAt?.timeIntervalSince1970,
+                amount: record.amountCents,
+                shotCount: record.shotCount,
+                selectedCount: record.selectedCount,
+                reviewNote: record.reviewNote,
+                isVoided: record.isVoided,
+                isDeleted: record.isDeleted,
+                dayKey: nil,
+                startAt: nil,
+                endAt: nil,
+                text: nil
+            )
+            return RecordEnvelope(
+                type: .session,
+                key: record.id,
+                revision: record.revision,
+                updatedAt: record.updatedAt.timeIntervalSince1970,
+                sourceDevice: record.sourceDevice,
+                payload: payload
+            )
+        })
+        records.append(contentsOf: cloudStore.shiftRecords.values.map { record in
+            let payload = RecordPayload(
+                sessionId: nil,
+                stage: nil,
+                shootingStart: nil,
+                selectingStart: nil,
+                endedAt: nil,
+                amount: nil,
+                shotCount: nil,
+                selectedCount: nil,
+                reviewNote: nil,
+                isVoided: nil,
+                isDeleted: nil,
+                dayKey: record.dayKey,
+                startAt: record.startAt?.timeIntervalSince1970,
+                endAt: record.endAt?.timeIntervalSince1970,
+                text: nil
+            )
+            return RecordEnvelope(
+                type: .shift,
+                key: record.dayKey,
+                revision: record.revision,
+                updatedAt: record.updatedAt.timeIntervalSince1970,
+                sourceDevice: record.sourceDevice,
+                payload: payload
+            )
+        })
+        records.append(contentsOf: cloudStore.dayMemos.values.map { record in
+            let payload = RecordPayload(
+                sessionId: nil,
+                stage: nil,
+                shootingStart: nil,
+                selectingStart: nil,
+                endedAt: nil,
+                amount: nil,
+                shotCount: nil,
+                selectedCount: nil,
+                reviewNote: nil,
+                isVoided: nil,
+                isDeleted: nil,
+                dayKey: record.dayKey,
+                startAt: nil,
+                endAt: nil,
+                text: record.text
+            )
+            return RecordEnvelope(
+                type: .memo,
+                key: record.dayKey,
+                revision: record.revision,
+                updatedAt: record.updatedAt.timeIntervalSince1970,
+                sourceDevice: record.sourceDevice,
+                payload: payload
+            )
+        })
+        return records
+    }
+
+    private func exportDeviceId() -> String {
+        UIDevice.current.identifierForVendor?.uuidString ?? cloudStore.localSourceDevice
+    }
+
+    private func exportFileName(for date: Date) -> String {
+        let stamp = Self.exportFilenameFormatter.string(from: date)
+        return "PhotoFlow-export-\(stamp).json"
+    }
+
+    private func makeImportPreview(for bundle: ExportBundle) -> ImportPreview {
+        let localSessions = Dictionary(uniqueKeysWithValues: cloudStore.sessionRecords.map { ($0.id, $0) })
+        let localShifts = cloudStore.shiftRecords
+        let localMemos = cloudStore.dayMemos
+        var counts = ImportCounts()
+        for envelope in bundle.records {
+            guard !envelope.key.isEmpty else { continue }
+            let decision: ImportDecision
+            switch envelope.type {
+            case .session:
+                decision = importDecision(
+                    envelope: envelope,
+                    local: localSessions[envelope.key].map { local in
+                        LocalRecordSnapshot(
+                            revision: local.revision,
+                            sourceDevice: local.sourceDevice,
+                            payload: sessionPayload(from: local)
+                        )
+                    }
+                )
+            case .shift:
+                decision = importDecision(
+                    envelope: envelope,
+                    local: localShifts[envelope.key].map { local in
+                        LocalRecordSnapshot(
+                            revision: local.revision,
+                            sourceDevice: local.sourceDevice,
+                            payload: shiftPayload(from: local)
+                        )
+                    }
+                )
+            case .memo:
+                decision = importDecision(
+                    envelope: envelope,
+                    local: localMemos[envelope.key].map { local in
+                        LocalRecordSnapshot(
+                            revision: local.revision,
+                            sourceDevice: local.sourceDevice,
+                            payload: memoPayload(from: local)
+                        )
+                    }
+                )
+            }
+            counts.totalCount += 1
+            counts.conflictCount += decision.isConflict ? 1 : 0
+            switch decision.action {
+            case .new:
+                counts.newCount += 1
+            case .update:
+                counts.updateCount += 1
+            case .skip:
+                counts.skipCount += 1
+            }
+        }
+        return ImportPreview(
+            totalCount: counts.totalCount,
+            newCount: counts.newCount,
+            updateCount: counts.updateCount,
+            skipCount: counts.skipCount,
+            conflictCount: counts.conflictCount
+        )
+    }
+
+    private func applyImportBundle(_ bundle: ExportBundle) -> ImportCounts {
+        let localSessions = Dictionary(uniqueKeysWithValues: cloudStore.sessionRecords.map { ($0.id, $0) })
+        let localShifts = cloudStore.shiftRecords
+        let localMemos = cloudStore.dayMemos
+        var counts = ImportCounts()
+        for envelope in bundle.records {
+            guard !envelope.key.isEmpty else { continue }
+            let decision: ImportDecision
+            switch envelope.type {
+            case .session:
+                decision = importDecision(
+                    envelope: envelope,
+                    local: localSessions[envelope.key].map { local in
+                        LocalRecordSnapshot(
+                            revision: local.revision,
+                            sourceDevice: local.sourceDevice,
+                            payload: sessionPayload(from: local)
+                        )
+                    }
+                )
+            case .shift:
+                decision = importDecision(
+                    envelope: envelope,
+                    local: localShifts[envelope.key].map { local in
+                        LocalRecordSnapshot(
+                            revision: local.revision,
+                            sourceDevice: local.sourceDevice,
+                            payload: shiftPayload(from: local)
+                        )
+                    }
+                )
+            case .memo:
+                decision = importDecision(
+                    envelope: envelope,
+                    local: localMemos[envelope.key].map { local in
+                        LocalRecordSnapshot(
+                            revision: local.revision,
+                            sourceDevice: local.sourceDevice,
+                            payload: memoPayload(from: local)
+                        )
+                    }
+                )
+            }
+            counts.totalCount += 1
+            counts.conflictCount += decision.isConflict ? 1 : 0
+            switch decision.action {
+            case .new:
+                counts.newCount += 1
+                applyEnvelope(envelope, local: nil)
+            case .update:
+                counts.updateCount += 1
+                applyEnvelope(envelope, local: localSessions[envelope.key])
+            case .skip:
+                counts.skipCount += 1
+            }
+        }
+        return counts
+    }
+
+    private func importDecision(envelope: RecordEnvelope, local: LocalRecordSnapshot?) -> ImportDecision {
+        guard let local else {
+            return ImportDecision(action: .new, isConflict: false)
+        }
+        let incomingRevision = envelope.revision
+        if incomingRevision > local.revision {
+            return ImportDecision(action: .update, isConflict: false)
+        }
+        if incomingRevision < local.revision {
+            return ImportDecision(action: .skip, isConflict: false)
+        }
+        let normalized = normalizedPayload(envelope.payload, type: envelope.type, key: envelope.key)
+        let payloadDifferent = normalized != local.payload
+        let incomingPriority = sourcePriority(envelope.sourceDevice)
+        let localPriority = sourcePriority(local.sourceDevice)
+        if payloadDifferent && incomingPriority > localPriority {
+            return ImportDecision(action: .update, isConflict: true)
+        }
+        return ImportDecision(action: .skip, isConflict: payloadDifferent)
+    }
+
+    private func applyEnvelope(_ envelope: RecordEnvelope, local: CloudDataStore.SessionRecord?) {
+        let updatedAt = Date(timeIntervalSince1970: envelope.updatedAt)
+        let sourceDevice = envelope.sourceDevice.isEmpty ? "unknown" : envelope.sourceDevice
+        let payload = normalizedPayload(envelope.payload, type: envelope.type, key: envelope.key)
+        switch envelope.type {
+        case .session:
+            let sessionId = payload.sessionId ?? envelope.key
+            guard !sessionId.isEmpty else { return }
+            let stage = payload.stage ?? local?.stage ?? WatchSyncStore.StageSyncKey.stageStopped
+            let shootingStart = payload.shootingStart.map { Date(timeIntervalSince1970: $0) }
+            let selectingStart = payload.selectingStart.map { Date(timeIntervalSince1970: $0) }
+            let endedAt = payload.endedAt.map { Date(timeIntervalSince1970: $0) }
+            cloudStore.upsertSessionTiming(
+                sessionId: sessionId,
+                stage: stage,
+                shootingStart: shootingStart,
+                selectingStart: selectingStart,
+                endedAt: endedAt,
+                revision: envelope.revision,
+                updatedAt: updatedAt,
+                sourceDevice: sourceDevice
+            )
+            let meta = SessionMeta(
+                amountCents: payload.amount,
+                shotCount: payload.shotCount,
+                selectedCount: payload.selectedCount,
+                reviewNote: payload.reviewNote
+            )
+            cloudStore.updateSessionMeta(
+                sessionId: sessionId,
+                meta: meta,
+                revision: envelope.revision,
+                updatedAt: updatedAt,
+                sourceDevice: sourceDevice
+            )
+            cloudStore.updateSessionVisibility(
+                sessionId: sessionId,
+                isVoided: payload.isVoided,
+                isDeleted: payload.isDeleted,
+                revision: envelope.revision,
+                updatedAt: updatedAt,
+                sourceDevice: sourceDevice
+            )
+        case .shift:
+            let dayKey = payload.dayKey ?? envelope.key
+            guard !dayKey.isEmpty else { return }
+            let startAt = payload.startAt.map { Date(timeIntervalSince1970: $0) }
+            let endAt = payload.endAt.map { Date(timeIntervalSince1970: $0) }
+            cloudStore.upsertShiftRecord(
+                dayKey: dayKey,
+                startAt: startAt,
+                endAt: endAt,
+                revision: envelope.revision,
+                updatedAt: updatedAt,
+                sourceDevice: sourceDevice
+            )
+        case .memo:
+            let dayKey = payload.dayKey ?? envelope.key
+            guard !dayKey.isEmpty else { return }
+            cloudStore.upsertDayMemo(
+                dayKey: dayKey,
+                text: payload.text,
+                revision: envelope.revision,
+                updatedAt: updatedAt,
+                sourceDevice: sourceDevice
+            )
+        }
+    }
+
+    private func sessionPayload(from record: CloudDataStore.SessionRecord) -> RecordPayload {
+        RecordPayload(
+            sessionId: record.id,
+            stage: record.stage,
+            shootingStart: record.shootingStart?.timeIntervalSince1970,
+            selectingStart: record.selectingStart?.timeIntervalSince1970,
+            endedAt: record.endedAt?.timeIntervalSince1970,
+            amount: record.amountCents,
+            shotCount: record.shotCount,
+            selectedCount: record.selectedCount,
+            reviewNote: record.reviewNote,
+            isVoided: record.isVoided,
+            isDeleted: record.isDeleted,
+            dayKey: nil,
+            startAt: nil,
+            endAt: nil,
+            text: nil
+        )
+    }
+
+    private func shiftPayload(from record: CloudDataStore.ShiftRecordSnapshot) -> RecordPayload {
+        RecordPayload(
+            sessionId: nil,
+            stage: nil,
+            shootingStart: nil,
+            selectingStart: nil,
+            endedAt: nil,
+            amount: nil,
+            shotCount: nil,
+            selectedCount: nil,
+            reviewNote: nil,
+            isVoided: nil,
+            isDeleted: nil,
+            dayKey: record.dayKey,
+            startAt: record.startAt?.timeIntervalSince1970,
+            endAt: record.endAt?.timeIntervalSince1970,
+            text: nil
+        )
+    }
+
+    private func memoPayload(from record: CloudDataStore.DayMemoSnapshot) -> RecordPayload {
+        RecordPayload(
+            sessionId: nil,
+            stage: nil,
+            shootingStart: nil,
+            selectingStart: nil,
+            endedAt: nil,
+            amount: nil,
+            shotCount: nil,
+            selectedCount: nil,
+            reviewNote: nil,
+            isVoided: nil,
+            isDeleted: nil,
+            dayKey: record.dayKey,
+            startAt: nil,
+            endAt: nil,
+            text: record.text
+        )
+    }
+
+    private func normalizedPayload(_ payload: RecordPayload, type: RecordType, key: String) -> RecordPayload {
+        var normalized = payload
+        switch type {
+        case .session:
+            if normalized.sessionId == nil {
+                normalized.sessionId = key
+            }
+        case .shift, .memo:
+            if normalized.dayKey == nil {
+                normalized.dayKey = key
+            }
+        }
+        return normalized
+    }
+
+    private func dedupeEnvelopes(_ records: [RecordEnvelope]) -> [RecordEnvelope] {
+        var map: [String: RecordEnvelope] = [:]
+        for record in records {
+            let key = "\(record.type.rawValue)::\(record.key)"
+            if let existing = map[key] {
+                if record.revision > existing.revision {
+                    map[key] = record
+                } else if record.revision == existing.revision {
+                    let incomingPriority = sourcePriority(record.sourceDevice)
+                    let existingPriority = sourcePriority(existing.sourceDevice)
+                    if incomingPriority > existingPriority {
+                        map[key] = record
+                    }
+                }
+            } else {
+                map[key] = record
+            }
+        }
+        return Array(map.values)
+    }
+
+    private func sourcePriority(_ source: String) -> Int {
+        switch source.lowercased() {
+        case "phone":
+            return 3
+        case "ipad", "pad":
+            return 2
+        case "watch":
+            return 1
+        default:
+            return 0
+        }
     }
 
     private func shortDebugToken() -> String {
@@ -4949,6 +5580,97 @@ private struct ShiftCalendarView: View {
         let id = UUID()
         let date: Date
     }
+}
+
+private enum RecordType: String, Codable {
+    case session = "SessionRecord"
+    case shift = "ShiftRecord"
+    case memo = "DayMemo"
+}
+
+private struct RecordPayload: Codable, Equatable {
+    var sessionId: String?
+    var stage: String?
+    var shootingStart: Double?
+    var selectingStart: Double?
+    var endedAt: Double?
+    var amount: Int?
+    var shotCount: Int?
+    var selectedCount: Int?
+    var reviewNote: String?
+    var isVoided: Bool?
+    var isDeleted: Bool?
+    var dayKey: String?
+    var startAt: Double?
+    var endAt: Double?
+    var text: String?
+}
+
+private struct RecordEnvelope: Codable {
+    let type: RecordType
+    let key: String
+    let revision: Int64
+    let updatedAt: Double
+    let sourceDevice: String
+    let payload: RecordPayload
+}
+
+private struct ExportBundle: Codable {
+    let schemaVersion: Int
+    let exportedAt: String
+    let deviceId: String
+    let records: [RecordEnvelope]
+}
+
+private struct ExportDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+private struct ImportPreview: Identifiable {
+    let id = UUID()
+    let totalCount: Int
+    let newCount: Int
+    let updateCount: Int
+    let skipCount: Int
+    let conflictCount: Int
+}
+
+private struct ImportCounts {
+    var totalCount: Int = 0
+    var newCount: Int = 0
+    var updateCount: Int = 0
+    var skipCount: Int = 0
+    var conflictCount: Int = 0
+}
+
+private enum ImportAction {
+    case new
+    case update
+    case skip
+}
+
+private struct ImportDecision {
+    let action: ImportAction
+    let isConflict: Bool
+}
+
+private struct LocalRecordSnapshot {
+    let revision: Int64
+    let sourceDevice: String
+    let payload: RecordPayload
 }
 
 #Preview {
