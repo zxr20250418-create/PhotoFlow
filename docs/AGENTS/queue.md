@@ -336,8 +336,8 @@ ID: TC-IOS-IPAD-CLOUDSYNC-V1
 Title: iPad 同步 + iCloud CloudKit V1
 AssignedTo: Coordinator1/Codex
 
-## ACTIVE — TC-IOS-FILES-EXPORTIMPORT-V1_1
-Status: ACTIVE
+## DONE — TC-IOS-FILES-EXPORTIMPORT-V1_1
+Status: DONE (merged in PR #144)
 ID: TC-IOS-FILES-EXPORTIMPORT-V1_1
 Title: Files 导入导出 V1.1
 AssignedTo: Coordinator1/Codex
@@ -365,8 +365,8 @@ Manual Verification:
 - iPhone 导出 -> iPad 导入后能看到同样记录
 - iPad 导出 -> iPhone 导入后能看到同样记录
 
-## QUEUED — TC-IOS-IPAD-DAYMEMO-EDIT-V1_1
-Status: QUEUED
+## ACTIVE — TC-IOS-IPAD-DAYMEMO-EDIT-V1_1
+Status: ACTIVE
 ID: TC-IOS-IPAD-DAYMEMO-EDIT-V1_1
 Title: iPad DayMemo 编辑 V1.1
 AssignedTo: Coordinator1/Codex
