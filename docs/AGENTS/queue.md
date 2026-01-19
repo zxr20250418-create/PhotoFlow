@@ -58,8 +58,8 @@ Acceptance:
 - 不做图表，不改数据模型
 - ios_safe PASS；0 配置改动
 
-## ACTIVE — TC-IOS-IPAD-DASHBOARD-BOTTOM1-V1
-Status: ACTIVE
+## DONE — TC-IOS-IPAD-DASHBOARD-BOTTOM1-V1
+Status: DONE (no open implementation PR found; skipped merge step)
 ID: TC-IOS-IPAD-DASHBOARD-BOTTOM1-V1
 Title: iPad 看板 Bottom1 提示 V1
 AssignedTo: Coordinator1/Codex
@@ -83,6 +83,33 @@ Acceptance:
 - 默认显示 Bottom1（最低 RPH），并随范围切换同步变化
 - Bottom1 的计算不放在启动同步路径里，不引入卡顿
 - 点击可跳到会话详情
+- ios_safe PASS；0 配置改动
+
+## ACTIVE — TC-IOS-IPAD-STAGE-ACTIONS-V1
+Status: ACTIVE
+ID: TC-IOS-IPAD-STAGE-ACTIONS-V1
+Title: iPad 阶段推进 V1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- iPad 端可推进阶段（开始拍摄/选片/结束），iPhone 为权威写入端。
+
+Scope:
+- iPad UI 提供阶段按钮并显示 pending
+- iPad 写 StageEvent（可离线保存）
+- iPhone 监听 StageEvent（CloudKit remote change）串行消费并写 canonical SessionRecord，同步至 watch/iPad
+
+Guardrails:
+- Allowed files: PhotoFlow/PhotoFlow/**/*.swift
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- iPad 在线推进 -> iPhone + watch 对齐 <=10s，pending 清除
+- iPad 离线推进 -> pending 显示；恢复后 <=60s 对齐并清 pending
+- 旧动作不回滚 canonical（revision 规则生效）
+- 启动不卡/白屏
 - ios_safe PASS；0 配置改动
 
 ## DONE — TC-SYNC-PHONE-TO-WATCH-V1
