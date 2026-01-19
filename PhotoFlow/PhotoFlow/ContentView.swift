@@ -578,6 +578,7 @@ final class CloudDataStore: ObservableObject {
     @Published private(set) var lastCloudSyncAt: Date?
     @Published private(set) var lastRevision: Int64 = 0
     @Published private(set) var pendingCount: Int = 0
+    @Published private(set) var isRefreshing: Bool = false
     @Published private(set) var storeCloudEnabled: Bool = false
     @Published private(set) var cloudAccountStatus: String = "unknown"
     @Published private(set) var lastCloudError: String?
@@ -651,7 +652,6 @@ final class CloudDataStore: ObservableObject {
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         observeRemoteChanges()
         observeCloudEvents()
-        refreshAccountStatus()
         refreshAll()
     }
 
@@ -887,26 +887,28 @@ final class CloudDataStore: ObservableObject {
         .store(in: &cancellables)
     }
 
-    func forceCloudRefresh() {
+    func forceCloudRefreshAsync() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
         print("CloudDataStore force refresh requested")
         refreshAll()
-        refreshAccountStatus()
-        fetchCloudDebugCounts()
+        await refreshAccountStatusAsync()
+        await fetchCloudDebugCountsAsync()
     }
 
-    private func refreshAccountStatus() {
+    private func refreshAccountStatusAsync() async {
         let container = CKContainer(identifier: Self.cloudContainerIdentifier)
-        container.accountStatus { [weak self] status, error in
-            Task { @MainActor in
-                if let error {
-                    self?.lastCloudError = Self.formatError(error)
-                }
-                self?.cloudAccountStatus = Self.accountStatusLabel(status)
-            }
+        do {
+            let status = try await container.accountStatus()
+            cloudAccountStatus = Self.accountStatusLabel(status)
+        } catch {
+            lastCloudError = Self.formatError(error)
+            cloudAccountStatus = "error"
         }
     }
 
-    private func fetchCloudDebugCounts() {
+    private func fetchCloudDebugCountsAsync() async {
         guard storeCloudEnabled else {
             cloudTestMemoCount = nil
             cloudTestSessionCount = nil
@@ -914,50 +916,48 @@ final class CloudDataStore: ObservableObject {
         }
         let container = CKContainer(identifier: Self.cloudContainerIdentifier)
         let database = container.privateCloudDatabase
-        queryCloudCount(
-            database: database,
-            recordType: EntityName.memo,
-            predicate: NSPredicate(format: "text CONTAINS %@", Self.cloudTestMemoPrefix)
-        ) { [weak self] count, error in
-            Task { @MainActor in
-                if let error {
-                    self?.lastCloudError = Self.formatError(error)
-                }
-                self?.cloudTestMemoCount = count
-            }
-        }
-        queryCloudCount(
-            database: database,
-            recordType: EntityName.session,
-            predicate: NSPredicate(format: "sessionId BEGINSWITH %@", Self.cloudTestSessionPrefix)
-        ) { [weak self] count, error in
-            Task { @MainActor in
-                if let error {
-                    self?.lastCloudError = Self.formatError(error)
-                }
-                self?.cloudTestSessionCount = count
-            }
+        do {
+            async let memoCount = queryCloudCountAsync(
+                database: database,
+                recordType: EntityName.memo,
+                predicate: NSPredicate(format: "text CONTAINS %@", Self.cloudTestMemoPrefix)
+            )
+            async let sessionCount = queryCloudCountAsync(
+                database: database,
+                recordType: EntityName.session,
+                predicate: NSPredicate(format: "sessionId BEGINSWITH %@", Self.cloudTestSessionPrefix)
+            )
+            let (memoValue, sessionValue) = try await (memoCount, sessionCount)
+            cloudTestMemoCount = memoValue
+            cloudTestSessionCount = sessionValue
+        } catch {
+            lastCloudError = Self.formatError(error)
         }
     }
 
-    private func queryCloudCount(
+    private func queryCloudCountAsync(
         database: CKDatabase,
         recordType: String,
-        predicate: NSPredicate,
-        completion: @escaping (Int?, Error?) -> Void
-    ) {
-        let query = CKQuery(recordType: recordType, predicate: predicate)
-        let operation = CKQueryOperation(query: query)
-        operation.desiredKeys = []
-        operation.resultsLimit = 200
-        var count = 0
-        operation.recordFetchedBlock = { _ in
-            count += 1
+        predicate: NSPredicate
+    ) async throws -> Int {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = CKQuery(recordType: recordType, predicate: predicate)
+            let operation = CKQueryOperation(query: query)
+            operation.desiredKeys = []
+            operation.resultsLimit = 200
+            var count = 0
+            operation.recordFetchedBlock = { _ in
+                count += 1
+            }
+            operation.queryCompletionBlock = { _, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: count)
+                }
+            }
+            database.add(operation)
         }
-        operation.queryCompletionBlock = { _, error in
-            completion(error == nil ? count : nil, error)
-        }
-        database.add(operation)
     }
 
     private static func accountStatusLabel(_ status: CKAccountStatus) -> String {
@@ -2073,9 +2073,22 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             Button("Force Cloud Refresh") {
-                cloudStore.forceCloudRefresh()
+                Task {
+                    await cloudStore.forceCloudRefreshAsync()
+                }
             }
             .buttonStyle(.bordered)
+            .disabled(cloudStore.isRefreshing)
+
+            if cloudStore.isRefreshing {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Refreshing...")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             if !isReadOnlyDevice {
                 HStack(spacing: 8) {
@@ -2134,9 +2147,6 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .onAppear {
-            cloudStore.forceCloudRefresh()
-        }
     }
 
     private func cloudSessionDurations(
@@ -3451,7 +3461,7 @@ struct ContentView: View {
     }
 
     private var shouldShowDebugControls: Bool {
-        isDebugBuild || debugModeEnabled
+        debugModeEnabled
     }
 
     private var buildFingerprintText: String {
