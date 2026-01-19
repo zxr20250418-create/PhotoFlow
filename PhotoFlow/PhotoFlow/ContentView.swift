@@ -675,6 +675,10 @@ final class CloudDataStore: ObservableObject {
         updatedAt: Date = Date(),
         sourceDevice: String? = nil
     ) {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
         let existingRevision = int64Value(record, key: SessionField.revision)
@@ -709,6 +713,10 @@ final class CloudDataStore: ObservableObject {
         updatedAt: Date = Date(),
         sourceDevice: String? = nil
     ) {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
         let existingRevision = int64Value(record, key: SessionField.revision)
@@ -745,6 +753,10 @@ final class CloudDataStore: ObservableObject {
         updatedAt: Date = Date(),
         sourceDevice: String? = nil
     ) {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
         let existingRevision = int64Value(record, key: SessionField.revision)
@@ -781,6 +793,10 @@ final class CloudDataStore: ObservableObject {
         updatedAt: Date = Date(),
         sourceDevice: String? = nil
     ) {
+        guard !dayKey.isEmpty else {
+            assertionFailure("dayKey is required")
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchShiftManagedObject(dayKey: dayKey)
         let existingRevision = int64Value(record, key: ShiftField.revision)
@@ -809,6 +825,10 @@ final class CloudDataStore: ObservableObject {
         updatedAt: Date = Date(),
         sourceDevice: String? = nil
     ) {
+        guard !dayKey.isEmpty else {
+            assertionFailure("dayKey is required")
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchMemoManagedObject(dayKey: dayKey)
         let existingRevision = int64Value(record, key: MemoField.revision)
@@ -907,6 +927,14 @@ final class CloudDataStore: ObservableObject {
         print("CloudDataStore force refresh requested")
         refreshAll()
         var errors: [Error] = []
+        if !storeCloudEnabled {
+            let error = NSError(
+                domain: "CloudDataStore",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "storeCloudEnabled=false"]
+            )
+            errors.append(error)
+        }
         if let error = await refreshAccountStatusAsync() {
             errors.append(error)
         }
@@ -916,12 +944,81 @@ final class CloudDataStore: ObservableObject {
         if errors.isEmpty {
             lastRefreshStatus = "success"
             lastRefreshError = nil
+            cloudSyncError = nil
+            lastCloudError = nil
         } else {
             let detail = errors.map { Self.formatError($0) }.joined(separator: " | ")
             lastRefreshStatus = "fail"
             lastRefreshError = detail
             cloudSyncError = detail
             lastCloudError = detail
+        }
+    }
+
+    func resetLocalStoreAsync() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        lastRefreshStatus = "resetting"
+        lastRefreshError = nil
+        let result = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: ResetResult(success: false, error: nil))
+                    return
+                }
+                let output = self.performResetLocalStore()
+                continuation.resume(returning: output)
+            }
+        }
+        if result.success {
+            lastRefreshStatus = "reset-success"
+            lastRefreshError = nil
+            storeCloudEnabled = true
+            storeLoadError = nil
+            lastCloudError = nil
+        } else {
+            let detail = result.error.map { Self.formatError($0) } ?? "unknown reset error"
+            lastRefreshStatus = "reset-fail"
+            lastRefreshError = detail
+            storeCloudEnabled = false
+            storeLoadError = detail
+            lastCloudError = detail
+        }
+        isRefreshing = false
+        refreshAll()
+    }
+
+    private struct ResetResult {
+        let success: Bool
+        let error: Error?
+    }
+
+    private func performResetLocalStore() -> ResetResult {
+        let coordinator = container.persistentStoreCoordinator
+        let stores = coordinator.persistentStores
+        for store in stores {
+            if let url = store.url {
+                do {
+                    try coordinator.remove(store)
+                    try coordinator.destroyPersistentStore(at: url, ofType: NSSQLiteStoreType, options: store.options)
+                    deleteStoreFiles(at: url)
+                } catch {
+                    return ResetResult(success: false, error: error)
+                }
+            }
+        }
+        let load = Self.loadStores(container: container)
+        return ResetResult(success: load.success, error: load.error)
+    }
+
+    private func deleteStoreFiles(at url: URL) {
+        let fm = FileManager.default
+        let base = url.deletingPathExtension().path
+        let candidates = [url.path, "\(base)-shm", "\(base)-wal"]
+        for path in candidates {
+            if fm.fileExists(atPath: path) {
+                try? fm.removeItem(atPath: path)
+            }
         }
     }
 
@@ -1065,8 +1162,15 @@ final class CloudDataStore: ObservableObject {
     private func fetchSessionRecords() -> [SessionRecord] {
         let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
         let objects = (try? context.fetch(request)) ?? []
-        return objects.compactMap { object in
-            guard let sessionId = object.value(forKey: SessionField.sessionId) as? String else { return nil }
+        let deduped = dedupeObjects(
+            objects,
+            idKey: SessionField.sessionId,
+            revisionKey: SessionField.revision,
+            sourceKey: SessionField.sourceDevice
+        )
+        return deduped.values.compactMap { object in
+            guard let sessionId = object.value(forKey: SessionField.sessionId) as? String,
+                  !sessionId.isEmpty else { return nil }
             let stage = stringValue(object, key: SessionField.stage, fallback: Self.defaultStage)
             let updatedAtSeconds = doubleValue(object, key: SessionField.updatedAt)
             return SessionRecord(
@@ -1091,8 +1195,15 @@ final class CloudDataStore: ObservableObject {
     private func fetchShiftRecords() -> [ShiftRecordSnapshot] {
         let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.shift)
         let objects = (try? context.fetch(request)) ?? []
-        return objects.compactMap { object in
-            guard let dayKey = object.value(forKey: ShiftField.dayKey) as? String else { return nil }
+        let deduped = dedupeObjects(
+            objects,
+            idKey: ShiftField.dayKey,
+            revisionKey: ShiftField.revision,
+            sourceKey: ShiftField.sourceDevice
+        )
+        return deduped.values.compactMap { object in
+            guard let dayKey = object.value(forKey: ShiftField.dayKey) as? String,
+                  !dayKey.isEmpty else { return nil }
             let updatedAtSeconds = doubleValue(object, key: ShiftField.updatedAt)
             return ShiftRecordSnapshot(
                 dayKey: dayKey,
@@ -1108,8 +1219,15 @@ final class CloudDataStore: ObservableObject {
     private func fetchDayMemos() -> [DayMemoSnapshot] {
         let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.memo)
         let objects = (try? context.fetch(request)) ?? []
-        return objects.compactMap { object in
-            guard let dayKey = object.value(forKey: MemoField.dayKey) as? String else { return nil }
+        let deduped = dedupeObjects(
+            objects,
+            idKey: MemoField.dayKey,
+            revisionKey: MemoField.revision,
+            sourceKey: MemoField.sourceDevice
+        )
+        return deduped.values.compactMap { object in
+            guard let dayKey = object.value(forKey: MemoField.dayKey) as? String,
+                  !dayKey.isEmpty else { return nil }
             let updatedAtSeconds = doubleValue(object, key: MemoField.updatedAt)
             return DayMemoSnapshot(
                 dayKey: dayKey,
@@ -1122,24 +1240,117 @@ final class CloudDataStore: ObservableObject {
     }
 
     private func fetchSessionManagedObject(sessionId: String) -> NSManagedObject? {
-        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
-        request.predicate = NSPredicate(format: "%K == %@", SessionField.sessionId, sessionId)
-        request.fetchLimit = 1
-        return (try? context.fetch(request))?.first
+        fetchUniqueManagedObject(
+            entityName: EntityName.session,
+            idKey: SessionField.sessionId,
+            idValue: sessionId,
+            revisionKey: SessionField.revision,
+            sourceKey: SessionField.sourceDevice
+        )
     }
 
     private func fetchShiftManagedObject(dayKey: String) -> NSManagedObject? {
-        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.shift)
-        request.predicate = NSPredicate(format: "%K == %@", ShiftField.dayKey, dayKey)
-        request.fetchLimit = 1
-        return (try? context.fetch(request))?.first
+        fetchUniqueManagedObject(
+            entityName: EntityName.shift,
+            idKey: ShiftField.dayKey,
+            idValue: dayKey,
+            revisionKey: ShiftField.revision,
+            sourceKey: ShiftField.sourceDevice
+        )
     }
 
     private func fetchMemoManagedObject(dayKey: String) -> NSManagedObject? {
-        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.memo)
-        request.predicate = NSPredicate(format: "%K == %@", MemoField.dayKey, dayKey)
-        request.fetchLimit = 1
-        return (try? context.fetch(request))?.first
+        fetchUniqueManagedObject(
+            entityName: EntityName.memo,
+            idKey: MemoField.dayKey,
+            idValue: dayKey,
+            revisionKey: MemoField.revision,
+            sourceKey: MemoField.sourceDevice
+        )
+    }
+
+    private func fetchUniqueManagedObject(
+        entityName: String,
+        idKey: String,
+        idValue: String,
+        revisionKey: String,
+        sourceKey: String
+    ) -> NSManagedObject? {
+        guard !idValue.isEmpty else { return nil }
+        let request = NSFetchRequest<NSManagedObject>(entityName: entityName)
+        request.predicate = NSPredicate(format: "%K == %@", idKey, idValue)
+        let objects = (try? context.fetch(request)) ?? []
+        guard let winner = selectPreferredObject(objects, revisionKey: revisionKey, sourceKey: sourceKey) else {
+            return nil
+        }
+        for object in objects where object != winner {
+            context.delete(object)
+        }
+        return winner
+    }
+
+    private func dedupeObjects(
+        _ objects: [NSManagedObject],
+        idKey: String,
+        revisionKey: String,
+        sourceKey: String
+    ) -> [String: NSManagedObject] {
+        var winners: [String: NSManagedObject] = [:]
+        var revisions: [String: Int64] = [:]
+        var sources: [String: String] = [:]
+        for object in objects {
+            guard let id = object.value(forKey: idKey) as? String, !id.isEmpty else { continue }
+            let revision = int64Value(object, key: revisionKey)
+            let source = stringValue(object, key: sourceKey, fallback: "unknown")
+            if let existingRevision = revisions[id], let existingSource = sources[id] {
+                if shouldApply(
+                    incomingRevision: revision,
+                    incomingSource: source,
+                    existingRevision: existingRevision,
+                    existingSource: existingSource
+                ) {
+                    winners[id] = object
+                    revisions[id] = revision
+                    sources[id] = source
+                }
+            } else {
+                winners[id] = object
+                revisions[id] = revision
+                sources[id] = source
+            }
+        }
+        return winners
+    }
+
+    private func selectPreferredObject(
+        _ objects: [NSManagedObject],
+        revisionKey: String,
+        sourceKey: String
+    ) -> NSManagedObject? {
+        var winner: NSManagedObject?
+        var winnerRevision: Int64 = 0
+        var winnerSource: String = "unknown"
+        for object in objects {
+            let revision = int64Value(object, key: revisionKey)
+            let source = stringValue(object, key: sourceKey, fallback: "unknown")
+            if winner == nil {
+                winner = object
+                winnerRevision = revision
+                winnerSource = source
+                continue
+            }
+            if shouldApply(
+                incomingRevision: revision,
+                incomingSource: source,
+                existingRevision: winnerRevision,
+                existingSource: winnerSource
+            ) {
+                winner = object
+                winnerRevision = revision
+                winnerSource = source
+            }
+        }
+        return winner
     }
 
     private func nextRevision(existing: Int64) -> Int64 {
@@ -1249,6 +1460,8 @@ final class CloudDataStore: ObservableObject {
         )
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+        description.shouldMigrateStoreAutomatically = true
+        description.shouldInferMappingModelAutomatically = true
         container.persistentStoreDescriptions = [description]
         let cloudLoad = loadStores(container: container)
         if cloudLoad.success {
@@ -1258,6 +1471,8 @@ final class CloudDataStore: ObservableObject {
         let fallbackDescription = NSPersistentStoreDescription(url: storeURL())
         fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+        fallbackDescription.shouldMigrateStoreAutomatically = true
+        fallbackDescription.shouldInferMappingModelAutomatically = true
         fallback.persistentStoreDescriptions = [fallbackDescription]
         let fallbackLoad = loadStores(container: fallback)
         if !fallbackLoad.success {
@@ -1298,7 +1513,7 @@ final class CloudDataStore: ObservableObject {
         session.name = EntityName.session
         session.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
         session.properties = [
-            attribute(SessionField.sessionId, type: .stringAttributeType),
+            attribute(SessionField.sessionId, type: .stringAttributeType, optional: true),
             attribute(SessionField.stage, type: .stringAttributeType, defaultValue: Self.defaultStage),
             attribute(SessionField.shootingStart, type: .dateAttributeType, optional: true),
             attribute(SessionField.selectingStart, type: .dateAttributeType, optional: true),
@@ -1313,32 +1528,29 @@ final class CloudDataStore: ObservableObject {
             attribute(SessionField.isVoided, type: .booleanAttributeType, defaultValue: false),
             attribute(SessionField.isDeleted, type: .booleanAttributeType, defaultValue: false)
         ]
-        session.uniquenessConstraints = [[SessionField.sessionId]]
 
         let shift = NSEntityDescription()
         shift.name = EntityName.shift
         shift.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
         shift.properties = [
-            attribute(ShiftField.dayKey, type: .stringAttributeType),
+            attribute(ShiftField.dayKey, type: .stringAttributeType, optional: true),
             attribute(ShiftField.startAt, type: .dateAttributeType, optional: true),
             attribute(ShiftField.endAt, type: .dateAttributeType, optional: true),
             attribute(ShiftField.revision, type: .integer64AttributeType, defaultValue: 0),
             attribute(ShiftField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
             attribute(ShiftField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
         ]
-        shift.uniquenessConstraints = [[ShiftField.dayKey]]
 
         let memo = NSEntityDescription()
         memo.name = EntityName.memo
         memo.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
         memo.properties = [
-            attribute(MemoField.dayKey, type: .stringAttributeType),
+            attribute(MemoField.dayKey, type: .stringAttributeType, optional: true),
             attribute(MemoField.text, type: .stringAttributeType, optional: true),
             attribute(MemoField.revision, type: .integer64AttributeType, defaultValue: 0),
             attribute(MemoField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
             attribute(MemoField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
         ]
-        memo.uniquenessConstraints = [[MemoField.dayKey]]
 
         model.entities = [session, shift, memo]
         return model
@@ -2157,6 +2369,7 @@ struct ContentView: View {
         let accountStatusText = cloudStore.cloudAccountStatus
         let storeLoadErrorText = cloudStore.storeLoadError ?? "—"
         let cloudSyncErrorText = cloudStore.cloudSyncError ?? "—"
+        let lastCloudErrorText = cloudStore.lastCloudError ?? "—"
         let refreshStatusText = cloudStore.lastRefreshStatus
         let refreshErrorText = cloudStore.lastRefreshError ?? "—"
         let cloudMemoCountText = cloudStore.cloudTestMemoCount.map(String.init) ?? "--"
@@ -2169,6 +2382,14 @@ struct ContentView: View {
             Button("Force Cloud Refresh") {
                 Task {
                     await cloudStore.forceCloudRefreshAsync()
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(cloudStore.isRefreshing)
+
+            Button("Reset Local Store") {
+                Task {
+                    await cloudStore.resetLocalStoreAsync()
                 }
             }
             .buttonStyle(.bordered)
@@ -2233,6 +2454,7 @@ struct ContentView: View {
                 Text("CKAccountStatus: \(accountStatusText)")
                 Text("storeLoadError: \(storeLoadErrorText)")
                 Text("cloudSyncError: \(cloudSyncErrorText)")
+                Text("lastCloudError: \(lastCloudErrorText)")
                 Text("refreshStatus: \(refreshStatusText)")
                 Text("refreshError: \(refreshErrorText)")
                 Text("localCounts: memo \(testMemos.count) · session \(testSessions.count)")
