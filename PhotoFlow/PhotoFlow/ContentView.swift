@@ -797,6 +797,43 @@ final class CloudDataStore: ObservableObject {
         saveContext()
     }
 
+    func tombstoneSession(
+        sessionId: String,
+        updatedAt: Date = Date(),
+        revision: Int64? = nil,
+        sourceDevice: String? = nil
+    ) {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
+        request.predicate = NSPredicate(format: "%K == %@", SessionField.sessionId, sessionId)
+        let objects = (try? context.fetch(request)) ?? []
+        let maxRevision = objects.map { int64Value($0, key: SessionField.revision) }.max() ?? 0
+        let nowMillis = Int64(updatedAt.timeIntervalSince1970 * 1000)
+        let nextRevisionValue = revision ?? max(nowMillis, maxRevision + 1)
+        let targets: [NSManagedObject]
+        if objects.isEmpty {
+            let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+            target.setValue(sessionId, forKey: SessionField.sessionId)
+            targets = [target]
+        } else {
+            targets = objects
+        }
+        for target in targets {
+            target.setValue(sessionId, forKey: SessionField.sessionId)
+            target.setValue(Self.defaultStage, forKey: SessionField.stage)
+            target.setValue(false, forKey: SessionField.isVoided)
+            target.setValue(true, forKey: SessionField.isDeleted)
+            target.setValue(nextRevisionValue, forKey: SessionField.revision)
+            target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+            target.setValue(source, forKey: SessionField.sourceDevice)
+        }
+        saveContext()
+    }
+
     func upsertShiftRecord(
         dayKey: String,
         startAt: Date?,
@@ -1882,7 +1919,7 @@ final class SessionVisibilityStore: ObservableObject {
     }
 
     func markDeleted(_ id: String) {
-        cloudStore.updateSessionVisibility(sessionId: id, isVoided: false, isDeleted: true)
+        cloudStore.tombstoneSession(sessionId: id)
     }
 
     private func apply(records: [CloudDataStore.SessionRecord]) {
@@ -2170,7 +2207,21 @@ struct ContentView: View {
     }
 
     private func syncSessionSummaries(from records: [CloudDataStore.SessionRecord]) {
-        let summaries = records
+        var winners: [String: CloudDataStore.SessionRecord] = [:]
+        for record in records {
+            if let existing = winners[record.id] {
+                if record.revision > existing.revision {
+                    winners[record.id] = record
+                } else if record.revision == existing.revision {
+                    if sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
+                        winners[record.id] = record
+                    }
+                }
+            } else {
+                winners[record.id] = record
+            }
+        }
+        let summaries = winners.values
             .filter { !$0.isDeleted }
             .filter { $0.shootingStart != nil || $0.selectingStart != nil || $0.endedAt != nil }
             .map { record in
@@ -2796,6 +2847,21 @@ struct ContentView: View {
         sessionStart(for: record) ?? record.updatedAt
     }
 
+    private func latestSessionRecord(for sessionId: String) -> CloudDataStore.SessionRecord? {
+        let candidates = cloudStore.sessionRecords.filter { $0.id == sessionId }
+        guard var winner = candidates.first else { return nil }
+        for record in candidates.dropFirst() {
+            if record.revision > winner.revision {
+                winner = record
+            } else if record.revision == winner.revision {
+                if sourcePriority(record.sourceDevice) >= sourcePriority(winner.sourceDevice) {
+                    winner = record
+                }
+            }
+        }
+        return winner
+    }
+
     private func stageLabel(for stage: String) -> String {
         switch stage {
         case WatchSyncStore.StageSyncKey.stageShooting:
@@ -3179,6 +3245,11 @@ struct ContentView: View {
         let rphLine = rphText(for: summary)
         let hasOverride = timeOverrideStore.override(for: summary.id) != nil
         let isVoided = sessionVisibilityStore.isVoided(summary.id)
+        let record = latestSessionRecord(for: summary.id)
+        let revisionText = record.map { String($0.revision) } ?? "--"
+        let updatedText = record.map { formatSessionTimeWithSeconds($0.updatedAt) } ?? "--"
+        let sourceText = record?.sourceDevice ?? "--"
+        let deletedText = (record?.isDeleted ?? false) ? "yes" : "no"
         let deleteBinding = Binding<Bool>(
             get: { deleteCandidateId == summary.id },
             set: { isPresented in
@@ -3285,6 +3356,34 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .disabled(note.isEmpty)
                 }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("同步")
+                        .font(.headline)
+                    HStack {
+                        Text("revision")
+                        Spacer()
+                        Text(revisionText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("updatedAt")
+                        Spacer()
+                        Text(updatedText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("source")
+                        Spacer()
+                        Text(sourceText)
+                    }
+                    HStack {
+                        Text("deleted")
+                        Spacer()
+                        Text(deletedText)
+                    }
+                }
+                .font(.footnote)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("本单操作")
