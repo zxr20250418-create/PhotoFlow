@@ -390,8 +390,8 @@ B 联网后 iPhone 端出现更新（允许几十秒）
 C 冲突按 revision 规则合并
 D ios_safe PASS；0 配置改动
 
-## ACTIVE — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
-Status: ACTIVE
+## DONE — TC-IOS-WIDGET-COMPLICATION-TIMER-V1
+Status: DONE (merged in PR #149)
 ID: TC-IOS-WIDGET-COMPLICATION-TIMER-V1
 Title: Widget/Complication 计时实时走（不再卡 00:00）
 AssignedTo: Executor
