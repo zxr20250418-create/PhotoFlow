@@ -329,10 +329,21 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         if let endedAt = state.endedAt {
             payload[CanonicalKey.endedAt] = endedAt.timeIntervalSince1970
         }
+        let stageStartAt: Date?
+        switch state.stage {
+        case StageSyncKey.stageSelecting:
+            stageStartAt = state.selectingStart
+        case StageSyncKey.stageShooting:
+            stageStartAt = state.shootingStart
+        default:
+            stageStartAt = nil
+        }
         let isRunning = state.stage != StageSyncKey.stageStopped
         payload[StageSyncKey.stage] = state.stage
         payload[StageSyncKey.isRunning] = isRunning
-        payload[StageSyncKey.startedAt] = state.shootingStart?.timeIntervalSince1970
+        if let stageStartAt {
+            payload[StageSyncKey.startedAt] = stageStartAt.timeIntervalSince1970
+        }
         payload[StageSyncKey.lastUpdatedAt] = state.updatedAt.timeIntervalSince1970
         return payload
     }

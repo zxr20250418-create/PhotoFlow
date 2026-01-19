@@ -746,7 +746,7 @@ struct ContentView: View {
             let resolvedSessionId = sessionId ?? makeSessionId(startedAt: session.shootingStart ?? now)
             sessionId = resolvedSessionId
             syncStore.sendSessionEvent(action: "startSelecting", sessionId: resolvedSessionId, clientAt: now)
-            updateWidgetState(isRunning: true, startedAt: session.shootingStart, stage: WidgetStateStore.stageSelecting)
+            updateWidgetState(isRunning: true, startedAt: session.selectingStart, stage: WidgetStateStore.stageSelecting)
             playStageHaptic()
         case .selecting:
             stage = .ended
@@ -835,7 +835,7 @@ struct ContentView: View {
             stage: stage,
             lastUpdatedAt: lastUpdatedAt
         )
-        WidgetCenter.shared.reloadTimelines(ofKind: WidgetStateStore.widgetKind)
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     @MainActor
@@ -866,9 +866,18 @@ struct ContentView: View {
             }
         }
 
+        let stageStartAt: Date?
+        switch stageValue {
+        case WidgetStateStore.stageSelecting:
+            stageStartAt = session.selectingStart
+        case WidgetStateStore.stageShooting:
+            stageStartAt = session.shootingStart
+        default:
+            stageStartAt = nil
+        }
         updateWidgetState(
             isRunning: stageValue != WidgetStateStore.stageStopped,
-            startedAt: state.shootingStart,
+            startedAt: stageStartAt,
             stage: stageValue,
             lastUpdatedAt: state.updatedAt
         )
