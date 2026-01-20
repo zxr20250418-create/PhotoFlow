@@ -10,8 +10,33 @@ Status: ABANDONED (rollback; PR #33 closed)
 ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
-## ACTIVE — TC-IOS-DAILY-REVIEW-V1_1-RPHWORK-SEARCH
+## ACTIVE — TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
 Status: ACTIVE
+# TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
+Priority: P1
+Goal:
+- Home 顶部日期下方 备忘框上方显示 明天唯一动作
+- 次日自动承接到 DayMemo 仅当 DayMemo 为空时
+
+Scope:
+- Banner: tomorrowOneAction 非空才显示
+- Cross-day: app active 检测跨天
+  若 today DayMemo.text 为空 且 yesterday tomorrowOneAction 非空
+  自动写入 today DayMemo.text = yesterday tomorrowOneAction 并保存
+  若 today DayMemo 已有内容 绝不覆盖
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist project.pbxproj entitlements targets appex watch widget config
+- PR before: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 修改复盘详情 tomorrowOneAction 回到 Home 立即可见
+B 跨天 today memo 为空才自动承接 不为空不覆盖
+C ios_safe PASS 0 配置改动
+
+## DONE — TC-IOS-DAILY-REVIEW-V1_1-RPHWORK-SEARCH
+Status: DONE (merged in PR #173)
 ID: TC-IOS-DAILY-REVIEW-V1_1-RPHWORK-SEARCH
 Title: 复盘 RPH 口径调整 + 复盘记录搜索与按月筛选 V1.1
 AssignedTo: Coordinator1/Codex
