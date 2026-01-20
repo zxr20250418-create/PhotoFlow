@@ -659,6 +659,7 @@ final class CloudDataStore: ObservableObject {
         let recordsFound: Int
         let maxRevisionBefore: Int64
         let maxRevisionAfter: Int64
+        let winnerDeleted: Bool
     }
 
     init() {
@@ -839,7 +840,12 @@ final class CloudDataStore: ObservableObject {
     ) -> TombstoneDebugInfo {
         guard !sessionId.isEmpty else {
             assertionFailure("sessionId is required")
-            return TombstoneDebugInfo(recordsFound: 0, maxRevisionBefore: 0, maxRevisionAfter: 0)
+            return TombstoneDebugInfo(
+                recordsFound: 0,
+                maxRevisionBefore: 0,
+                maxRevisionAfter: 0,
+                winnerDeleted: false
+            )
         }
         let source = sourceDevice ?? localSourceDevice
         let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
@@ -847,7 +853,7 @@ final class CloudDataStore: ObservableObject {
         let objects = (try? context.fetch(request)) ?? []
         let maxRevision = objects.map { int64Value($0, key: SessionField.revision) }.max() ?? 0
         let nowMillis = Int64(updatedAt.timeIntervalSince1970 * 1000)
-        let nextRevisionValue = revision ?? max(nowMillis + 10_000, maxRevision + 1)
+        let nextRevisionValue = revision ?? max(nowMillis + 10_000, maxRevision + 10_000)
         blockedSessionIds.insert(sessionId)
         let targets: [NSManagedObject]
         if objects.isEmpty {
@@ -857,7 +863,6 @@ final class CloudDataStore: ObservableObject {
         } else {
             targets = objects
         }
-        let recordsFound = max(objects.count, targets.count)
         for target in targets {
             let existingStage = stringValue(target, key: SessionField.stage, fallback: Self.defaultStage)
             let existingVoided = boolValue(target, key: SessionField.isVoided)
@@ -870,10 +875,43 @@ final class CloudDataStore: ObservableObject {
             target.setValue(source, forKey: SessionField.sourceDevice)
         }
         saveContext()
+        context.refreshAllObjects()
+        var postObjects = (try? context.fetch(request)) ?? []
+        var maxRevisionAfter = postObjects.map { int64Value($0, key: SessionField.revision) }.max() ?? nextRevisionValue
+        var winner = selectPreferredObject(postObjects, revisionKey: SessionField.revision, sourceKey: SessionField.sourceDevice)
+        var winnerDeleted = boolValue(winner, key: SessionField.isDeleted)
+        if !winnerDeleted {
+            let retryRevision = max(maxRevisionAfter + 10_000, nextRevisionValue + 10_000)
+            if postObjects.isEmpty {
+                let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+                target.setValue(sessionId, forKey: SessionField.sessionId)
+                postObjects = [target]
+            }
+            for target in postObjects {
+                let existingStage = stringValue(target, key: SessionField.stage, fallback: Self.defaultStage)
+                let existingVoided = boolValue(target, key: SessionField.isVoided)
+                target.setValue(sessionId, forKey: SessionField.sessionId)
+                target.setValue(existingStage, forKey: SessionField.stage)
+                target.setValue(existingVoided, forKey: SessionField.isVoided)
+                target.setValue(true, forKey: SessionField.isDeleted)
+                target.setValue(retryRevision, forKey: SessionField.revision)
+                target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+                target.setValue(source, forKey: SessionField.sourceDevice)
+            }
+            saveContext()
+            context.refreshAllObjects()
+            let finalObjects = (try? context.fetch(request)) ?? []
+            maxRevisionAfter = finalObjects.map { int64Value($0, key: SessionField.revision) }.max() ?? retryRevision
+            winner = selectPreferredObject(finalObjects, revisionKey: SessionField.revision, sourceKey: SessionField.sourceDevice)
+            winnerDeleted = boolValue(winner, key: SessionField.isDeleted)
+            postObjects = finalObjects
+        }
+        let recordsFound = max(objects.count, postObjects.count)
         return TombstoneDebugInfo(
             recordsFound: recordsFound,
             maxRevisionBefore: maxRevision,
-            maxRevisionAfter: nextRevisionValue
+            maxRevisionAfter: maxRevisionAfter,
+            winnerDeleted: winnerDeleted
         )
     }
 
@@ -2094,6 +2132,7 @@ struct ContentView: View {
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
     @StateObject private var cloudStore: CloudDataStore
@@ -2998,7 +3037,7 @@ struct ContentView: View {
         let recordsFoundText = tombstoneInfo.map { String($0.recordsFound) } ?? "--"
         let maxRevisionBeforeText = tombstoneInfo.map { String($0.maxRevisionBefore) } ?? "--"
         let maxRevisionAfterText = tombstoneInfo.map { String($0.maxRevisionAfter) } ?? "--"
-        let winnerDeletedText = record.isDeleted ? "yes" : "no"
+        let winnerDeletedText = tombstoneInfo.map { $0.winnerDeleted ? "yes" : "no" } ?? (record.isDeleted ? "yes" : "no")
         return VStack(alignment: .leading, spacing: 8) {
             Text("会话详情")
                 .font(.headline)
@@ -3333,7 +3372,7 @@ struct ContentView: View {
         let recordsFoundText = tombstoneInfo.map { String($0.recordsFound) } ?? "--"
         let maxRevisionBeforeText = tombstoneInfo.map { String($0.maxRevisionBefore) } ?? "--"
         let maxRevisionAfterText = tombstoneInfo.map { String($0.maxRevisionAfter) } ?? "--"
-        let winnerDeletedText = deletedText
+        let winnerDeletedText = tombstoneInfo.map { $0.winnerDeleted ? "yes" : "no" } ?? deletedText
         let deleteBinding = Binding<Bool>(
             get: { deleteCandidateId == summary.id },
             set: { isPresented in
@@ -3522,6 +3561,7 @@ struct ContentView: View {
             Button("删除", role: .destructive) {
                 deleteSession(id: summary.id)
                 deleteCandidateId = nil
+                dismiss()
             }
             Button("取消", role: .cancel) {
                 deleteCandidateId = nil
@@ -4304,7 +4344,7 @@ struct ContentView: View {
         debugModeEnabled
     }
 
-    private let buildShortHashOverride = "fix158b"
+    private let buildShortHashOverride = "fix158c"
 
     private var buildFingerprintText: String {
         let info = Bundle.main.infoDictionary
