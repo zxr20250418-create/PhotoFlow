@@ -729,10 +729,10 @@ final class CloudDataStore: ObservableObject {
         let existingVoided = boolValue(record, key: SessionField.isVoided)
         if record == nil {
             target.setValue(false, forKey: SessionField.isVoided)
-            target.setValue(false, forKey: SessionField.isDeleted)
+            setSessionDeleted(false, on: target)
         } else {
             target.setValue(existingVoided, forKey: SessionField.isVoided)
-            target.setValue(existingDeleted, forKey: SessionField.isDeleted)
+            setSessionDeleted(existingDeleted, on: target)
         }
         saveContext()
     }
@@ -779,10 +779,10 @@ final class CloudDataStore: ObservableObject {
         if record == nil {
             target.setValue(Self.defaultStage, forKey: SessionField.stage)
             target.setValue(false, forKey: SessionField.isVoided)
-            target.setValue(false, forKey: SessionField.isDeleted)
+            setSessionDeleted(false, on: target)
         } else {
             target.setValue(existingVoided, forKey: SessionField.isVoided)
-            target.setValue(existingDeleted, forKey: SessionField.isDeleted)
+            setSessionDeleted(existingDeleted, on: target)
         }
         saveContext()
     }
@@ -822,7 +822,7 @@ final class CloudDataStore: ObservableObject {
         target.setValue(sessionId, forKey: SessionField.sessionId)
         let existingVoided = boolValue(record, key: SessionField.isVoided)
         target.setValue(isVoided ?? existingVoided, forKey: SessionField.isVoided)
-        target.setValue(isDeleted ?? existingDeleted, forKey: SessionField.isDeleted)
+        setSessionDeleted(isDeleted ?? existingDeleted, on: target)
         target.setValue(nextRevisionValue, forKey: SessionField.revision)
         target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
         target.setValue(source, forKey: SessionField.sourceDevice)
@@ -869,7 +869,7 @@ final class CloudDataStore: ObservableObject {
             target.setValue(sessionId, forKey: SessionField.sessionId)
             target.setValue(existingStage, forKey: SessionField.stage)
             target.setValue(existingVoided, forKey: SessionField.isVoided)
-            target.setValue(true, forKey: SessionField.isDeleted)
+            setSessionDeleted(true, on: target)
             target.setValue(nextRevisionValue, forKey: SessionField.revision)
             target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
             target.setValue(source, forKey: SessionField.sourceDevice)
@@ -893,7 +893,7 @@ final class CloudDataStore: ObservableObject {
                 target.setValue(sessionId, forKey: SessionField.sessionId)
                 target.setValue(existingStage, forKey: SessionField.stage)
                 target.setValue(existingVoided, forKey: SessionField.isVoided)
-                target.setValue(true, forKey: SessionField.isDeleted)
+                setSessionDeleted(true, on: target)
                 target.setValue(retryRevision, forKey: SessionField.revision)
                 target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
                 target.setValue(source, forKey: SessionField.sourceDevice)
@@ -907,6 +907,16 @@ final class CloudDataStore: ObservableObject {
             postObjects = finalObjects
         }
         let recordsFound = max(objects.count, postObjects.count)
+        if !winnerDeleted {
+            let snapshot = postObjects.map { object in
+                let rev = int64Value(object, key: SessionField.revision)
+                let updated = doubleValue(object, key: SessionField.updatedAt)
+                let source = stringValue(object, key: SessionField.sourceDevice, fallback: "unknown")
+                let deleted = boolValue(object, key: SessionField.isDeleted)
+                return "rev=\(rev) updated=\(updated) source=\(source) deleted=\(deleted)"
+            }.joined(separator: " | ")
+            print("Tombstone persist failed for \(sessionId): \(snapshot)")
+        }
         return TombstoneDebugInfo(
             recordsFound: recordsFound,
             maxRevisionBefore: maxRevision,
@@ -1568,6 +1578,14 @@ final class CloudDataStore: ObservableObject {
 
     private func boolValue(_ object: NSManagedObject?, key: String) -> Bool {
         guard let object else { return false }
+        if key == SessionField.isDeleted {
+            if let value = object.primitiveValue(forKey: key) as? Bool {
+                return value
+            }
+            if let value = object.primitiveValue(forKey: key) as? NSNumber {
+                return value.boolValue
+            }
+        }
         if let value = object.value(forKey: key) as? Bool {
             return value
         }
@@ -1575,6 +1593,12 @@ final class CloudDataStore: ObservableObject {
             return value.boolValue
         }
         return false
+    }
+
+    private func setSessionDeleted(_ value: Bool, on object: NSManagedObject) {
+        object.willChangeValue(forKey: SessionField.isDeleted)
+        object.setPrimitiveValue(value, forKey: SessionField.isDeleted)
+        object.didChangeValue(forKey: SessionField.isDeleted)
     }
 
     private func stringValue(_ object: NSManagedObject?, key: String, fallback: String) -> String {
@@ -2017,11 +2041,13 @@ final class SessionVisibilityStore: ObservableObject {
         cloudStore.updateSessionVisibility(sessionId: id, isVoided: isVoided)
     }
 
-    func markDeleted(_ id: String) {
+    @discardableResult
+    func markDeleted(_ id: String) -> CloudDataStore.TombstoneDebugInfo {
         let debug = cloudStore.tombstoneSession(sessionId: id)
         tombstoneDebug[id] = debug
         deletedIds.insert(id)
         cloudStore.refreshLocalCache()
+        return debug
     }
 
     func tombstoneInfo(for id: String) -> CloudDataStore.TombstoneDebugInfo? {
@@ -3340,7 +3366,8 @@ struct ContentView: View {
         sessionVisibilityStore.setVoided(id, isVoided: !isVoided)
     }
 
-    private func deleteSession(id: String) {
+    @discardableResult
+    private func deleteSession(id: String) -> Bool {
         if let index = sessionSummaries.firstIndex(where: { $0.id == id }),
            sessionSummaries[index].endedAt == nil {
             resetSession()
@@ -3349,8 +3376,13 @@ struct ContentView: View {
         timeOverrideStore.clear(for: id)
         manualSessionStore.remove(id)
         sessionSummaries.removeAll { $0.id == id }
-        sessionVisibilityStore.markDeleted(id)
+        let debug = sessionVisibilityStore.markDeleted(id)
         syncSessionSummaries(from: cloudStore.sessionRecords)
+        if !debug.winnerDeleted {
+            activeAlert = .validation("Delete failed: tombstone not persisted")
+            return false
+        }
+        return true
     }
 
 
@@ -3367,7 +3399,7 @@ struct ContentView: View {
         let revisionText = record.map { String($0.revision) } ?? "--"
         let updatedText = record.map { formatSessionTimeWithSeconds($0.updatedAt) } ?? "--"
         let sourceText = record?.sourceDevice ?? "--"
-        let deletedText = (record?.isDeleted ?? sessionVisibilityStore.isDeleted(summary.id)) ? "yes" : "no"
+        let deletedText = (record?.isDeleted ?? false) ? "yes" : "no"
         let tombstoneInfo = sessionVisibilityStore.tombstoneInfo(for: summary.id)
         let recordsFoundText = tombstoneInfo.map { String($0.recordsFound) } ?? "--"
         let maxRevisionBeforeText = tombstoneInfo.map { String($0.maxRevisionBefore) } ?? "--"
@@ -3559,9 +3591,10 @@ struct ContentView: View {
         .navigationTitle("单子详情")
         .confirmationDialog("删除本单？", isPresented: deleteBinding, titleVisibility: .visible) {
             Button("删除", role: .destructive) {
-                deleteSession(id: summary.id)
-                deleteCandidateId = nil
-                dismiss()
+                if deleteSession(id: summary.id) {
+                    deleteCandidateId = nil
+                    dismiss()
+                }
             }
             Button("取消", role: .cancel) {
                 deleteCandidateId = nil
@@ -4344,7 +4377,7 @@ struct ContentView: View {
         debugModeEnabled
     }
 
-    private let buildShortHashOverride = "fix158c"
+    private let buildShortHashOverride = "fix158d"
 
     private var buildFingerprintText: String {
         let info = Bundle.main.infoDictionary
