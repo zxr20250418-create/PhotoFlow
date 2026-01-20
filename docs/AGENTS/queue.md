@@ -186,8 +186,8 @@ Acceptance:
 - 跨天进行中的单仍显示在 Home 顶部
 - ios_safe PASS；0 配置改动
 
-## ACTIVE — TC-IOS-HOME-DAYMEMO-TOGGLE-V1
-Status: ACTIVE
+## DONE — TC-IOS-HOME-DAYMEMO-TOGGLE-V1
+Status: DONE (merged in PR #168)
 ID: TC-IOS-HOME-DAYMEMO-TOGGLE-V1
 Title: Home 顶部备忘点日期展开收起 V1
 AssignedTo: Coordinator1/Codex
@@ -207,6 +207,36 @@ Acceptance:
 - 默认不显示备忘区域，不占空白
 - 点击日期展开备忘，再点收起且内容保留
 - 备忘位于日期下方、收入卡上方
+- ios_safe PASS；0 配置改动
+
+## DONE — TC-IOS-DAILY-REVIEW-GENERATE-V1
+Status: DONE (merged in PR #170)
+ID: TC-IOS-DAILY-REVIEW-GENERATE-V1
+Title: 生成今日复盘卡并持久化 V1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- 主动点“生成今日复盘”才生成；自动汇总 Top3/Bottom1 与关键指标；持久化保存；你只需填“明天唯一动作”。
+
+Scope:
+- 按钮：生成今日复盘（主动点击）
+- 持久化 DailyReview（按 dayKey upsert，保留已有 tomorrowOneAction）
+- 展示：复盘详情页 + 历史列表
+- 自动指标：income / shootingTotal / selectingTotal / RPHshoot / sessionCount / Top3(收入) / Bottom1(最低 RPHshoot)
+- 自动备注汇总：bottom1Note + notesAll（最小可用）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- （如需新增 DailyReview 实体）允许改 .xcdatamodeld，但不得 unique constraints，属性需 optional 或有 default
+- 禁止：Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑：bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- 点击生成后出现今日复盘详情页
+- Top3/Bottom1 与今日范围一致，Bottom1=最低 RPHshoot
+- “明天唯一动作”可编辑并持久化
+- 历史列表可查看过去生成的复盘
 - ios_safe PASS；0 配置改动
 
 ## DONE — TC-SYNC-PHONE-TO-WATCH-V1
@@ -944,27 +974,3 @@ StopCondition:
 - CI green
 - exec.md 更新（若有）
 - STOP
-
-# TC-IOS-DAILY-REVIEW-GENERATE-V1
-Priority: P1
-Goal: 主动点“生成今日复盘”才生成；自动汇总 Top3/Bottom1 与关键指标；持久化保存；你只需填“明天唯一动作”。
-
-Scope:
-- 按钮：生成今日复盘（主动点击）
-- 持久化 DailyReview（按 dayKey upsert，保留已有 tomorrowOneAction）
-- 展示：复盘详情页 + 历史列表
-- 自动指标：income / shootingTotal / selectingTotal / RPHshoot / sessionCount / Top3(收入) / Bottom1(最低RPHshoot)
-- 自动备注汇总：bottom1Note + notesAll（最小可用）
-
-Guardrails:
-- Allowed: PhotoFlow/PhotoFlow/**/*.swift
-- （如需新增 DailyReview 实体）允许改 .xcdatamodeld，但不得 unique constraints，属性需 optional 或有 default
-- 禁止：Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
-- PR 前必跑：bash scripts/ios_safe.sh --clean-deriveddata
-
-Acceptance:
-A 点击生成后出现今日复盘详情页
-B Top3/Bottom1 与今日范围一致，Bottom1=最低 RPHshoot
-C “明天唯一动作”可编辑并持久化
-D 历史列表可查看过去生成的复盘
-E ios_safe PASS；0 配置改动
