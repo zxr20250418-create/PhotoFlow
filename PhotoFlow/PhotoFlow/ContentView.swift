@@ -3477,7 +3477,7 @@ struct ContentView: View {
 
     private var memoEditor: some View {
         let dayKey = dailyMemoStore.dayKey(for: now)
-        let placeholder = "备忘：客户/卡点/今天只做一件事…"
+        let placeholder = "客户/卡点/今天只做一件事…"
         return ZStack(alignment: .topLeading) {
             if memoDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(placeholder)
