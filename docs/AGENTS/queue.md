@@ -135,8 +135,8 @@ Acceptance:
 - 启动不卡/白屏
 - ios_safe PASS；0 配置改动
 
-## ACTIVE — TC-IOS-IPAD-STAGE-ACTIONS-FINAL-V1
-Status: ACTIVE
+## PAUSED — TC-IOS-IPAD-STAGE-ACTIONS-FINAL-V1
+Status: PAUSED (iPad 阶段推进复杂度过高，暂不投入；iPad 维持只读看板 + DayMemo 编辑)
 ID: TC-IOS-IPAD-STAGE-ACTIONS-FINAL-V1
 Title: iPad 阶段推进收口 V1
 AssignedTo: Coordinator1/Codex
