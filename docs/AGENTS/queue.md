@@ -944,3 +944,27 @@ StopCondition:
 - CI green
 - exec.md 更新（若有）
 - STOP
+
+# TC-IOS-DAILY-REVIEW-GENERATE-V1
+Priority: P1
+Goal: 主动点“生成今日复盘”才生成；自动汇总 Top3/Bottom1 与关键指标；持久化保存；你只需填“明天唯一动作”。
+
+Scope:
+- 按钮：生成今日复盘（主动点击）
+- 持久化 DailyReview（按 dayKey upsert，保留已有 tomorrowOneAction）
+- 展示：复盘详情页 + 历史列表
+- 自动指标：income / shootingTotal / selectingTotal / RPHshoot / sessionCount / Top3(收入) / Bottom1(最低RPHshoot)
+- 自动备注汇总：bottom1Note + notesAll（最小可用）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- （如需新增 DailyReview 实体）允许改 .xcdatamodeld，但不得 unique constraints，属性需 optional 或有 default
+- 禁止：Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑：bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 点击生成后出现今日复盘详情页
+B Top3/Bottom1 与今日范围一致，Bottom1=最低 RPHshoot
+C “明天唯一动作”可编辑并持久化
+D 历史列表可查看过去生成的复盘
+E ios_safe PASS；0 配置改动
