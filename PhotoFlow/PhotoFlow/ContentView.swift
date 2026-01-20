@@ -628,7 +628,8 @@ final class CloudDataStore: ObservableObject {
         static let updatedAt = "updatedAt"
         static let sourceDevice = "sourceDevice"
         static let isVoided = "isVoided"
-        static let isDeleted = "isDeleted"
+        static let legacyIsDeleted = "isDeleted"
+        static let isDeleted = "deletedFlag"
     }
 
     private enum ShiftField {
@@ -653,6 +654,21 @@ final class CloudDataStore: ObservableObject {
     private let context: NSManagedObjectContext
     private var cancellables: Set<AnyCancellable> = []
     private var activeCloudEvents: Set<UUID> = []
+    private var blockedSessionIds: Set<String> = []
+
+    struct TombstoneDebugInfo: Equatable {
+        let recordsFound: Int
+        let maxRevisionBefore: Int64
+        let maxRevisionAfter: Int64
+        let winnerDeleted: Bool
+    }
+
+    struct VoidDebugInfo: Equatable {
+        let recordsFound: Int
+        let maxRevisionBefore: Int64
+        let maxRevisionAfter: Int64
+        let winnerVoided: Bool
+    }
 
     init() {
         localSourceDevice = CloudDataStore.deviceSource()
@@ -691,8 +707,15 @@ final class CloudDataStore: ObservableObject {
             assertionFailure("sessionId is required")
             return
         }
+        if isSessionDeleted(sessionId) {
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingDeleted = boolValue(record, key: SessionField.isDeleted)
+        if existingDeleted {
+            return
+        }
         let existingRevision = int64Value(record, key: SessionField.revision)
         let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
         let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
@@ -711,9 +734,13 @@ final class CloudDataStore: ObservableObject {
         target.setValue(nextRevisionValue, forKey: SessionField.revision)
         target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
         target.setValue(source, forKey: SessionField.sourceDevice)
+        let existingVoided = boolValue(record, key: SessionField.isVoided)
         if record == nil {
             target.setValue(false, forKey: SessionField.isVoided)
-            target.setValue(false, forKey: SessionField.isDeleted)
+            setSessionDeleted(false, on: target)
+        } else {
+            target.setValue(existingVoided, forKey: SessionField.isVoided)
+            setSessionDeleted(existingDeleted, on: target)
         }
         saveContext()
     }
@@ -729,8 +756,15 @@ final class CloudDataStore: ObservableObject {
             assertionFailure("sessionId is required")
             return
         }
+        if isSessionDeleted(sessionId) {
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingDeleted = boolValue(record, key: SessionField.isDeleted)
+        if existingDeleted {
+            return
+        }
         let existingRevision = int64Value(record, key: SessionField.revision)
         let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
         let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
@@ -749,10 +783,14 @@ final class CloudDataStore: ObservableObject {
         target.setValue(nextRevisionValue, forKey: SessionField.revision)
         target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
         target.setValue(source, forKey: SessionField.sourceDevice)
+        let existingVoided = boolValue(record, key: SessionField.isVoided)
         if record == nil {
             target.setValue(Self.defaultStage, forKey: SessionField.stage)
             target.setValue(false, forKey: SessionField.isVoided)
-            target.setValue(false, forKey: SessionField.isDeleted)
+            setSessionDeleted(false, on: target)
+        } else {
+            target.setValue(existingVoided, forKey: SessionField.isVoided)
+            setSessionDeleted(existingDeleted, on: target)
         }
         saveContext()
     }
@@ -769,8 +807,16 @@ final class CloudDataStore: ObservableObject {
             assertionFailure("sessionId is required")
             return
         }
+        let incomingDeleted = (isDeleted == true)
+        if !incomingDeleted && isSessionDeleted(sessionId) {
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingDeleted = boolValue(record, key: SessionField.isDeleted)
+        if existingDeleted && !incomingDeleted {
+            return
+        }
         let existingRevision = int64Value(record, key: SessionField.revision)
         let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
         let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
@@ -782,12 +828,9 @@ final class CloudDataStore: ObservableObject {
         ) else { return }
         let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
         target.setValue(sessionId, forKey: SessionField.sessionId)
-        if let isVoided {
-            target.setValue(isVoided, forKey: SessionField.isVoided)
-        }
-        if let isDeleted {
-            target.setValue(isDeleted, forKey: SessionField.isDeleted)
-        }
+        let existingVoided = boolValue(record, key: SessionField.isVoided)
+        target.setValue(isVoided ?? existingVoided, forKey: SessionField.isVoided)
+        setSessionDeleted(isDeleted ?? existingDeleted, on: target)
         target.setValue(nextRevisionValue, forKey: SessionField.revision)
         target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
         target.setValue(source, forKey: SessionField.sourceDevice)
@@ -795,6 +838,158 @@ final class CloudDataStore: ObservableObject {
             target.setValue(Self.defaultStage, forKey: SessionField.stage)
         }
         saveContext()
+    }
+
+    func voidSession(
+        sessionId: String,
+        updatedAt: Date = Date(),
+        revision: Int64? = nil,
+        sourceDevice: String? = nil
+    ) -> VoidDebugInfo {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return VoidDebugInfo(
+                recordsFound: 0,
+                maxRevisionBefore: 0,
+                maxRevisionAfter: 0,
+                winnerVoided: false
+            )
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
+        request.predicate = NSPredicate(format: "%K == %@", SessionField.sessionId, sessionId)
+        let objects = (try? context.fetch(request)) ?? []
+        let maxRevision = objects.map { int64Value($0, key: SessionField.revision) }.max() ?? 0
+        let nowMillis = Int64(updatedAt.timeIntervalSince1970 * 1000)
+        let nextRevisionValue = revision ?? max(nowMillis + 10_000, maxRevision + 10_000)
+        let targets: [NSManagedObject]
+        if objects.isEmpty {
+            let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+            target.setValue(sessionId, forKey: SessionField.sessionId)
+            targets = [target]
+        } else {
+            targets = objects
+        }
+        for target in targets {
+            let existingStage = stringValue(target, key: SessionField.stage, fallback: Self.defaultStage)
+            let existingDeleted = boolValue(target, key: SessionField.isDeleted)
+            target.setValue(sessionId, forKey: SessionField.sessionId)
+            target.setValue(existingStage, forKey: SessionField.stage)
+            target.setValue(true, forKey: SessionField.isVoided)
+            setSessionDeleted(existingDeleted, on: target)
+            target.setValue(nextRevisionValue, forKey: SessionField.revision)
+            target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+            target.setValue(source, forKey: SessionField.sourceDevice)
+        }
+        saveContext()
+        context.refreshAllObjects()
+        let postObjects = (try? context.fetch(request)) ?? []
+        let maxRevisionAfter = postObjects.map { int64Value($0, key: SessionField.revision) }.max() ?? nextRevisionValue
+        let winner = selectPreferredObject(postObjects, revisionKey: SessionField.revision, sourceKey: SessionField.sourceDevice)
+        let winnerVoided = boolValue(winner, key: SessionField.isVoided)
+        return VoidDebugInfo(
+            recordsFound: max(objects.count, postObjects.count),
+            maxRevisionBefore: maxRevision,
+            maxRevisionAfter: maxRevisionAfter,
+            winnerVoided: winnerVoided
+        )
+    }
+
+    func tombstoneSession(
+        sessionId: String,
+        updatedAt: Date = Date(),
+        revision: Int64? = nil,
+        sourceDevice: String? = nil
+    ) -> TombstoneDebugInfo {
+        guard !sessionId.isEmpty else {
+            assertionFailure("sessionId is required")
+            return TombstoneDebugInfo(
+                recordsFound: 0,
+                maxRevisionBefore: 0,
+                maxRevisionAfter: 0,
+                winnerDeleted: false
+            )
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
+        request.predicate = NSPredicate(format: "%K == %@", SessionField.sessionId, sessionId)
+        let objects = (try? context.fetch(request)) ?? []
+        let maxRevision = objects.map { int64Value($0, key: SessionField.revision) }.max() ?? 0
+        let nowMillis = Int64(updatedAt.timeIntervalSince1970 * 1000)
+        let nextRevisionValue = revision ?? max(nowMillis + 10_000, maxRevision + 10_000)
+        let targets: [NSManagedObject]
+        if objects.isEmpty {
+            let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+            target.setValue(sessionId, forKey: SessionField.sessionId)
+            targets = [target]
+        } else {
+            targets = objects
+        }
+        for target in targets {
+            let existingStage = stringValue(target, key: SessionField.stage, fallback: Self.defaultStage)
+            let existingVoided = boolValue(target, key: SessionField.isVoided)
+            target.setValue(sessionId, forKey: SessionField.sessionId)
+            target.setValue(existingStage, forKey: SessionField.stage)
+            target.setValue(existingVoided, forKey: SessionField.isVoided)
+            setSessionDeleted(true, on: target)
+            target.setValue(nextRevisionValue, forKey: SessionField.revision)
+            target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+            target.setValue(source, forKey: SessionField.sourceDevice)
+        }
+        saveContext()
+        context.refreshAllObjects()
+        var postObjects = (try? context.fetch(request)) ?? []
+        var maxRevisionAfter = postObjects.map { int64Value($0, key: SessionField.revision) }.max() ?? nextRevisionValue
+        var winner = selectPreferredObject(postObjects, revisionKey: SessionField.revision, sourceKey: SessionField.sourceDevice)
+        var winnerDeleted = boolValue(winner, key: SessionField.isDeleted)
+        if !winnerDeleted {
+            let retryRevision = max(maxRevisionAfter + 10_000, nextRevisionValue + 10_000)
+            if postObjects.isEmpty {
+                let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
+                target.setValue(sessionId, forKey: SessionField.sessionId)
+                postObjects = [target]
+            }
+            for target in postObjects {
+                let existingStage = stringValue(target, key: SessionField.stage, fallback: Self.defaultStage)
+                let existingVoided = boolValue(target, key: SessionField.isVoided)
+                target.setValue(sessionId, forKey: SessionField.sessionId)
+                target.setValue(existingStage, forKey: SessionField.stage)
+                target.setValue(existingVoided, forKey: SessionField.isVoided)
+                setSessionDeleted(true, on: target)
+                target.setValue(retryRevision, forKey: SessionField.revision)
+                target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
+                target.setValue(source, forKey: SessionField.sourceDevice)
+            }
+            saveContext()
+            context.refreshAllObjects()
+            let finalObjects = (try? context.fetch(request)) ?? []
+            maxRevisionAfter = finalObjects.map { int64Value($0, key: SessionField.revision) }.max() ?? retryRevision
+            winner = selectPreferredObject(finalObjects, revisionKey: SessionField.revision, sourceKey: SessionField.sourceDevice)
+            winnerDeleted = boolValue(winner, key: SessionField.isDeleted)
+            postObjects = finalObjects
+        }
+        let recordsFound = max(objects.count, postObjects.count)
+        if !winnerDeleted {
+            let snapshot = postObjects.map { object in
+                let rev = int64Value(object, key: SessionField.revision)
+                let updated = doubleValue(object, key: SessionField.updatedAt)
+                let source = stringValue(object, key: SessionField.sourceDevice, fallback: "unknown")
+                let deleted = boolValue(object, key: SessionField.isDeleted)
+                return "rev=\(rev) updated=\(updated) source=\(source) deleted=\(deleted)"
+            }.joined(separator: " | ")
+            print("Tombstone persist failed for \(sessionId): \(snapshot)")
+        }
+        if winnerDeleted {
+            blockedSessionIds.insert(sessionId)
+        } else {
+            blockedSessionIds.remove(sessionId)
+        }
+        return TombstoneDebugInfo(
+            recordsFound: recordsFound,
+            maxRevisionBefore: maxRevision,
+            maxRevisionAfter: maxRevisionAfter,
+            winnerDeleted: winnerDeleted
+        )
     }
 
     func upsertShiftRecord(
@@ -880,6 +1075,23 @@ final class CloudDataStore: ObservableObject {
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
         dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
         updateRevisionSnapshot()
+        updateDeletedSnapshot()
+    }
+
+    private func updateDeletedSnapshot() {
+        let deleted = sessionRecords.filter(\.isDeleted).map(\.id)
+        blockedSessionIds.formUnion(deleted)
+    }
+
+    private func isSessionDeleted(_ sessionId: String) -> Bool {
+        if blockedSessionIds.contains(sessionId) {
+            return true
+        }
+        return sessionRecords.first { $0.id == sessionId }?.isDeleted ?? false
+    }
+
+    func refreshLocalCache() {
+        refreshAll()
     }
 
     private func updateRevisionSnapshot() {
@@ -1433,6 +1645,14 @@ final class CloudDataStore: ObservableObject {
 
     private func boolValue(_ object: NSManagedObject?, key: String) -> Bool {
         guard let object else { return false }
+        if key == SessionField.isDeleted {
+            if let value = object.primitiveValue(forKey: SessionField.isDeleted) as? Bool {
+                return value
+            }
+            if let value = object.primitiveValue(forKey: SessionField.isDeleted) as? NSNumber {
+                return value.boolValue
+            }
+        }
         if let value = object.value(forKey: key) as? Bool {
             return value
         }
@@ -1440,6 +1660,13 @@ final class CloudDataStore: ObservableObject {
             return value.boolValue
         }
         return false
+    }
+
+    private func setSessionDeleted(_ value: Bool, on object: NSManagedObject) {
+        object.willChangeValue(forKey: SessionField.isDeleted)
+        object.setPrimitiveValue(value, forKey: SessionField.isDeleted)
+        object.setValue(value, forKey: SessionField.isDeleted)
+        object.didChangeValue(forKey: SessionField.isDeleted)
     }
 
     private func stringValue(_ object: NSManagedObject?, key: String, fallback: String) -> String {
@@ -1538,7 +1765,8 @@ final class CloudDataStore: ObservableObject {
             attribute(SessionField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
             attribute(SessionField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown"),
             attribute(SessionField.isVoided, type: .booleanAttributeType, defaultValue: false),
-            attribute(SessionField.isDeleted, type: .booleanAttributeType, defaultValue: false)
+            attribute(SessionField.isDeleted, type: .booleanAttributeType, defaultValue: false),
+            attribute(SessionField.legacyIsDeleted, type: .booleanAttributeType, defaultValue: false)
         ]
 
         let shift = NSEntityDescription()
@@ -1854,6 +2082,7 @@ final class DailyMemoStore: ObservableObject {
 final class SessionVisibilityStore: ObservableObject {
     @Published private(set) var voidedIds: Set<String> = []
     @Published private(set) var deletedIds: Set<String> = []
+    @Published private(set) var tombstoneDebug: [String: CloudDataStore.TombstoneDebugInfo] = [:]
     private let cloudStore: CloudDataStore
     private var cancellables: Set<AnyCancellable> = []
 
@@ -1876,13 +2105,51 @@ final class SessionVisibilityStore: ObservableObject {
         deletedIds.contains(id)
     }
 
-    func setVoided(_ id: String, isVoided: Bool) {
+    func setVoided(_ id: String, isVoided: Bool, revision: Int64? = nil, updatedAt: Date = Date()) {
         guard !deletedIds.contains(id) else { return }
-        cloudStore.updateSessionVisibility(sessionId: id, isVoided: isVoided)
+        cloudStore.updateSessionVisibility(
+            sessionId: id,
+            isVoided: isVoided,
+            revision: revision,
+            updatedAt: updatedAt
+        )
     }
 
-    func markDeleted(_ id: String) {
-        cloudStore.updateSessionVisibility(sessionId: id, isVoided: false, isDeleted: true)
+    @discardableResult
+    func markDeleted(
+        _ id: String,
+        updatedAt: Date = Date(),
+        revision: Int64? = nil
+    ) -> CloudDataStore.TombstoneDebugInfo {
+        let debug = cloudStore.tombstoneSession(sessionId: id, updatedAt: updatedAt, revision: revision)
+        tombstoneDebug[id] = debug
+        if debug.winnerDeleted {
+            deletedIds.insert(id)
+        } else {
+            deletedIds.remove(id)
+        }
+        cloudStore.refreshLocalCache()
+        return debug
+    }
+
+    @discardableResult
+    func markVoided(
+        _ id: String,
+        updatedAt: Date = Date(),
+        revision: Int64? = nil
+    ) -> CloudDataStore.VoidDebugInfo {
+        let debug = cloudStore.voidSession(sessionId: id, updatedAt: updatedAt, revision: revision)
+        if debug.winnerVoided {
+            voidedIds.insert(id)
+        } else {
+            voidedIds.remove(id)
+        }
+        cloudStore.refreshLocalCache()
+        return debug
+    }
+
+    func tombstoneInfo(for id: String) -> CloudDataStore.TombstoneDebugInfo? {
+        tombstoneDebug[id]
     }
 
     private func apply(records: [CloudDataStore.SessionRecord]) {
@@ -1989,6 +2256,7 @@ struct ContentView: View {
     @State private var activeAlert: ActiveAlert?
     @State private var now = Date()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
     @StateObject private var cloudStore: CloudDataStore
@@ -2000,7 +2268,8 @@ struct ContentView: View {
     @StateObject private var sessionVisibilityStore: SessionVisibilityStore
     @State private var editingSession: EditingSession?
     @State private var timeEditingSession: TimeEditingSession?
-    @State private var deleteCandidateId: String?
+    @State private var swipeDeleteCandidateId: String?
+    @State private var pendingDeleteIds: Set<String> = []
     @State private var memoDraft = ""
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
@@ -2170,8 +2439,7 @@ struct ContentView: View {
     }
 
     private func syncSessionSummaries(from records: [CloudDataStore.SessionRecord]) {
-        let summaries = records
-            .filter { !$0.isDeleted }
+        let summaries = dedupedSessionRecords(records)
             .filter { $0.shootingStart != nil || $0.selectingStart != nil || $0.endedAt != nil }
             .map { record in
                 SessionSummary(
@@ -2182,6 +2450,26 @@ struct ContentView: View {
                 )
             }
         sessionSummaries = summaries
+    }
+
+    private func dedupedSessionRecords(_ records: [CloudDataStore.SessionRecord]) -> [CloudDataStore.SessionRecord] {
+        var winners: [String: CloudDataStore.SessionRecord] = [:]
+        for record in records {
+            if let existing = winners[record.id] {
+                if record.revision > existing.revision {
+                    winners[record.id] = record
+                } else if record.revision == existing.revision {
+                    if sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
+                        winners[record.id] = record
+                    }
+                }
+            } else {
+                winners[record.id] = record
+            }
+        }
+        return winners.values
+            .filter { !$0.isDeleted && !$0.isVoided }
+            .sorted { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
     }
 
     private var effectiveSessionSummaries: [SessionSummary] {
@@ -2227,9 +2515,7 @@ struct ContentView: View {
     }
 
     private var ipadSyncView: some View {
-        let sessions = cloudStore.sessionRecords
-            .filter { !$0.isDeleted && !$0.isVoided }
-            .sorted { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
+        let sessions = dedupedSessionRecords(cloudStore.sessionRecords)
         let sessionIds = sessions.map(\.id)
         let selectedRecord = sessions.first { $0.id == selectedIpadSessionId } ?? sessions.first
         return NavigationSplitView {
@@ -2290,6 +2576,14 @@ struct ContentView: View {
         }
         .onChange(of: ipadDashboardRange) { _, newRange in
             refreshIpadDashboard(records: sessions, range: newRange)
+        }
+        .onReceive(cloudStore.$sessionRecords) { records in
+            let refreshed = dedupedSessionRecords(records)
+            if let selected = selectedIpadSessionId,
+               !refreshed.contains(where: { $0.id == selected }) {
+                selectedIpadSessionId = refreshed.first?.id
+            }
+            refreshIpadDashboard(records: refreshed, range: ipadDashboardRange)
         }
     }
 
@@ -2796,6 +3090,21 @@ struct ContentView: View {
         sessionStart(for: record) ?? record.updatedAt
     }
 
+    private func latestSessionRecord(for sessionId: String) -> CloudDataStore.SessionRecord? {
+        let candidates = cloudStore.sessionRecords.filter { $0.id == sessionId }
+        guard var winner = candidates.first else { return nil }
+        for record in candidates.dropFirst() {
+            if record.revision > winner.revision {
+                winner = record
+            } else if record.revision == winner.revision {
+                if sourcePriority(record.sourceDevice) >= sourcePriority(winner.sourceDevice) {
+                    winner = record
+                }
+            }
+        }
+        return winner
+    }
+
     private func stageLabel(for stage: String) -> String {
         switch stage {
         case WatchSyncStore.StageSyncKey.stageShooting:
@@ -2860,6 +3169,11 @@ struct ContentView: View {
         let shotText = record.shotCount.map(String.init) ?? "—"
         let selectedText = record.selectedCount.map(String.init) ?? "—"
         let noteText = record.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tombstoneInfo = sessionVisibilityStore.tombstoneInfo(for: record.id)
+        let recordsFoundText = tombstoneInfo.map { String($0.recordsFound) } ?? "--"
+        let maxRevisionBeforeText = tombstoneInfo.map { String($0.maxRevisionBefore) } ?? "--"
+        let maxRevisionAfterText = tombstoneInfo.map { String($0.maxRevisionAfter) } ?? "--"
+        let winnerDeletedText = tombstoneInfo.map { $0.winnerDeleted ? "yes" : "no" } ?? (record.isDeleted ? "yes" : "no")
         return VStack(alignment: .leading, spacing: 8) {
             Text("会话详情")
                 .font(.headline)
@@ -2904,6 +3218,11 @@ struct ContentView: View {
                     Text("source: \(record.sourceDevice)")
                     Text("voided: \(record.isVoided ? "yes" : "no")")
                     Text("deleted: \(record.isDeleted ? "yes" : "no")")
+                    Text("recordsFound: \(recordsFoundText)")
+                    Text("maxRevisionBefore: \(maxRevisionBeforeText)")
+                    Text("maxRevisionAfter: \(maxRevisionAfterText)")
+                    Text("winnerDeleted: \(winnerDeletedText)")
+                    Text("build: \(buildFingerprintText)")
                 }
                 .font(.caption2)
                 .monospacedDigit()
@@ -2913,93 +3232,141 @@ struct ContentView: View {
     }
 
     private var homeView: some View {
+        let swipeDeleteBinding = Binding<Bool>(
+            get: { swipeDeleteCandidateId != nil },
+            set: { isPresented in
+                if !isPresented {
+                    swipeDeleteCandidateId = nil
+                }
+            }
+        )
         return NavigationStack {
             VStack(spacing: 12) {
                 homeFixedHeader
 
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        Text("会话时间线")
-                            .font(.headline)
-                        if effectiveSessionSummaries.isEmpty {
-                            Text("暂无记录")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            let displaySessions = Array(effectiveSessionSummaries.reversed())
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("会话时间线")
+                        .font(.headline)
+                    if effectiveSessionSummaries.isEmpty {
+                        Text("暂无记录")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        let displaySessions = Array(effectiveSessionSummaries.reversed())
+                        List {
                             ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
                                 let total = displaySessions.count
                                 let order = total - displayIndex
-                                let card = VStack(alignment: .leading, spacing: 4) {
-                                    HStack(alignment: .firstTextBaseline) {
-                                        HStack(spacing: 6) {
-                                            Text("第\(order)单")
-                                                .font(.subheadline)
-                                                .fontWeight(.semibold)
-                                            if let startTime = effectiveSessionStartTime(for: summary) {
-                                                Text(formatSessionTime(startTime))
-                                                    .font(.footnote)
-                                                    .foregroundStyle(.secondary)
-                                                    .monospacedDigit()
-                                            }
+                                sessionTimelineRow(summary: summary, order: order)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                                    .listRowBackground(Color.clear)
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                        Button("作废") {
+                                            performSwipeVoid(id: summary.id)
                                         }
-                                        Spacer(minLength: 8)
-                                        VStack(alignment: .trailing, spacing: 2) {
-                                            Text(amountText(for: summary))
-                                                .font(.headline)
-                                                .monospacedDigit()
-                                            Text(rphText(for: summary))
-                                                .font(.caption2)
-                                                .foregroundStyle(.secondary)
-                                                .monospacedDigit()
+                                        .tint(.orange)
+                                        Button("删除", role: .destructive) {
+                                            swipeDeleteCandidateId = summary.id
                                         }
                                     }
-                                    Text(sessionDurationSummary(for: summary))
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                        .lineLimit(1)
-                                    if let metaText = metaSummary(for: summary.id) {
-                                        Text(metaText)
-                                            .font(.footnote)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                    if let notePreview = metaNotePreview(for: summary.id) {
-                                        Text(notePreview)
-                                            .font(.footnote)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(2)
-                                    }
-                                }
-                                .padding(8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.thinMaterial)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                ZStack(alignment: .topTrailing) {
-                                    NavigationLink {
-                                        sessionDetailView(summary: summary, order: order)
-                                    } label: {
-                                        card
-                                    }
-                                    .buttonStyle(.plain)
-                                    Button(action: { startEditingMeta(for: summary.id) }) {
-                                        Image(systemName: "pencil")
-                                            .font(.caption)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .foregroundStyle(.secondary)
-                                    .padding(6)
-                                }
                             }
                         }
-                        homeDebugFooter
+                        .listStyle(.plain)
+                        .scrollContentBackground(.hidden)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    pendingDeleteBanner
+                    homeDebugFooter
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding()
+            .confirmationDialog("删除本单？", isPresented: swipeDeleteBinding, titleVisibility: .visible) {
+                Button("删除", role: .destructive) {
+                    if let id = swipeDeleteCandidateId {
+                        _ = deleteSession(id: id, showPending: true)
+                    }
+                    swipeDeleteCandidateId = nil
+                }
+                Button("取消", role: .cancel) {
+                    swipeDeleteCandidateId = nil
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                Text(buildFingerprintText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .opacity(0.6)
+                    .padding(.leading, 4)
+                    .padding(.bottom, 56)
+            }
+        }
+    }
+
+    private func sessionTimelineRow(summary: SessionSummary, order: Int) -> some View {
+        let card = VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                HStack(spacing: 6) {
+                    Text("第\(order)单")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    if let startTime = effectiveSessionStartTime(for: summary) {
+                        Text(formatSessionTime(startTime))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(amountText(for: summary))
+                        .font(.headline)
+                        .monospacedDigit()
+                    Text(rphText(for: summary))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            Text(sessionDurationSummary(for: summary))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+            if let metaText = metaSummary(for: summary.id) {
+                Text(metaText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if let notePreview = metaNotePreview(for: summary.id) {
+                Text(notePreview)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+        return ZStack(alignment: .topTrailing) {
+            NavigationLink {
+                sessionDetailView(summary: summary, order: order)
+            } label: {
+                card
+            }
+            .buttonStyle(.plain)
+            Button(action: { startEditingMeta(for: summary.id) }) {
+                Image(systemName: "pencil")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .padding(6)
         }
     }
 
@@ -3148,25 +3515,65 @@ struct ContentView: View {
         .opacity(0.6)
     }
 
+    @ViewBuilder
+    private var pendingDeleteBanner: some View {
+        if !pendingDeleteIds.isEmpty {
+            Text("删除处理中 \(pendingDeleteIds.count)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .opacity(0.5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private func isSessionVisible(_ id: String) -> Bool {
         !sessionVisibilityStore.isDeleted(id) && !sessionVisibilityStore.isVoided(id)
     }
 
-    private func toggleVoided(for id: String) {
-        let isVoided = sessionVisibilityStore.isVoided(id)
-        sessionVisibilityStore.setVoided(id, isVoided: !isVoided)
+    private func forcedVisibilityRevision(at date: Date) -> Int64 {
+        Int64(date.timeIntervalSince1970 * 1000) + 10_000
     }
 
-    private func deleteSession(id: String) {
+    private func performSwipeVoid(id: String) {
+        let now = Date()
+        let revision = forcedVisibilityRevision(at: now)
+        sessionSummaries.removeAll { $0.id == id }
+        let debug = sessionVisibilityStore.markVoided(id, updatedAt: now, revision: revision)
+        syncSessionSummaries(from: cloudStore.sessionRecords)
+        if !debug.winnerVoided {
+            activeAlert = .validation("作废失败：未持久化")
+            syncSessionSummaries(from: cloudStore.sessionRecords)
+        }
+    }
+
+    @discardableResult
+    private func deleteSession(id: String, showPending: Bool = false) -> Bool {
+        let now = Date()
+        let revision = forcedVisibilityRevision(at: now)
         if let index = sessionSummaries.firstIndex(where: { $0.id == id }),
            sessionSummaries[index].endedAt == nil {
             resetSession()
         }
-        sessionVisibilityStore.markDeleted(id)
-        metaStore.update(SessionMeta(), for: id)
         timeOverrideStore.clear(for: id)
         manualSessionStore.remove(id)
+        if showPending {
+            pendingDeleteIds.insert(id)
+        }
         sessionSummaries.removeAll { $0.id == id }
+        let debug = sessionVisibilityStore.markDeleted(id, updatedAt: now, revision: revision)
+        syncSessionSummaries(from: cloudStore.sessionRecords)
+        if showPending {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                pendingDeleteIds.remove(id)
+            }
+        }
+        if !debug.winnerDeleted {
+            pendingDeleteIds.remove(id)
+            activeAlert = .validation("Delete failed: tombstone not persisted")
+            syncSessionSummaries(from: cloudStore.sessionRecords)
+            return false
+        }
+        return true
     }
 
 
@@ -3178,15 +3585,17 @@ struct ContentView: View {
         let amountText = meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
         let rphLine = rphText(for: summary)
         let hasOverride = timeOverrideStore.override(for: summary.id) != nil
-        let isVoided = sessionVisibilityStore.isVoided(summary.id)
-        let deleteBinding = Binding<Bool>(
-            get: { deleteCandidateId == summary.id },
-            set: { isPresented in
-                if !isPresented {
-                    deleteCandidateId = nil
-                }
-            }
-        )
+        let record = latestSessionRecord(for: summary.id)
+        let revisionText = record.map { String($0.revision) } ?? "--"
+        let updatedText = record.map { formatSessionTimeWithSeconds($0.updatedAt) } ?? "--"
+        let sourceText = record?.sourceDevice ?? "--"
+        let deletedText = (record?.isDeleted ?? false) ? "yes" : "no"
+        let voidedText = (record?.isVoided ?? false) ? "yes" : "no"
+        let tombstoneInfo = sessionVisibilityStore.tombstoneInfo(for: summary.id)
+        let recordsFoundText = tombstoneInfo.map { String($0.recordsFound) } ?? "--"
+        let maxRevisionBeforeText = tombstoneInfo.map { String($0.maxRevisionBefore) } ?? "--"
+        let maxRevisionAfterText = tombstoneInfo.map { String($0.maxRevisionAfter) } ?? "--"
+        let winnerDeletedText = tombstoneInfo.map { $0.winnerDeleted ? "yes" : "no" } ?? deletedText
         let shot = meta.shotCount
         let selected = meta.selectedCount
         let pickRateText: String = {
@@ -3287,34 +3696,72 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("本单操作")
+                    Text("同步")
                         .font(.headline)
-                    HStack(spacing: 12) {
-                        Button(isVoided ? "恢复" : "作废") {
-                            toggleVoided(for: summary.id)
-                        }
-                        .buttonStyle(.bordered)
-                        Button("删除") {
-                            deleteCandidateId = summary.id
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.red)
+                    HStack {
+                        Text("revision")
+                        Spacer()
+                        Text(revisionText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("updatedAt")
+                        Spacer()
+                        Text(updatedText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("source")
+                        Spacer()
+                        Text(sourceText)
+                    }
+                    HStack {
+                        Text("voided")
+                        Spacer()
+                        Text(voidedText)
+                    }
+                    HStack {
+                        Text("deleted")
+                        Spacer()
+                        Text(deletedText)
+                    }
+                    HStack {
+                        Text("recordsFound")
+                        Spacer()
+                        Text(recordsFoundText)
+                    }
+                    HStack {
+                        Text("maxRevisionBefore")
+                        Spacer()
+                        Text(maxRevisionBeforeText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("maxRevisionAfter")
+                        Spacer()
+                        Text(maxRevisionAfterText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("winnerDeleted")
+                        Spacer()
+                        Text(winnerDeletedText)
+                    }
+                    HStack {
+                        Text("build")
+                        Spacer()
+                        Text(buildFingerprintText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
+                .font(.footnote)
+
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
         .navigationTitle("单子详情")
-        .confirmationDialog("删除本单？", isPresented: deleteBinding, titleVisibility: .visible) {
-            Button("删除", role: .destructive) {
-                deleteSession(id: summary.id)
-                deleteCandidateId = nil
-            }
-            Button("取消", role: .cancel) {
-                deleteCandidateId = nil
-            }
-        }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button("更正时间") {
@@ -4092,12 +4539,15 @@ struct ContentView: View {
         debugModeEnabled
     }
 
+    private let buildShortHashOverride = "fix158g"
+
     private var buildFingerprintText: String {
         let info = Bundle.main.infoDictionary
         let shortVersion = info?["CFBundleShortVersionString"] as? String ?? "?"
         let buildNumber = info?["CFBundleVersion"] as? String ?? "?"
         let rawHash = (info?["GitHash"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let shortHash = rawHash.isEmpty ? nil : String(rawHash.prefix(7))
+        let overrideHash = buildShortHashOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortHash = rawHash.isEmpty ? (overrideHash.isEmpty ? nil : overrideHash) : String(rawHash.prefix(7))
         let versionText = "v\(shortVersion) (\(buildNumber))"
         let buildLabel = isDebugBuild ? "BUILD=DEBUG" : "BUILD=RELEASE"
         if let shortHash {
