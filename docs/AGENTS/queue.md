@@ -163,6 +163,29 @@ Acceptance:
 - 诊断字段可见：pendingEventCount / oldestPendingEventAge / lastProcessedEventAt / lastProcessError
 - ios_safe PASS；0 配置改动
 
+## ACTIVE — TC-IOS-HOME-TIMELINE-TODAY-ONLY-V1
+Status: ACTIVE
+ID: TC-IOS-HOME-TIMELINE-TODAY-ONLY-V1
+Title: Home 会话时间线仅今日展示 V1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- Home 会话时间线只显示今天的会话；历史会话仅在“记录/月历/iPad 看板”查看。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+
+Guardrails:
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- Home 会话时间线只显示今天的会话
+- 历史会话不在 Home 显示，但在“记录/月历/iPad 看板”仍可见
+- 跨天进行中的单仍显示在 Home 顶部
+- ios_safe PASS；0 配置改动
+
 ## DONE — TC-SYNC-PHONE-TO-WATCH-V1
 ID: TC-SYNC-PHONE-TO-WATCH-V1
 Status: DONE (merged)
