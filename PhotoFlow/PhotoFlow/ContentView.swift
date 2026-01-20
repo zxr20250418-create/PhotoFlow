@@ -653,6 +653,13 @@ final class CloudDataStore: ObservableObject {
     private let context: NSManagedObjectContext
     private var cancellables: Set<AnyCancellable> = []
     private var activeCloudEvents: Set<UUID> = []
+    private var blockedSessionIds: Set<String> = []
+
+    struct TombstoneDebugInfo: Equatable {
+        let recordsFound: Int
+        let maxRevisionBefore: Int64
+        let maxRevisionAfter: Int64
+    }
 
     init() {
         localSourceDevice = CloudDataStore.deviceSource()
@@ -691,8 +698,15 @@ final class CloudDataStore: ObservableObject {
             assertionFailure("sessionId is required")
             return
         }
+        if isSessionDeleted(sessionId) {
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingDeleted = boolValue(record, key: SessionField.isDeleted)
+        if existingDeleted {
+            return
+        }
         let existingRevision = int64Value(record, key: SessionField.revision)
         let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
         let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
@@ -711,9 +725,13 @@ final class CloudDataStore: ObservableObject {
         target.setValue(nextRevisionValue, forKey: SessionField.revision)
         target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
         target.setValue(source, forKey: SessionField.sourceDevice)
+        let existingVoided = boolValue(record, key: SessionField.isVoided)
         if record == nil {
             target.setValue(false, forKey: SessionField.isVoided)
             target.setValue(false, forKey: SessionField.isDeleted)
+        } else {
+            target.setValue(existingVoided, forKey: SessionField.isVoided)
+            target.setValue(existingDeleted, forKey: SessionField.isDeleted)
         }
         saveContext()
     }
@@ -729,8 +747,15 @@ final class CloudDataStore: ObservableObject {
             assertionFailure("sessionId is required")
             return
         }
+        if isSessionDeleted(sessionId) {
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingDeleted = boolValue(record, key: SessionField.isDeleted)
+        if existingDeleted {
+            return
+        }
         let existingRevision = int64Value(record, key: SessionField.revision)
         let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
         let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
@@ -749,10 +774,14 @@ final class CloudDataStore: ObservableObject {
         target.setValue(nextRevisionValue, forKey: SessionField.revision)
         target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
         target.setValue(source, forKey: SessionField.sourceDevice)
+        let existingVoided = boolValue(record, key: SessionField.isVoided)
         if record == nil {
             target.setValue(Self.defaultStage, forKey: SessionField.stage)
             target.setValue(false, forKey: SessionField.isVoided)
             target.setValue(false, forKey: SessionField.isDeleted)
+        } else {
+            target.setValue(existingVoided, forKey: SessionField.isVoided)
+            target.setValue(existingDeleted, forKey: SessionField.isDeleted)
         }
         saveContext()
     }
@@ -769,8 +798,16 @@ final class CloudDataStore: ObservableObject {
             assertionFailure("sessionId is required")
             return
         }
+        let incomingDeleted = (isDeleted == true)
+        if !incomingDeleted && isSessionDeleted(sessionId) {
+            return
+        }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
+        let existingDeleted = boolValue(record, key: SessionField.isDeleted)
+        if existingDeleted && !incomingDeleted {
+            return
+        }
         let existingRevision = int64Value(record, key: SessionField.revision)
         let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
         let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
@@ -782,12 +819,9 @@ final class CloudDataStore: ObservableObject {
         ) else { return }
         let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
         target.setValue(sessionId, forKey: SessionField.sessionId)
-        if let isVoided {
-            target.setValue(isVoided, forKey: SessionField.isVoided)
-        }
-        if let isDeleted {
-            target.setValue(isDeleted, forKey: SessionField.isDeleted)
-        }
+        let existingVoided = boolValue(record, key: SessionField.isVoided)
+        target.setValue(isVoided ?? existingVoided, forKey: SessionField.isVoided)
+        target.setValue(isDeleted ?? existingDeleted, forKey: SessionField.isDeleted)
         target.setValue(nextRevisionValue, forKey: SessionField.revision)
         target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
         target.setValue(source, forKey: SessionField.sourceDevice)
@@ -802,10 +836,10 @@ final class CloudDataStore: ObservableObject {
         updatedAt: Date = Date(),
         revision: Int64? = nil,
         sourceDevice: String? = nil
-    ) {
+    ) -> TombstoneDebugInfo {
         guard !sessionId.isEmpty else {
             assertionFailure("sessionId is required")
-            return
+            return TombstoneDebugInfo(recordsFound: 0, maxRevisionBefore: 0, maxRevisionAfter: 0)
         }
         let source = sourceDevice ?? localSourceDevice
         let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
@@ -813,7 +847,8 @@ final class CloudDataStore: ObservableObject {
         let objects = (try? context.fetch(request)) ?? []
         let maxRevision = objects.map { int64Value($0, key: SessionField.revision) }.max() ?? 0
         let nowMillis = Int64(updatedAt.timeIntervalSince1970 * 1000)
-        let nextRevisionValue = revision ?? max(nowMillis, maxRevision + 1)
+        let nextRevisionValue = revision ?? max(nowMillis + 10_000, maxRevision + 1)
+        blockedSessionIds.insert(sessionId)
         let targets: [NSManagedObject]
         if objects.isEmpty {
             let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
@@ -822,16 +857,24 @@ final class CloudDataStore: ObservableObject {
         } else {
             targets = objects
         }
+        let recordsFound = max(objects.count, targets.count)
         for target in targets {
+            let existingStage = stringValue(target, key: SessionField.stage, fallback: Self.defaultStage)
+            let existingVoided = boolValue(target, key: SessionField.isVoided)
             target.setValue(sessionId, forKey: SessionField.sessionId)
-            target.setValue(Self.defaultStage, forKey: SessionField.stage)
-            target.setValue(false, forKey: SessionField.isVoided)
+            target.setValue(existingStage, forKey: SessionField.stage)
+            target.setValue(existingVoided, forKey: SessionField.isVoided)
             target.setValue(true, forKey: SessionField.isDeleted)
             target.setValue(nextRevisionValue, forKey: SessionField.revision)
             target.setValue(updatedAt.timeIntervalSince1970, forKey: SessionField.updatedAt)
             target.setValue(source, forKey: SessionField.sourceDevice)
         }
         saveContext()
+        return TombstoneDebugInfo(
+            recordsFound: recordsFound,
+            maxRevisionBefore: maxRevision,
+            maxRevisionAfter: nextRevisionValue
+        )
     }
 
     func upsertShiftRecord(
@@ -917,6 +960,19 @@ final class CloudDataStore: ObservableObject {
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
         dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
         updateRevisionSnapshot()
+        updateDeletedSnapshot()
+    }
+
+    private func updateDeletedSnapshot() {
+        let deleted = sessionRecords.filter(\.isDeleted).map(\.id)
+        blockedSessionIds.formUnion(deleted)
+    }
+
+    private func isSessionDeleted(_ sessionId: String) -> Bool {
+        if blockedSessionIds.contains(sessionId) {
+            return true
+        }
+        return sessionRecords.first { $0.id == sessionId }?.isDeleted ?? false
     }
 
     func refreshLocalCache() {
@@ -1895,6 +1951,7 @@ final class DailyMemoStore: ObservableObject {
 final class SessionVisibilityStore: ObservableObject {
     @Published private(set) var voidedIds: Set<String> = []
     @Published private(set) var deletedIds: Set<String> = []
+    @Published private(set) var tombstoneDebug: [String: CloudDataStore.TombstoneDebugInfo] = [:]
     private let cloudStore: CloudDataStore
     private var cancellables: Set<AnyCancellable> = []
 
@@ -1923,8 +1980,14 @@ final class SessionVisibilityStore: ObservableObject {
     }
 
     func markDeleted(_ id: String) {
-        cloudStore.tombstoneSession(sessionId: id)
+        let debug = cloudStore.tombstoneSession(sessionId: id)
+        tombstoneDebug[id] = debug
+        deletedIds.insert(id)
         cloudStore.refreshLocalCache()
+    }
+
+    func tombstoneInfo(for id: String) -> CloudDataStore.TombstoneDebugInfo? {
+        tombstoneDebug[id]
     }
 
     private func apply(records: [CloudDataStore.SessionRecord]) {
@@ -2931,6 +2994,11 @@ struct ContentView: View {
         let shotText = record.shotCount.map(String.init) ?? "—"
         let selectedText = record.selectedCount.map(String.init) ?? "—"
         let noteText = record.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tombstoneInfo = sessionVisibilityStore.tombstoneInfo(for: record.id)
+        let recordsFoundText = tombstoneInfo.map { String($0.recordsFound) } ?? "--"
+        let maxRevisionBeforeText = tombstoneInfo.map { String($0.maxRevisionBefore) } ?? "--"
+        let maxRevisionAfterText = tombstoneInfo.map { String($0.maxRevisionAfter) } ?? "--"
+        let winnerDeletedText = record.isDeleted ? "yes" : "no"
         return VStack(alignment: .leading, spacing: 8) {
             Text("会话详情")
                 .font(.headline)
@@ -2975,6 +3043,10 @@ struct ContentView: View {
                     Text("source: \(record.sourceDevice)")
                     Text("voided: \(record.isVoided ? "yes" : "no")")
                     Text("deleted: \(record.isDeleted ? "yes" : "no")")
+                    Text("recordsFound: \(recordsFoundText)")
+                    Text("maxRevisionBefore: \(maxRevisionBeforeText)")
+                    Text("maxRevisionAfter: \(maxRevisionAfterText)")
+                    Text("winnerDeleted: \(winnerDeletedText)")
                     Text("build: \(buildFingerprintText)")
                 }
                 .font(.caption2)
@@ -3234,12 +3306,12 @@ struct ContentView: View {
            sessionSummaries[index].endedAt == nil {
             resetSession()
         }
-        sessionVisibilityStore.markDeleted(id)
-        syncSessionSummaries(from: cloudStore.sessionRecords)
         metaStore.update(SessionMeta(), for: id)
         timeOverrideStore.clear(for: id)
         manualSessionStore.remove(id)
         sessionSummaries.removeAll { $0.id == id }
+        sessionVisibilityStore.markDeleted(id)
+        syncSessionSummaries(from: cloudStore.sessionRecords)
     }
 
 
@@ -3257,6 +3329,11 @@ struct ContentView: View {
         let updatedText = record.map { formatSessionTimeWithSeconds($0.updatedAt) } ?? "--"
         let sourceText = record?.sourceDevice ?? "--"
         let deletedText = (record?.isDeleted ?? sessionVisibilityStore.isDeleted(summary.id)) ? "yes" : "no"
+        let tombstoneInfo = sessionVisibilityStore.tombstoneInfo(for: summary.id)
+        let recordsFoundText = tombstoneInfo.map { String($0.recordsFound) } ?? "--"
+        let maxRevisionBeforeText = tombstoneInfo.map { String($0.maxRevisionBefore) } ?? "--"
+        let maxRevisionAfterText = tombstoneInfo.map { String($0.maxRevisionAfter) } ?? "--"
+        let winnerDeletedText = deletedText
         let deleteBinding = Binding<Bool>(
             get: { deleteCandidateId == summary.id },
             set: { isPresented in
@@ -3388,6 +3465,28 @@ struct ContentView: View {
                         Text("deleted")
                         Spacer()
                         Text(deletedText)
+                    }
+                    HStack {
+                        Text("recordsFound")
+                        Spacer()
+                        Text(recordsFoundText)
+                    }
+                    HStack {
+                        Text("maxRevisionBefore")
+                        Spacer()
+                        Text(maxRevisionBeforeText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("maxRevisionAfter")
+                        Spacer()
+                        Text(maxRevisionAfterText)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("winnerDeleted")
+                        Spacer()
+                        Text(winnerDeletedText)
                     }
                     HStack {
                         Text("build")
@@ -4205,7 +4304,7 @@ struct ContentView: View {
         debugModeEnabled
     }
 
-    private let buildShortHashOverride = "fix158a"
+    private let buildShortHashOverride = "fix158b"
 
     private var buildFingerprintText: String {
         let info = Bundle.main.infoDictionary
