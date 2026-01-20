@@ -584,9 +584,23 @@ final class CloudDataStore: ObservableObject {
         let sourceDevice: String
     }
 
+    struct StageEventRecord: Identifiable, Equatable {
+        let id: String
+        let sessionId: String
+        let action: String
+        let stageOrder: Int
+        let clientAt: Date
+        let createdAt: Date
+        let sourceDevice: String
+        let processedAt: Date?
+        let processedResult: String?
+        let processedError: String?
+    }
+
     @Published private(set) var sessionRecords: [SessionRecord] = []
     @Published private(set) var shiftRecords: [String: ShiftRecordSnapshot] = [:]
     @Published private(set) var dayMemos: [String: DayMemoSnapshot] = [:]
+    @Published private(set) var stageEvents: [StageEventRecord] = []
     @Published private(set) var lastCloudSyncAt: Date?
     @Published private(set) var lastRevision: Int64 = 0
     @Published private(set) var pendingCount: Int = 0
@@ -606,6 +620,7 @@ final class CloudDataStore: ObservableObject {
         static let session = "SessionRecord"
         static let shift = "ShiftRecord"
         static let memo = "DayMemo"
+        static let stageEvent = "StageEvent"
     }
 
     static let cloudContainerIdentifier = "iCloud.com.zhengxinrong.PhotoFlow"
@@ -647,6 +662,19 @@ final class CloudDataStore: ObservableObject {
         static let revision = "revision"
         static let updatedAt = "updatedAt"
         static let sourceDevice = "sourceDevice"
+    }
+
+    private enum StageEventField {
+        static let eventId = "eventId"
+        static let sessionId = "sessionId"
+        static let action = "action"
+        static let stageOrder = "stageOrder"
+        static let clientAt = "clientAt"
+        static let createdAt = "createdAt"
+        static let sourceDevice = "sourceDevice"
+        static let processedAt = "processedAt"
+        static let processedResult = "processedResult"
+        static let processedError = "processedError"
     }
 
     let localSourceDevice: String
@@ -1056,6 +1084,82 @@ final class CloudDataStore: ObservableObject {
         saveContext()
     }
 
+    func createStageEvent(
+        eventId: String,
+        sessionId: String,
+        action: String,
+        stageOrder: Int,
+        clientAt: Date,
+        sourceDevice: String? = nil
+    ) {
+        guard !eventId.isEmpty, !sessionId.isEmpty else {
+            assertionFailure("eventId and sessionId are required")
+            return
+        }
+        if fetchStageEventManagedObject(eventId: eventId) != nil {
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.stageEvent, into: context)
+        target.setValue(eventId, forKey: StageEventField.eventId)
+        target.setValue(sessionId, forKey: StageEventField.sessionId)
+        target.setValue(action, forKey: StageEventField.action)
+        target.setValue(Int64(stageOrder), forKey: StageEventField.stageOrder)
+        target.setValue(clientAt.timeIntervalSince1970, forKey: StageEventField.clientAt)
+        target.setValue(Date().timeIntervalSince1970, forKey: StageEventField.createdAt)
+        target.setValue(source, forKey: StageEventField.sourceDevice)
+        saveContext()
+    }
+
+    func fetchPendingStageEvents() -> [StageEventRecord] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.stageEvent)
+        request.predicate = NSPredicate(
+            format: "%K == nil OR %K == ''",
+            StageEventField.processedResult,
+            StageEventField.processedResult
+        )
+        let objects = (try? context.fetch(request)) ?? []
+        let mapped = objects.compactMap { object -> StageEventRecord? in
+            guard let eventId = object.value(forKey: StageEventField.eventId) as? String,
+                  let sessionId = object.value(forKey: StageEventField.sessionId) as? String,
+                  !eventId.isEmpty,
+                  !sessionId.isEmpty else { return nil }
+            let clientAt = Date(timeIntervalSince1970: doubleValue(object, key: StageEventField.clientAt))
+            let createdAt = Date(timeIntervalSince1970: doubleValue(object, key: StageEventField.createdAt))
+            return StageEventRecord(
+                id: eventId,
+                sessionId: sessionId,
+                action: stringValue(object, key: StageEventField.action, fallback: ""),
+                stageOrder: intValue(object, key: StageEventField.stageOrder) ?? 0,
+                clientAt: clientAt,
+                createdAt: createdAt,
+                sourceDevice: stringValue(object, key: StageEventField.sourceDevice, fallback: "unknown"),
+                processedAt: nil,
+                processedResult: nil,
+                processedError: nil
+            )
+        }
+        return mapped.sorted { lhs, rhs in
+            if lhs.clientAt != rhs.clientAt {
+                return lhs.clientAt < rhs.clientAt
+            }
+            return lhs.createdAt < rhs.createdAt
+        }
+    }
+
+    func markStageEventProcessed(
+        eventId: String,
+        processedAt: Date,
+        result: String,
+        error: String? = nil
+    ) {
+        guard let target = fetchStageEventManagedObject(eventId: eventId) else { return }
+        target.setValue(processedAt.timeIntervalSince1970, forKey: StageEventField.processedAt)
+        target.setValue(result, forKey: StageEventField.processedResult)
+        target.setValue(error, forKey: StageEventField.processedError)
+        saveContext()
+    }
+
     private func saveContext() {
         guard context.hasChanges else { return }
         do {
@@ -1074,6 +1178,7 @@ final class CloudDataStore: ObservableObject {
         sessionRecords = fetchSessionRecords()
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
         dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
+        stageEvents = fetchStageEvents()
         updateRevisionSnapshot()
         updateDeletedSnapshot()
     }
@@ -1463,6 +1568,33 @@ final class CloudDataStore: ObservableObject {
         }
     }
 
+    private func fetchStageEvents() -> [StageEventRecord] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.stageEvent)
+        let objects = (try? context.fetch(request)) ?? []
+        return objects.compactMap { object in
+            guard let eventId = object.value(forKey: StageEventField.eventId) as? String,
+                  let sessionId = object.value(forKey: StageEventField.sessionId) as? String,
+                  !eventId.isEmpty,
+                  !sessionId.isEmpty else { return nil }
+            let clientAt = Date(timeIntervalSince1970: doubleValue(object, key: StageEventField.clientAt))
+            let createdAt = Date(timeIntervalSince1970: doubleValue(object, key: StageEventField.createdAt))
+            let processedAtValue = doubleValue(object, key: StageEventField.processedAt)
+            let processedAt = processedAtValue > 0 ? Date(timeIntervalSince1970: processedAtValue) : nil
+            return StageEventRecord(
+                id: eventId,
+                sessionId: sessionId,
+                action: stringValue(object, key: StageEventField.action, fallback: ""),
+                stageOrder: intValue(object, key: StageEventField.stageOrder) ?? 0,
+                clientAt: clientAt,
+                createdAt: createdAt,
+                sourceDevice: stringValue(object, key: StageEventField.sourceDevice, fallback: "unknown"),
+                processedAt: processedAt,
+                processedResult: object.value(forKey: StageEventField.processedResult) as? String,
+                processedError: object.value(forKey: StageEventField.processedError) as? String
+            )
+        }
+    }
+
     private func fetchSessionManagedObject(sessionId: String) -> NSManagedObject? {
         fetchUniqueManagedObject(
             entityName: EntityName.session,
@@ -1491,6 +1623,13 @@ final class CloudDataStore: ObservableObject {
             revisionKey: MemoField.revision,
             sourceKey: MemoField.sourceDevice
         )
+    }
+
+    private func fetchStageEventManagedObject(eventId: String) -> NSManagedObject? {
+        guard !eventId.isEmpty else { return nil }
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.stageEvent)
+        request.predicate = NSPredicate(format: "%K == %@", StageEventField.eventId, eventId)
+        return (try? context.fetch(request))?.first
     }
 
     private func fetchUniqueManagedObject(
@@ -1792,7 +1931,23 @@ final class CloudDataStore: ObservableObject {
             attribute(MemoField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
         ]
 
-        model.entities = [session, shift, memo]
+        let stageEvent = NSEntityDescription()
+        stageEvent.name = EntityName.stageEvent
+        stageEvent.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        stageEvent.properties = [
+            attribute(StageEventField.eventId, type: .stringAttributeType, optional: true),
+            attribute(StageEventField.sessionId, type: .stringAttributeType, optional: true),
+            attribute(StageEventField.action, type: .stringAttributeType, optional: true),
+            attribute(StageEventField.stageOrder, type: .integer64AttributeType, defaultValue: 0),
+            attribute(StageEventField.clientAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(StageEventField.createdAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(StageEventField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown"),
+            attribute(StageEventField.processedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(StageEventField.processedResult, type: .stringAttributeType, optional: true),
+            attribute(StageEventField.processedError, type: .stringAttributeType, optional: true)
+        ]
+
+        model.entities = [session, shift, memo, stageEvent]
         return model
     }
 
@@ -2168,6 +2323,47 @@ struct ContentView: View {
         case ended
     }
 
+    enum StageAction: String, CaseIterable, Identifiable {
+        case startShooting = "startShooting"
+        case startSelecting = "startSelecting"
+        case end = "end"
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .startShooting:
+                return "拍摄"
+            case .startSelecting:
+                return "选片"
+            case .end:
+                return "结束"
+            }
+        }
+
+        var stageOrder: Int {
+            switch self {
+            case .startShooting:
+                return 1
+            case .startSelecting:
+                return 2
+            case .end:
+                return 3
+            }
+        }
+
+        var targetStage: Stage {
+            switch self {
+            case .startShooting:
+                return .shooting
+            case .startSelecting:
+                return .selecting
+            case .end:
+                return .ended
+            }
+        }
+    }
+
     enum Tab {
         case home
         case stats
@@ -2308,6 +2504,10 @@ struct ContentView: View {
     @AppStorage("pf_debug_mode_enabled") private var debugModeEnabled = false
     @State private var debugTapCount = 0
     @State private var lastDebugTapAt: Date?
+    @State private var isProcessingStageEvents = false
+    @State private var lastProcessedStageEventAt: Date?
+    @State private var lastStageEventProcessError: String?
+    @State private var stageEventPollTask: Task<Void, Never>?
     @State private var showIpadSyncDebug = false
     @State private var isExportingFiles = false
     @State private var exportDocument = ExportDocument(data: Data())
@@ -2413,6 +2613,13 @@ struct ContentView: View {
         .onReceive(cloudStore.$sessionRecords) { records in
             syncSessionSummaries(from: records)
         }
+        .onReceive(cloudStore.$stageEvents) { _ in
+            guard !isReadOnlyDevice else { return }
+            if pendingStageEventCount() > 0 {
+                processStageEvents(trigger: "stageEvents")
+                startStageEventPolling()
+            }
+        }
         .onReceive(dailyMemoStore.$memos) { memos in
             let dayKey = dailyMemoStore.dayKey(for: now)
             let latest = memos[dayKey] ?? ""
@@ -2421,7 +2628,10 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
+            guard phase == .active else {
+                stageEventPollTask?.cancel()
+                return
+            }
             if isReadOnlyDevice {
                 if let state = syncStore.reloadCanonicalState() {
                     applyCanonicalState(state, shouldPrompt: false)
@@ -2434,6 +2644,8 @@ struct ContentView: View {
             } else {
                 syncStageState(now: now)
             }
+            processStageEvents(trigger: "foreground")
+            startStageEventPolling()
         }
         }
     }
@@ -2529,6 +2741,9 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ipadStatsDashboard
+                    if isReadOnlyDevice || isDebugBuild || debugModeEnabled {
+                        ipadStageActionPanel(selectedRecord: selectedRecord)
+                    }
                     Divider()
                     if sessions.isEmpty {
                         Text("暂无会话")
@@ -2601,6 +2816,13 @@ struct ContentView: View {
             hasRevenue: false,
             topRecords: []
         )
+    }
+
+    private struct StageEventDiagnosticSnapshot {
+        let pendingCount: Int
+        let oldestPendingAge: TimeInterval?
+        let lastProcessedAt: Date?
+        let lastProcessError: String?
     }
 
     private func refreshIpadDashboard(records: [CloudDataStore.SessionRecord], range: StatsRange) {
@@ -2744,9 +2966,17 @@ struct ContentView: View {
 
     private var ipadCloudStatusView: some View {
         let syncText = cloudStore.lastCloudSyncAt.map(formatSessionTimeWithSeconds) ?? "--"
+        let diagnostics = stageEventDiagnosticSnapshot()
+        let pendingText = String(diagnostics.pendingCount)
+        let oldestAgeText = formatStageEventAge(diagnostics.oldestPendingAge)
+        let lastProcessedText = diagnostics.lastProcessedAt.map(formatSessionTimeWithSeconds) ?? "--"
+        let lastErrorText = diagnostics.lastProcessError ?? "—"
         return VStack(alignment: .leading, spacing: 2) {
             Text("lastCloudSyncAt \(syncText)")
             Text("lastRevision \(cloudStore.lastRevision)")
+            Text("pendingEventCount \(pendingText) · oldestPendingAge \(oldestAgeText)")
+            Text("lastProcessedEventAt \(lastProcessedText)")
+            Text("lastProcessError \(lastErrorText)")
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
@@ -3051,6 +3281,63 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func ipadStageActionPanel(selectedRecord: CloudDataStore.SessionRecord?) -> some View {
+        let sessions = dedupedSessionRecords(cloudStore.sessionRecords)
+        let activeRecord = activeIpadSessionRecord(from: sessions)
+        let targetRecord = activeRecord ?? selectedRecord
+        let currentOrder = targetRecord.map(stageOrder(for:)) ?? 0
+        let currentStageText = targetRecord.map { stageLabel(for: $0.stage) } ?? "未开始"
+        let diagnostics = stageEventDiagnosticSnapshot()
+        let pendingText = String(diagnostics.pendingCount)
+        let oldestText = formatStageEventAge(diagnostics.oldestPendingAge)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("阶段推进")
+                .font(.headline)
+            Text("当前阶段：\(currentStageText)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                ForEach(StageAction.allCases) { action in
+                    let sessionId = resolveStageEventSessionId(
+                        action: action,
+                        activeRecord: activeRecord,
+                        selectedRecord: targetRecord
+                    )
+                    Button(action.title) {
+                        if let sessionId {
+                            createStageEvent(action: action, sessionId: sessionId)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(sessionId == nil || !isStageActionAllowed(action, currentOrder: currentOrder))
+                }
+            }
+            Text("pendingEventCount \(pendingText) · oldestPendingAge \(oldestText)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var stageEventDiagnosticsView: some View {
+        let diagnostics = stageEventDiagnosticSnapshot()
+        let pendingText = String(diagnostics.pendingCount)
+        let oldestText = formatStageEventAge(diagnostics.oldestPendingAge)
+        let lastProcessedText = diagnostics.lastProcessedAt.map(formatSessionTimeWithSeconds) ?? "--"
+        let lastErrorText = diagnostics.lastProcessError ?? "—"
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("pendingEventCount \(pendingText) · oldestPendingAge \(oldestText)")
+            Text("lastProcessedEventAt \(lastProcessedText)")
+            Text("lastProcessError \(lastErrorText)")
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
     }
 
     private func cloudSessionDurations(
@@ -3508,6 +3795,9 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
 #endif
+            if debugModeEnabled || isDebugBuild {
+                stageEventDiagnosticsView
+            }
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
@@ -5435,6 +5725,241 @@ struct ContentView: View {
 
     private func debugNowMillis() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func makeStageEventId() -> String {
+        "stage-\(Int(now.timeIntervalSince1970 * 1000))-\(shortDebugToken())"
+    }
+
+    private func stageOrder(for stageValue: String, endedAt: Date?) -> Int {
+        switch stageValue {
+        case WatchSyncStore.StageSyncKey.stageShooting:
+            return 1
+        case WatchSyncStore.StageSyncKey.stageSelecting:
+            return 2
+        case WatchSyncStore.StageSyncKey.stageStopped:
+            return endedAt == nil ? 0 : 3
+        default:
+            return endedAt == nil ? 0 : 3
+        }
+    }
+
+    private func stageOrder(for record: CloudDataStore.SessionRecord) -> Int {
+        stageOrder(for: record.stage, endedAt: record.endedAt)
+    }
+
+    private func stageOrderBySessionId(records: [CloudDataStore.SessionRecord]) -> [String: Int] {
+        var map: [String: Int] = [:]
+        for record in dedupedSessionRecords(records) {
+            map[record.id] = stageOrder(for: record)
+        }
+        return map
+    }
+
+    private func pendingStageEvents() -> [CloudDataStore.StageEventRecord] {
+        pendingStageEvents(events: cloudStore.stageEvents, records: cloudStore.sessionRecords)
+    }
+
+    private func pendingStageEvents(
+        events: [CloudDataStore.StageEventRecord],
+        records: [CloudDataStore.SessionRecord]
+    ) -> [CloudDataStore.StageEventRecord] {
+        let stageMap = stageOrderBySessionId(records: records)
+        let pending = events.filter { event in
+            let result = event.processedResult?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !result.isEmpty {
+                return false
+            }
+            let currentOrder = stageMap[event.sessionId] ?? 0
+            return currentOrder < event.stageOrder
+        }
+        return pending.sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt < rhs.createdAt
+            }
+            return lhs.clientAt < rhs.clientAt
+        }
+    }
+
+    private func pendingStageEventCount() -> Int {
+        pendingStageEvents().count
+    }
+
+    private func stageEventDiagnosticSnapshot() -> StageEventDiagnosticSnapshot {
+        let pending = pendingStageEvents()
+        let oldestPendingAge = pending.map(\.createdAt).min().map { now.timeIntervalSince($0) }
+        let processedAtMax = cloudStore.stageEvents.compactMap(\.processedAt).max()
+        let lastProcessedAt = [processedAtMax, lastProcessedStageEventAt].compactMap { $0 }.max()
+        let lastErrorEvent = cloudStore.stageEvents
+            .filter { ($0.processedError ?? "").isEmpty == false }
+            .max { lhs, rhs in
+                let left = lhs.processedAt ?? lhs.createdAt
+                let right = rhs.processedAt ?? rhs.createdAt
+                return left < right
+            }
+        let lastError = lastStageEventProcessError ?? lastErrorEvent?.processedError
+        return StageEventDiagnosticSnapshot(
+            pendingCount: pending.count,
+            oldestPendingAge: oldestPendingAge,
+            lastProcessedAt: lastProcessedAt,
+            lastProcessError: lastError
+        )
+    }
+
+    private func formatStageEventAge(_ age: TimeInterval?) -> String {
+        guard let age, age > 0 else { return "--" }
+        if age < 60 {
+            return "\(Int(age))s"
+        }
+        if age < 3600 {
+            return "\(Int(age / 60))m"
+        }
+        return "\(Int(age / 3600))h"
+    }
+
+    private func activeIpadSessionRecord(
+        from records: [CloudDataStore.SessionRecord]
+    ) -> CloudDataStore.SessionRecord? {
+        let active = records.filter { $0.endedAt == nil && $0.stage != WatchSyncStore.StageSyncKey.stageStopped }
+        return active.last
+    }
+
+    private func resolveStageEventSessionId(
+        action: StageAction,
+        activeRecord: CloudDataStore.SessionRecord?,
+        selectedRecord: CloudDataStore.SessionRecord?
+    ) -> String? {
+        switch action {
+        case .startShooting:
+            return makeSessionId(startedAt: now)
+        case .startSelecting, .end:
+            return activeRecord?.id ?? selectedRecord?.id
+        }
+    }
+
+    private func isStageActionAllowed(_ action: StageAction, currentOrder: Int) -> Bool {
+        switch action {
+        case .startShooting:
+            return currentOrder == 0 || currentOrder >= 3
+        case .startSelecting:
+            return currentOrder == 1
+        case .end:
+            return currentOrder == 1 || currentOrder == 2
+        }
+    }
+
+    private func createStageEvent(action: StageAction, sessionId: String) {
+        let eventId = makeStageEventId()
+        cloudStore.createStageEvent(
+            eventId: eventId,
+            sessionId: sessionId,
+            action: action.rawValue,
+            stageOrder: action.stageOrder,
+            clientAt: now
+        )
+    }
+
+    private func applyStageAction(
+        action: StageAction,
+        eventTime: Date,
+        sessionId: String
+    ) {
+        switch action {
+        case .startShooting:
+            session = Session()
+            session.shootingStart = eventTime
+            stage = .shooting
+        case .startSelecting:
+            session.shootingStart = session.shootingStart ?? eventTime
+            session.selectingStart = eventTime
+            stage = .selecting
+        case .end:
+            session.shootingStart = session.shootingStart ?? eventTime
+            session.endedAt = eventTime
+            stage = .ended
+        }
+        updateSessionSummary(for: action.targetStage, at: eventTime, sessionIdOverride: sessionId)
+        if action == .end {
+            promptSettlementIfNeeded(for: sessionId)
+        }
+    }
+
+    private func processStageEvents(trigger: String) {
+        let _ = trigger
+        guard !isReadOnlyDevice, scenePhase == .active else { return }
+        guard !isProcessingStageEvents else { return }
+        let pending = cloudStore.fetchPendingStageEvents()
+        guard !pending.isEmpty else { return }
+        isProcessingStageEvents = true
+        lastStageEventProcessError = nil
+        var stageMap = stageOrderBySessionId(records: cloudStore.sessionRecords)
+        for event in pending {
+            let processedAt = Date()
+            guard let action = StageAction(rawValue: event.action) else {
+                let message = "rejected: unknown action \(event.action)"
+                cloudStore.markStageEventProcessed(
+                    eventId: event.id,
+                    processedAt: processedAt,
+                    result: "rejected",
+                    error: message
+                )
+                lastProcessedStageEventAt = processedAt
+                lastStageEventProcessError = message
+                continue
+            }
+            if sessionVisibilityStore.isDeleted(event.sessionId) || sessionVisibilityStore.isVoided(event.sessionId) {
+                let message = "rejected: session hidden"
+                cloudStore.markStageEventProcessed(
+                    eventId: event.id,
+                    processedAt: processedAt,
+                    result: "rejected",
+                    error: message
+                )
+                lastProcessedStageEventAt = processedAt
+                lastStageEventProcessError = message
+                continue
+            }
+            let currentOrder = stageMap[event.sessionId] ?? 0
+            if action.stageOrder <= currentOrder {
+                let message = "rejected: stale stageOrder \(action.stageOrder) <= \(currentOrder)"
+                cloudStore.markStageEventProcessed(
+                    eventId: event.id,
+                    processedAt: processedAt,
+                    result: "rejected",
+                    error: message
+                )
+                lastProcessedStageEventAt = processedAt
+                lastStageEventProcessError = message
+                continue
+            }
+            applyStageAction(action: action, eventTime: event.clientAt, sessionId: event.sessionId)
+            _ = syncStageState(now: processedAt, sessionIdOverride: event.sessionId)
+            cloudStore.markStageEventProcessed(
+                eventId: event.id,
+                processedAt: processedAt,
+                result: "acked"
+            )
+            lastProcessedStageEventAt = processedAt
+            stageMap[event.sessionId] = max(currentOrder, action.stageOrder)
+        }
+        isProcessingStageEvents = false
+    }
+
+    private func startStageEventPolling() {
+        guard !isReadOnlyDevice else { return }
+        guard isDebugBuild || debugModeEnabled else { return }
+        stageEventPollTask?.cancel()
+        guard pendingStageEventCount() > 0 else { return }
+        stageEventPollTask = Task { @MainActor in
+            let deadline = Date().addingTimeInterval(60)
+            while Date() < deadline {
+                processStageEvents(trigger: "poll")
+                if pendingStageEventCount() == 0 {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
     }
 
     private func updateSessionSummary(for stage: Stage, at timestamp: Date, sessionIdOverride: String? = nil) {
