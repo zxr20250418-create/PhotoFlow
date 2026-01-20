@@ -628,7 +628,8 @@ final class CloudDataStore: ObservableObject {
         static let updatedAt = "updatedAt"
         static let sourceDevice = "sourceDevice"
         static let isVoided = "isVoided"
-        static let isDeleted = "isDeleted"
+        static let legacyIsDeleted = "isDeleted"
+        static let isDeleted = "deletedFlag"
     }
 
     private enum ShiftField {
@@ -1583,10 +1584,10 @@ final class CloudDataStore: ObservableObject {
     private func boolValue(_ object: NSManagedObject?, key: String) -> Bool {
         guard let object else { return false }
         if key == SessionField.isDeleted {
-            if let value = object.primitiveValue(forKey: key) as? Bool {
+            if let value = object.primitiveValue(forKey: SessionField.isDeleted) as? Bool {
                 return value
             }
-            if let value = object.primitiveValue(forKey: key) as? NSNumber {
+            if let value = object.primitiveValue(forKey: SessionField.isDeleted) as? NSNumber {
                 return value.boolValue
             }
         }
@@ -1702,7 +1703,8 @@ final class CloudDataStore: ObservableObject {
             attribute(SessionField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
             attribute(SessionField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown"),
             attribute(SessionField.isVoided, type: .booleanAttributeType, defaultValue: false),
-            attribute(SessionField.isDeleted, type: .booleanAttributeType, defaultValue: false)
+            attribute(SessionField.isDeleted, type: .booleanAttributeType, defaultValue: false),
+            attribute(SessionField.legacyIsDeleted, type: .booleanAttributeType, defaultValue: false)
         ]
 
         let shift = NSEntityDescription()
@@ -4472,7 +4474,7 @@ struct ContentView: View {
         debugModeEnabled
     }
 
-    private let buildShortHashOverride = "fix158e"
+    private let buildShortHashOverride = "fix158f"
 
     private var buildFingerprintText: String {
         let info = Bundle.main.infoDictionary
