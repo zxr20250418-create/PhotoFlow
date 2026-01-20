@@ -10,6 +10,30 @@ Status: ABANDONED (rollback; PR #33 closed)
 ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
+## ACTIVE — TC-IOS-DAILY-REVIEW-V1_1-RPHWORK-SEARCH
+Status: ACTIVE
+ID: TC-IOS-DAILY-REVIEW-V1_1-RPHWORK-SEARCH
+Title: 复盘 RPH 口径调整 + 复盘记录搜索与按月筛选 V1.1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- RPH 按拍摄+选片总时长口径计算；复盘记录支持搜索与按月筛选。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+
+Guardrails:
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- RPH = 收入 / (拍摄总时长 + 选片时长)，收入为空或分母为 0 显示 --
+- Bottom1（最低 RPH）按新口径计算
+- 复盘记录支持搜索（dayKey / tomorrowOneAction / notesAll / bottom1Note）
+- 复盘记录支持按月筛选，默认当前月，先月筛选再搜索过滤
+- ios_safe PASS；0 配置改动
+
 ## DONE — TC-IOS-IPAD-DASHBOARD-V1
 Status: DONE (merged in PR #152)
 ID: TC-IOS-IPAD-DASHBOARD-V1
