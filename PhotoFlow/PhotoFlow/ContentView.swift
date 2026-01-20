@@ -2260,6 +2260,7 @@ struct ContentView: View {
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
     @State private var todayDayKey: String = ContentView.dayKey(for: Date())
+    @State private var isDayMemoExpanded = false
     @StateObject private var cloudStore: CloudDataStore
     @StateObject private var metaStore: SessionMetaStore
     @StateObject private var timeOverrideStore: SessionTimeOverrideStore
@@ -3457,13 +3458,19 @@ struct ContentView: View {
 
     private var homeFixedHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(Self.homeDateFormatter.string(from: now))
-                .font(.headline)
-                .onTapGesture {
-                    registerDebugTap()
-                }
+            Button {
+                registerDebugTap()
+                isDayMemoExpanded.toggle()
+            } label: {
+                Text(Self.homeDateFormatter.string(from: now))
+                    .font(.headline)
+            }
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+            if isDayMemoExpanded {
+                memoEditor
+            }
             todayBanner
-            memoEditor
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -3481,7 +3488,7 @@ struct ContentView: View {
             }
             TextEditor(text: $memoDraft)
                 .font(.footnote)
-                .frame(minHeight: 80)
+                .frame(height: 72)
                 .scrollContentBackground(.hidden)
         }
         .padding(8)
