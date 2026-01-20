@@ -5,6 +5,12 @@
       "idiom" : "universal",
       "platform" : "watchos",
       "size" : "1024x1024"
+    },
+    {
+      "filename" : "PhotoFlow_WatchIcon_1024_NO_ALPHA.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
     }
   ],
   "info" : {
