@@ -2615,10 +2615,8 @@ struct ContentView: View {
         }
         .onReceive(cloudStore.$stageEvents) { _ in
             guard !isReadOnlyDevice else { return }
-            if pendingStageEventCount() > 0 {
-                processStageEvents(trigger: "stageEvents")
-                startStageEventPolling()
-            }
+            processStageEvents(trigger: "stageEvents")
+            startStageEventPolling()
         }
         .onReceive(dailyMemoStore.$memos) { memos in
             let dayKey = dailyMemoStore.dayKey(for: now)
@@ -3286,37 +3284,64 @@ struct ContentView: View {
     private func ipadStageActionPanel(selectedRecord: CloudDataStore.SessionRecord?) -> some View {
         let sessions = dedupedSessionRecords(cloudStore.sessionRecords)
         let activeRecord = activeIpadSessionRecord(from: sessions)
-        let targetRecord = activeRecord ?? selectedRecord
-        let currentOrder = targetRecord.map(stageOrder(for:)) ?? 0
-        let currentStageText = targetRecord.map { stageLabel(for: $0.stage) } ?? "未开始"
+        let currentOrder = activeRecord.map(stageOrder(for:)) ?? 0
+        let currentStageText = activeRecord.map { stageLabel(for: $0.stage) } ?? "未开始"
+        let selectedIsHistory = selectedRecord != nil && selectedRecord?.id != activeRecord?.id
+        let selectedEnded = selectedRecord?.endedAt != nil || (selectedRecord.map(stageOrder(for:)) ?? 0) >= 3
+        let showHistoryNotice = selectedIsHistory && selectedEnded
         let diagnostics = stageEventDiagnosticSnapshot()
         let pendingText = String(diagnostics.pendingCount)
         let oldestText = formatStageEventAge(diagnostics.oldestPendingAge)
+        let lastProcessedText = diagnostics.lastProcessedAt.map(formatSessionTimeWithSeconds) ?? "--"
+        let lastErrorText = diagnostics.lastProcessError ?? "—"
         return VStack(alignment: .leading, spacing: 8) {
             Text("阶段推进")
                 .font(.headline)
             Text("当前阶段：\(currentStageText)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                ForEach(StageAction.allCases) { action in
-                    let sessionId = resolveStageEventSessionId(
-                        action: action,
-                        activeRecord: activeRecord,
-                        selectedRecord: targetRecord
-                    )
-                    Button(action.title) {
-                        if let sessionId {
-                            createStageEvent(action: action, sessionId: sessionId)
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(sessionId == nil || !isStageActionAllowed(action, currentOrder: currentOrder))
-                }
+            if let activeRecord {
+                let timeText = sessionStart(for: activeRecord).map(formatSessionTime) ?? "--"
+                Text("当前单：\(timeText) · \(activeRecord.id)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            Text("pendingEventCount \(pendingText) · oldestPendingAge \(oldestText)")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            if let activeRecord {
+                if showHistoryNotice {
+                    Text("已选择历史单；阶段推进只作用于当前进行中单")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    ForEach(StageAction.allCases) { action in
+                        let sessionId = action == .startShooting ? nil : activeRecord.id
+                        Button(action.title) {
+                            if let sessionId {
+                                createStageEvent(action: action, sessionId: sessionId)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(sessionId == nil || !isStageActionAllowed(action, currentOrder: currentOrder))
+                    }
+                }
+            } else {
+                Text("当前无进行中会话，历史单不可推进")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Button("新建一单并开始拍摄") {
+                    let sessionId = makeSessionId(startedAt: now)
+                    createStageEvent(action: .startShooting, sessionId: sessionId)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("pendingEventCount \(pendingText) · oldestPendingAge \(oldestText)")
+                Text("lastProcessedEventAt \(lastProcessedText)")
+                Text("lastProcessError \(lastErrorText)")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -5824,23 +5849,10 @@ struct ContentView: View {
         return active.last
     }
 
-    private func resolveStageEventSessionId(
-        action: StageAction,
-        activeRecord: CloudDataStore.SessionRecord?,
-        selectedRecord: CloudDataStore.SessionRecord?
-    ) -> String? {
-        switch action {
-        case .startShooting:
-            return makeSessionId(startedAt: now)
-        case .startSelecting, .end:
-            return activeRecord?.id ?? selectedRecord?.id
-        }
-    }
-
     private func isStageActionAllowed(_ action: StageAction, currentOrder: Int) -> Bool {
         switch action {
         case .startShooting:
-            return currentOrder == 0 || currentOrder >= 3
+            return currentOrder == 0
         case .startSelecting:
             return currentOrder == 1
         case .end:
@@ -5920,6 +5932,30 @@ struct ContentView: View {
                 continue
             }
             let currentOrder = stageMap[event.sessionId] ?? 0
+            if currentOrder >= 3 && action == .startShooting {
+                let message = "rejected: ended session"
+                cloudStore.markStageEventProcessed(
+                    eventId: event.id,
+                    processedAt: processedAt,
+                    result: "rejected",
+                    error: message
+                )
+                lastProcessedStageEventAt = processedAt
+                lastStageEventProcessError = message
+                continue
+            }
+            if !isStageActionAllowed(action, currentOrder: currentOrder) {
+                let message = "rejected: invalid stageOrder \(action.stageOrder) for current \(currentOrder)"
+                cloudStore.markStageEventProcessed(
+                    eventId: event.id,
+                    processedAt: processedAt,
+                    result: "rejected",
+                    error: message
+                )
+                lastProcessedStageEventAt = processedAt
+                lastStageEventProcessError = message
+                continue
+            }
             if action.stageOrder <= currentOrder {
                 let message = "rejected: stale stageOrder \(action.stageOrder) <= \(currentOrder)"
                 cloudStore.markStageEventProcessed(
