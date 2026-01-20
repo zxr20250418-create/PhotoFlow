@@ -85,8 +85,31 @@ Acceptance:
 - 点击可跳到会话详情
 - ios_safe PASS；0 配置改动
 
-## ACTIVE — TC-IOS-IPAD-STAGE-ACTIONS-V1
-Status: ACTIVE
+## DONE — TC-IOS-SESSION-DELETE-TOMBSTONE-FIX
+Status: DONE (merged in PR #158)
+ID: TC-IOS-SESSION-DELETE-TOMBSTONE-FIX
+Title: 会话删除/作废 Tombstone 修复
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- 删除/作废走 tombstone 与去重过滤，避免 CloudKit 回滚复活。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+
+Guardrails:
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- Swipe 删除/作废立即从列表消失，重启不复活
+- iPhone 删除后 iPad 60 秒内消失
+- 详情页仅展示状态，无 destructive 操作
+- ios_safe PASS；0 配置改动
+
+## PAUSED — TC-IOS-IPAD-STAGE-ACTIONS-V1
+Status: PAUSED (superseded by TC-IOS-IPAD-STAGE-ACTIONS-FINAL-V1)
 ID: TC-IOS-IPAD-STAGE-ACTIONS-V1
 Title: iPad 阶段推进 V1
 AssignedTo: Coordinator1/Codex
@@ -110,6 +133,34 @@ Acceptance:
 - iPad 离线推进 -> pending 显示；恢复后 <=60s 对齐并清 pending
 - 旧动作不回滚 canonical（revision 规则生效）
 - 启动不卡/白屏
+- ios_safe PASS；0 配置改动
+
+## ACTIVE — TC-IOS-IPAD-STAGE-ACTIONS-FINAL-V1
+Status: ACTIVE
+ID: TC-IOS-IPAD-STAGE-ACTIONS-FINAL-V1
+Title: iPad 阶段推进收口 V1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- iPad 阶段推进稳定收敛；iPhone 仍为权威写入端。
+
+Scope:
+- iPad 写 StageEvent（可离线保存）；UI 显示 pending
+- iPhone 串行消费 StageEvent 并写 canonical SessionRecord（revision 递增）
+- 事件结果写 processedAt + processedResult (acked/rejected)，iPad 依据结果清 pending
+- iPhone 前台时主动处理事件队列并更新 watch/iPad
+
+Guardrails:
+- Allowed files: PhotoFlow/PhotoFlow/**/*.swift
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- iPad 在线推进 -> iPhone + watch 对齐 <=10s，pending 清除
+- iPad 离线推进 -> pending 显示；恢复后 <=60s 对齐并清 pending
+- 旧/冲突动作被 rejected 且不回滚 canonical
+- 诊断字段可见：pendingEventCount / oldestPendingEventAge / lastProcessedEventAt / lastProcessError
 - ios_safe PASS；0 配置改动
 
 ## DONE — TC-SYNC-PHONE-TO-WATCH-V1
