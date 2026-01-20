@@ -2492,6 +2492,8 @@ struct ContentView: View {
     @State private var isDailyReviewPresented = false
     @State private var dailyReviewSelection: String?
     @State private var dailyReviewActionDraft = ""
+    @State private var dailyReviewMonth = ContentView.monthStart(for: Date())
+    @State private var dailyReviewSearchText = ""
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
     @State private var selectedIpadSessionId: String?
@@ -3639,6 +3641,21 @@ struct ContentView: View {
     private static func dayKey(for date: Date) -> String {
         let startOfDay = Calendar.current.startOfDay(for: date)
         return dayKeyFormatter.string(from: startOfDay)
+    }
+
+    private static let reviewMonthFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar.current
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM"
+        return formatter
+    }()
+
+    private static func monthStart(for date: Date) -> Date {
+        let calendar = Calendar.current
+        let components = calendar.dateComponents([.year, .month], from: date)
+        return calendar.date(from: components) ?? date
     }
 
     private static let exportTimestampFormatter: ISO8601DateFormatter = {
@@ -6065,10 +6082,11 @@ struct ContentView: View {
             }
         }
         let incomeCents: Int64? = hasIncome ? Int64(incomeTotal) : nil
+        let workSeconds = shootingTotal + selectingTotal
         let rphShoot: Double? = {
-            guard let incomeCents, shootingTotal > 0 else { return nil }
+            guard let incomeCents, workSeconds > 0 else { return nil }
             let revenue = Double(incomeCents) / 100
-            let hours = shootingTotal / 3600
+            let hours = workSeconds / 3600
             return revenue / hours
         }()
         let top3SessionIds: [String] = {
@@ -6082,10 +6100,11 @@ struct ContentView: View {
             let items = ordered.compactMap { summary -> (String, Double)? in
                 let meta = metaStore.meta(for: summary.id)
                 guard let amount = meta.amountCents else { return nil }
-                let shooting = sessionDurations(for: summary).shooting
-                guard shooting > 0 else { return nil }
+                let durations = sessionDurations(for: summary)
+                let work = durations.shooting + (durations.selecting ?? 0)
+                guard work > 0 else { return nil }
                 let revenue = Double(amount) / 100
-                let hours = shooting / 3600
+                let hours = work / 3600
                 return (summary.id, revenue / hours)
             }
             guard let worst = items.sorted(by: { $0.1 < $1.1 }).first else { return nil }
@@ -6149,24 +6168,78 @@ struct ContentView: View {
     }
 
     private var dailyReviewListView: some View {
-        let keys = cloudStore.dailyReviews.keys.sorted(by: >)
+        let reviews = filteredDailyReviews()
         return List {
-            if keys.isEmpty {
+            Section {
+                dailyReviewMonthPickerRow
+            }
+            if reviews.isEmpty {
                 Text("暂无复盘记录")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(keys, id: \.self) { key in
-                    if let review = cloudStore.dailyReview(for: key) {
-                        Button {
-                            dailyReviewSelection = key
-                        } label: {
-                            dailyReviewRow(review)
-                        }
-                        .buttonStyle(.plain)
+                ForEach(reviews, id: \.dayKey) { review in
+                    Button {
+                        dailyReviewSelection = review.dayKey
+                    } label: {
+                        dailyReviewRow(review)
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }
+        .listStyle(.plain)
+        .searchable(text: $dailyReviewSearchText, prompt: "搜索复盘")
+    }
+
+    private var dailyReviewMonthPickerRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                dailyReviewMonth = shiftDailyReviewMonth(dailyReviewMonth, by: -1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.plain)
+
+            Text(dailyReviewMonthText(dailyReviewMonth))
+                .font(.headline)
+                .monospacedDigit()
+
+            Button {
+                dailyReviewMonth = shiftDailyReviewMonth(dailyReviewMonth, by: 1)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func filteredDailyReviews() -> [CloudDataStore.DailyReviewSnapshot] {
+        let calendar = Calendar.current
+        let monthStart = ContentView.monthStart(for: dailyReviewMonth)
+        guard let interval = calendar.dateInterval(of: .month, for: monthStart) else { return [] }
+        let monthFiltered = cloudStore.dailyReviews.values.compactMap { review -> CloudDataStore.DailyReviewSnapshot? in
+            guard let date = dateFromDayKey(review.dayKey), interval.contains(date) else { return nil }
+            return review
+        }
+        let trimmed = dailyReviewSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let searched = trimmed.isEmpty
+            ? monthFiltered
+            : monthFiltered.filter { review in
+                let haystack = [
+                    review.dayKey,
+                    review.tomorrowOneAction,
+                    review.notesAll,
+                    review.bottom1Note
+                ]
+                .compactMap { $0 }
+                .joined(separator: " ")
+                .lowercased()
+                return haystack.contains(trimmed)
+            }
+        return searched.sorted { $0.dayKey > $1.dayKey }
     }
 
     private func dailyReviewRow(_ review: CloudDataStore.DailyReviewSnapshot) -> some View {
@@ -6184,7 +6257,14 @@ struct ContentView: View {
 
     private func dailyReviewDetailView(_ review: CloudDataStore.DailyReviewSnapshot) -> some View {
         let incomeText = review.incomeCents.map { formatAmount(cents: Int($0)) } ?? "--"
-        let rphText = review.rphShoot.map { String(format: "¥%.0f/小时", $0) } ?? "--"
+        let rphText: String = {
+            guard let incomeCents = review.incomeCents else { return "--" }
+            let workSeconds = review.shootingTotal + review.selectingTotal
+            guard workSeconds > 0 else { return "--" }
+            let revenue = Double(incomeCents) / 100
+            let hours = workSeconds / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
         let daySessions = effectiveSessionSummaries
             .filter { dayKey(for: $0) == review.dayKey }
             .sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
@@ -6211,7 +6291,7 @@ struct ContentView: View {
                     Text("单数 \(review.sessionCount)")
                     Text("拍摄总时长 \(format(review.shootingTotal))")
                     Text("选片总时长 \(format(review.selectingTotal))")
-                    Text("RPHshoot \(rphText)")
+                    Text("RPH(拍+选) \(rphText)")
                 }
                 .font(.footnote)
                 .monospacedDigit()
@@ -6231,7 +6311,7 @@ struct ContentView: View {
                     }
                 }
 
-                Text("Bottom1（最低 RPHshoot）")
+                Text("Bottom1（最低 RPH(拍+选)）")
                     .font(.headline)
                 if let bottomId = review.bottom1SessionId {
                     Text(labelForId(bottomId))
@@ -6299,6 +6379,20 @@ struct ContentView: View {
             return reviewDateText(date)
         }
         return dayKey
+    }
+
+    private func dailyReviewMonthText(_ date: Date) -> String {
+        ContentView.reviewMonthFormatter.string(from: date)
+    }
+
+    private func shiftDailyReviewMonth(_ date: Date, by offset: Int) -> Date {
+        let calendar = Calendar.current
+        let start = ContentView.monthStart(for: date)
+        return calendar.date(byAdding: .month, value: offset, to: start) ?? start
+    }
+
+    private func dateFromDayKey(_ dayKey: String) -> Date? {
+        ContentView.dayKeyFormatter.date(from: dayKey)
     }
 
     private func loadDailyReviewActionDraft(for dayKey: String) {
