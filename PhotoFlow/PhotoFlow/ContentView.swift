@@ -584,9 +584,27 @@ final class CloudDataStore: ObservableObject {
         let sourceDevice: String
     }
 
+    struct DailyReviewSnapshot: Equatable {
+        let dayKey: String
+        let incomeCents: Int64?
+        let shootingTotal: TimeInterval
+        let selectingTotal: TimeInterval
+        let rphShoot: Double?
+        let sessionCount: Int
+        let top3SessionIds: [String]
+        let bottom1SessionId: String?
+        let bottom1Note: String?
+        let notesAll: String?
+        let tomorrowOneAction: String?
+        let revision: Int64
+        let updatedAt: Date
+        let sourceDevice: String
+    }
+
     @Published private(set) var sessionRecords: [SessionRecord] = []
     @Published private(set) var shiftRecords: [String: ShiftRecordSnapshot] = [:]
     @Published private(set) var dayMemos: [String: DayMemoSnapshot] = [:]
+    @Published private(set) var dailyReviews: [String: DailyReviewSnapshot] = [:]
     @Published private(set) var lastCloudSyncAt: Date?
     @Published private(set) var lastRevision: Int64 = 0
     @Published private(set) var pendingCount: Int = 0
@@ -606,6 +624,7 @@ final class CloudDataStore: ObservableObject {
         static let session = "SessionRecord"
         static let shift = "ShiftRecord"
         static let memo = "DayMemo"
+        static let review = "DailyReview"
     }
 
     static let cloudContainerIdentifier = "iCloud.com.zhengxinrong.PhotoFlow"
@@ -644,6 +663,23 @@ final class CloudDataStore: ObservableObject {
     private enum MemoField {
         static let dayKey = "dayKey"
         static let text = "text"
+        static let revision = "revision"
+        static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+    }
+
+    private enum ReviewField {
+        static let dayKey = "dayKey"
+        static let incomeCents = "incomeCents"
+        static let shootingTotal = "shootingTotal"
+        static let selectingTotal = "selectingTotal"
+        static let rphShoot = "rphShoot"
+        static let sessionCount = "sessionCount"
+        static let top3SessionIds = "top3SessionIds"
+        static let bottom1SessionId = "bottom1SessionId"
+        static let bottom1Note = "bottom1Note"
+        static let notesAll = "notesAll"
+        static let tomorrowOneAction = "tomorrowOneAction"
         static let revision = "revision"
         static let updatedAt = "updatedAt"
         static let sourceDevice = "sourceDevice"
@@ -691,6 +727,10 @@ final class CloudDataStore: ObservableObject {
 
     func sessionRecord(for sessionId: String) -> SessionRecord? {
         sessionRecords.first { $0.id == sessionId }
+    }
+
+    func dailyReview(for dayKey: String) -> DailyReviewSnapshot? {
+        dailyReviews[dayKey]
     }
 
     func upsertSessionTiming(
@@ -1056,6 +1096,77 @@ final class CloudDataStore: ObservableObject {
         saveContext()
     }
 
+    func upsertDailyReview(
+        dayKey: String,
+        incomeCents: Int64?,
+        shootingTotal: TimeInterval,
+        selectingTotal: TimeInterval,
+        rphShoot: Double?,
+        sessionCount: Int,
+        top3SessionIds: [String],
+        bottom1SessionId: String?,
+        bottom1Note: String?,
+        notesAll: String?,
+        tomorrowOneAction: String?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        guard !dayKey.isEmpty else {
+            assertionFailure("dayKey is required")
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchReviewManagedObject(dayKey: dayKey)
+        let existingRevision = int64Value(record, key: ReviewField.revision)
+        let existingSource = stringValue(record, key: ReviewField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.review, into: context)
+        target.setValue(dayKey, forKey: ReviewField.dayKey)
+        target.setValue(incomeCents, forKey: ReviewField.incomeCents)
+        target.setValue(shootingTotal, forKey: ReviewField.shootingTotal)
+        target.setValue(selectingTotal, forKey: ReviewField.selectingTotal)
+        target.setValue(rphShoot, forKey: ReviewField.rphShoot)
+        target.setValue(Int64(sessionCount), forKey: ReviewField.sessionCount)
+        target.setValue(encodeStringArray(top3SessionIds), forKey: ReviewField.top3SessionIds)
+        target.setValue(bottom1SessionId, forKey: ReviewField.bottom1SessionId)
+        target.setValue(bottom1Note, forKey: ReviewField.bottom1Note)
+        target.setValue(notesAll, forKey: ReviewField.notesAll)
+        target.setValue(tomorrowOneAction, forKey: ReviewField.tomorrowOneAction)
+        target.setValue(nextRevisionValue, forKey: ReviewField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: ReviewField.updatedAt)
+        target.setValue(source, forKey: ReviewField.sourceDevice)
+        saveContext()
+    }
+
+    func updateDailyReviewAction(dayKey: String, action: String?) {
+        guard let existing = dailyReviews[dayKey] else { return }
+        let trimmed = action?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalized = trimmed.isEmpty ? nil : trimmed
+        if normalized == existing.tomorrowOneAction {
+            return
+        }
+        upsertDailyReview(
+            dayKey: dayKey,
+            incomeCents: existing.incomeCents,
+            shootingTotal: existing.shootingTotal,
+            selectingTotal: existing.selectingTotal,
+            rphShoot: existing.rphShoot,
+            sessionCount: existing.sessionCount,
+            top3SessionIds: existing.top3SessionIds,
+            bottom1SessionId: existing.bottom1SessionId,
+            bottom1Note: existing.bottom1Note,
+            notesAll: existing.notesAll,
+            tomorrowOneAction: normalized
+        )
+    }
+
     private func saveContext() {
         guard context.hasChanges else { return }
         do {
@@ -1074,6 +1185,7 @@ final class CloudDataStore: ObservableObject {
         sessionRecords = fetchSessionRecords()
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
         dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
+        dailyReviews = Dictionary(uniqueKeysWithValues: fetchDailyReviews().map { ($0.dayKey, $0) })
         updateRevisionSnapshot()
         updateDeletedSnapshot()
     }
@@ -1098,7 +1210,8 @@ final class CloudDataStore: ObservableObject {
         let sessionMax = sessionRecords.map(\.revision).max() ?? 0
         let shiftMax = shiftRecords.values.map(\.revision).max() ?? 0
         let memoMax = dayMemos.values.map(\.revision).max() ?? 0
-        lastRevision = max(sessionMax, max(shiftMax, memoMax))
+        let reviewMax = dailyReviews.values.map(\.revision).max() ?? 0
+        lastRevision = max(sessionMax, max(shiftMax, max(memoMax, reviewMax)))
     }
 
     private func observeRemoteChanges() {
@@ -1463,6 +1576,39 @@ final class CloudDataStore: ObservableObject {
         }
     }
 
+    private func fetchDailyReviews() -> [DailyReviewSnapshot] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.review)
+        let objects = (try? context.fetch(request)) ?? []
+        let deduped = dedupeObjects(
+            objects,
+            idKey: ReviewField.dayKey,
+            revisionKey: ReviewField.revision,
+            sourceKey: ReviewField.sourceDevice
+        )
+        return deduped.values.compactMap { object in
+            guard let dayKey = object.value(forKey: ReviewField.dayKey) as? String,
+                  !dayKey.isEmpty else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: ReviewField.updatedAt)
+            let top3Value = object.value(forKey: ReviewField.top3SessionIds) as? String
+            return DailyReviewSnapshot(
+                dayKey: dayKey,
+                incomeCents: object.value(forKey: ReviewField.incomeCents) as? Int64,
+                shootingTotal: doubleValue(object, key: ReviewField.shootingTotal),
+                selectingTotal: doubleValue(object, key: ReviewField.selectingTotal),
+                rphShoot: object.value(forKey: ReviewField.rphShoot) as? Double,
+                sessionCount: Int(int64Value(object, key: ReviewField.sessionCount)),
+                top3SessionIds: decodeStringArray(top3Value),
+                bottom1SessionId: object.value(forKey: ReviewField.bottom1SessionId) as? String,
+                bottom1Note: object.value(forKey: ReviewField.bottom1Note) as? String,
+                notesAll: object.value(forKey: ReviewField.notesAll) as? String,
+                tomorrowOneAction: object.value(forKey: ReviewField.tomorrowOneAction) as? String,
+                revision: int64Value(object, key: ReviewField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: ReviewField.sourceDevice, fallback: "unknown")
+            )
+        }
+    }
+
     private func fetchSessionManagedObject(sessionId: String) -> NSManagedObject? {
         fetchUniqueManagedObject(
             entityName: EntityName.session,
@@ -1490,6 +1636,16 @@ final class CloudDataStore: ObservableObject {
             idValue: dayKey,
             revisionKey: MemoField.revision,
             sourceKey: MemoField.sourceDevice
+        )
+    }
+
+    private func fetchReviewManagedObject(dayKey: String) -> NSManagedObject? {
+        fetchUniqueManagedObject(
+            entityName: EntityName.review,
+            idKey: ReviewField.dayKey,
+            idValue: dayKey,
+            revisionKey: ReviewField.revision,
+            sourceKey: ReviewField.sourceDevice
         )
     }
 
@@ -1674,6 +1830,23 @@ final class CloudDataStore: ObservableObject {
         return (object.value(forKey: key) as? String) ?? fallback
     }
 
+    private func encodeStringArray(_ values: [String]) -> String? {
+        guard !values.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: values, options: []) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func decodeStringArray(_ value: String?) -> [String] {
+        guard let value,
+              let data = value.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String] else {
+            return []
+        }
+        return raw
+    }
+
     private static func deviceSource() -> String {
         UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "phone"
     }
@@ -1792,7 +1965,27 @@ final class CloudDataStore: ObservableObject {
             attribute(MemoField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
         ]
 
-        model.entities = [session, shift, memo]
+        let review = NSEntityDescription()
+        review.name = EntityName.review
+        review.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        review.properties = [
+            attribute(ReviewField.dayKey, type: .stringAttributeType, optional: true),
+            attribute(ReviewField.incomeCents, type: .integer64AttributeType, optional: true),
+            attribute(ReviewField.shootingTotal, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(ReviewField.selectingTotal, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(ReviewField.rphShoot, type: .doubleAttributeType, optional: true),
+            attribute(ReviewField.sessionCount, type: .integer64AttributeType, defaultValue: 0),
+            attribute(ReviewField.top3SessionIds, type: .stringAttributeType, optional: true),
+            attribute(ReviewField.bottom1SessionId, type: .stringAttributeType, optional: true),
+            attribute(ReviewField.bottom1Note, type: .stringAttributeType, optional: true),
+            attribute(ReviewField.notesAll, type: .stringAttributeType, optional: true),
+            attribute(ReviewField.tomorrowOneAction, type: .stringAttributeType, optional: true),
+            attribute(ReviewField.revision, type: .integer64AttributeType, defaultValue: 0),
+            attribute(ReviewField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(ReviewField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
+        ]
+
+        model.entities = [session, shift, memo, review]
         return model
     }
 
@@ -2296,6 +2489,9 @@ struct ContentView: View {
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
     @State private var isReviewDigestPresented = false
+    @State private var isDailyReviewPresented = false
+    @State private var dailyReviewSelection: String?
+    @State private var dailyReviewActionDraft = ""
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
     @State private var selectedIpadSessionId: String?
@@ -2399,6 +2595,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isManualSessionPresented) {
             manualSessionEditor
+        }
+        .sheet(isPresented: $isDailyReviewPresented) {
+            dailyReviewSheet
         }
         .sheet(isPresented: $showIpadSyncDebug) {
             ipadSyncView
@@ -4161,6 +4360,7 @@ struct ContentView: View {
 
     private var statsView: some View {
         let isoCal = Calendar(identifier: .iso8601)
+        let todayKey = Self.dayKey(for: now)
         let filteredSessions = effectiveSessionSummaries.filter { summary in
             guard let shootingStart = effectiveTimes(for: summary).shootingStart else { return false }
             switch statsRange {
@@ -4447,6 +4647,36 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            Text("今日复盘卡")
+                .font(.headline)
+            HStack(spacing: 12) {
+                Button("生成今日复盘") {
+                    generateDailyReview(for: todayKey)
+                    dailyReviewSelection = todayKey
+                    isDailyReviewPresented = true
+                }
+                .buttonStyle(.bordered)
+                .disabled(statsRange != .today)
+
+                Button("复盘记录") {
+                    dailyReviewSelection = nil
+                    isDailyReviewPresented = true
+                }
+                .buttonStyle(.bordered)
+            }
+            if statsRange != .today {
+                Text("仅今日可生成")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if cloudStore.dailyReview(for: todayKey) == nil {
+                Text("尚未生成")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("今日复盘已生成")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Divider()
 
@@ -5814,6 +6044,268 @@ struct ContentView: View {
             return "\(header)\n暂无备注"
         }
         return ([header] + lines).joined(separator: "\n")
+    }
+
+    private func generateDailyReview(for targetDayKey: String) {
+        let sessions = effectiveSessionSummaries.filter { dayKey(for: $0) == targetDayKey }
+        let ordered = sessions.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        var shootingTotal: TimeInterval = 0
+        var selectingTotal: TimeInterval = 0
+        var incomeTotal = 0
+        var hasIncome = false
+        for summary in ordered {
+            let durations = sessionDurations(for: summary)
+            shootingTotal += durations.shooting
+            if let selecting = durations.selecting {
+                selectingTotal += selecting
+            }
+            if let amount = metaStore.meta(for: summary.id).amountCents {
+                incomeTotal += amount
+                hasIncome = true
+            }
+        }
+        let incomeCents: Int64? = hasIncome ? Int64(incomeTotal) : nil
+        let rphShoot: Double? = {
+            guard let incomeCents, shootingTotal > 0 else { return nil }
+            let revenue = Double(incomeCents) / 100
+            let hours = shootingTotal / 3600
+            return revenue / hours
+        }()
+        let top3SessionIds: [String] = {
+            let items = ordered.compactMap { summary -> (String, Int)? in
+                guard let amount = metaStore.meta(for: summary.id).amountCents else { return nil }
+                return (summary.id, amount)
+            }
+            return items.sorted { $0.1 > $1.1 }.prefix(3).map(\.0)
+        }()
+        let bottom1: (id: String, note: String?)? = {
+            let items = ordered.compactMap { summary -> (String, Double)? in
+                let meta = metaStore.meta(for: summary.id)
+                guard let amount = meta.amountCents else { return nil }
+                let shooting = sessionDurations(for: summary).shooting
+                guard shooting > 0 else { return nil }
+                let revenue = Double(amount) / 100
+                let hours = shooting / 3600
+                return (summary.id, revenue / hours)
+            }
+            guard let worst = items.sorted(by: { $0.1 < $1.1 }).first else { return nil }
+            let note = metaStore.meta(for: worst.0).reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = (note ?? "").isEmpty ? nil : note
+            return (worst.0, trimmed)
+        }()
+        let notesAll: String? = {
+            let notes = ordered.compactMap { summary -> String? in
+                let note = metaStore.meta(for: summary.id).reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return note.isEmpty ? nil : note
+            }
+            return notes.isEmpty ? nil : notes.joined(separator: "\n")
+        }()
+        let existingAction = cloudStore.dailyReview(for: targetDayKey)?.tomorrowOneAction
+        cloudStore.upsertDailyReview(
+            dayKey: targetDayKey,
+            incomeCents: incomeCents,
+            shootingTotal: shootingTotal,
+            selectingTotal: selectingTotal,
+            rphShoot: rphShoot,
+            sessionCount: ordered.count,
+            top3SessionIds: top3SessionIds,
+            bottom1SessionId: bottom1?.id,
+            bottom1Note: bottom1?.note,
+            notesAll: notesAll,
+            tomorrowOneAction: existingAction
+        )
+    }
+
+    private var dailyReviewSheet: some View {
+        NavigationStack {
+            if let selected = dailyReviewSelection,
+               let review = cloudStore.dailyReview(for: selected) {
+                dailyReviewDetailView(review)
+                    .navigationTitle("复盘详情")
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("列表") {
+                                dailyReviewSelection = nil
+                            }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                isDailyReviewPresented = false
+                            }
+                        }
+                    }
+            } else {
+                dailyReviewListView
+                    .navigationTitle("复盘记录")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                isDailyReviewPresented = false
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
+    private var dailyReviewListView: some View {
+        let keys = cloudStore.dailyReviews.keys.sorted(by: >)
+        return List {
+            if keys.isEmpty {
+                Text("暂无复盘记录")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(keys, id: \.self) { key in
+                    if let review = cloudStore.dailyReview(for: key) {
+                        Button {
+                            dailyReviewSelection = key
+                        } label: {
+                            dailyReviewRow(review)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func dailyReviewRow(_ review: CloudDataStore.DailyReviewSnapshot) -> some View {
+        let incomeText = review.incomeCents.map { formatAmount(cents: Int($0)) } ?? "--"
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(dailyReviewDateText(review.dayKey))
+                .font(.headline)
+            Text("收入 \(incomeText) · \(review.sessionCount)单")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func dailyReviewDetailView(_ review: CloudDataStore.DailyReviewSnapshot) -> some View {
+        let incomeText = review.incomeCents.map { formatAmount(cents: Int($0)) } ?? "--"
+        let rphText = review.rphShoot.map { String(format: "¥%.0f/小时", $0) } ?? "--"
+        let daySessions = effectiveSessionSummaries
+            .filter { dayKey(for: $0) == review.dayKey }
+            .sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        let orderById = Dictionary(uniqueKeysWithValues: daySessions.enumerated().map { ($0.element.id, $0.offset + 1) })
+        let labelForId: (String) -> String = { id in
+            guard let summary = daySessions.first(where: { $0.id == id }) else { return id }
+            var parts: [String] = []
+            if let order = orderById[id] {
+                parts.append("第\(order)单")
+            }
+            if let start = effectiveSessionStartTime(for: summary) {
+                parts.append(formatSessionTime(start))
+            }
+            return parts.isEmpty ? id : parts.joined(separator: " ")
+        }
+        let notesText = (review.notesAll ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(dailyReviewDateText(review.dayKey))
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("收入 \(incomeText)")
+                    Text("单数 \(review.sessionCount)")
+                    Text("拍摄总时长 \(format(review.shootingTotal))")
+                    Text("选片总时长 \(format(review.selectingTotal))")
+                    Text("RPHshoot \(rphText)")
+                }
+                .font(.footnote)
+                .monospacedDigit()
+
+                Divider()
+
+                Text("Top3（收入）")
+                    .font(.headline)
+                if review.top3SessionIds.isEmpty {
+                    Text("暂无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(review.top3SessionIds, id: \.self) { sessionId in
+                        Text(labelForId(sessionId))
+                            .font(.footnote)
+                    }
+                }
+
+                Text("Bottom1（最低 RPHshoot）")
+                    .font(.headline)
+                if let bottomId = review.bottom1SessionId {
+                    Text(labelForId(bottomId))
+                        .font(.footnote)
+                    if let note = review.bottom1Note, !note.isEmpty {
+                        Text(note)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("暂无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+
+                Text("今日备注汇总")
+                    .font(.headline)
+                if notesText.isEmpty {
+                    Text("暂无备注")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(notesText)
+                        .font(.footnote)
+                }
+
+                Divider()
+
+                Text("明天唯一动作")
+                    .font(.headline)
+                ZStack(alignment: .topLeading) {
+                    if dailyReviewActionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("明天唯一动作…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 8)
+                            .padding(.leading, 6)
+                    }
+                    TextEditor(text: $dailyReviewActionDraft)
+                        .font(.footnote)
+                        .frame(height: 72)
+                        .scrollContentBackground(.hidden)
+                }
+                .padding(8)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .onAppear {
+                    loadDailyReviewActionDraft(for: review.dayKey)
+                }
+                .onChange(of: review.dayKey) { _, newKey in
+                    loadDailyReviewActionDraft(for: newKey)
+                }
+                .onChange(of: dailyReviewActionDraft) { _, newValue in
+                    cloudStore.updateDailyReviewAction(dayKey: review.dayKey, action: newValue)
+                }
+            }
+            .padding()
+        }
+    }
+
+    private func dailyReviewDateText(_ dayKey: String) -> String {
+        if let date = Self.dayKeyFormatter.date(from: dayKey) {
+            return reviewDateText(date)
+        }
+        return dayKey
+    }
+
+    private func loadDailyReviewActionDraft(for dayKey: String) {
+        let latest = cloudStore.dailyReview(for: dayKey)?.tomorrowOneAction ?? ""
+        if latest != dailyReviewActionDraft {
+            dailyReviewActionDraft = latest
+        }
     }
 
     private func amountText(for summary: SessionSummary) -> String {
