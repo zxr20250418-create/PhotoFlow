@@ -854,7 +854,6 @@ final class CloudDataStore: ObservableObject {
         let maxRevision = objects.map { int64Value($0, key: SessionField.revision) }.max() ?? 0
         let nowMillis = Int64(updatedAt.timeIntervalSince1970 * 1000)
         let nextRevisionValue = revision ?? max(nowMillis + 10_000, maxRevision + 10_000)
-        blockedSessionIds.insert(sessionId)
         let targets: [NSManagedObject]
         if objects.isEmpty {
             let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
@@ -916,6 +915,11 @@ final class CloudDataStore: ObservableObject {
                 return "rev=\(rev) updated=\(updated) source=\(source) deleted=\(deleted)"
             }.joined(separator: " | ")
             print("Tombstone persist failed for \(sessionId): \(snapshot)")
+        }
+        if winnerDeleted {
+            blockedSessionIds.insert(sessionId)
+        } else {
+            blockedSessionIds.remove(sessionId)
         }
         return TombstoneDebugInfo(
             recordsFound: recordsFound,
@@ -1598,6 +1602,7 @@ final class CloudDataStore: ObservableObject {
     private func setSessionDeleted(_ value: Bool, on object: NSManagedObject) {
         object.willChangeValue(forKey: SessionField.isDeleted)
         object.setPrimitiveValue(value, forKey: SessionField.isDeleted)
+        object.setValue(value, forKey: SessionField.isDeleted)
         object.didChangeValue(forKey: SessionField.isDeleted)
     }
 
@@ -2036,16 +2041,29 @@ final class SessionVisibilityStore: ObservableObject {
         deletedIds.contains(id)
     }
 
-    func setVoided(_ id: String, isVoided: Bool) {
+    func setVoided(_ id: String, isVoided: Bool, revision: Int64? = nil, updatedAt: Date = Date()) {
         guard !deletedIds.contains(id) else { return }
-        cloudStore.updateSessionVisibility(sessionId: id, isVoided: isVoided)
+        cloudStore.updateSessionVisibility(
+            sessionId: id,
+            isVoided: isVoided,
+            revision: revision,
+            updatedAt: updatedAt
+        )
     }
 
     @discardableResult
-    func markDeleted(_ id: String) -> CloudDataStore.TombstoneDebugInfo {
-        let debug = cloudStore.tombstoneSession(sessionId: id)
+    func markDeleted(
+        _ id: String,
+        updatedAt: Date = Date(),
+        revision: Int64? = nil
+    ) -> CloudDataStore.TombstoneDebugInfo {
+        let debug = cloudStore.tombstoneSession(sessionId: id, updatedAt: updatedAt, revision: revision)
         tombstoneDebug[id] = debug
-        deletedIds.insert(id)
+        if debug.winnerDeleted {
+            deletedIds.insert(id)
+        } else {
+            deletedIds.remove(id)
+        }
         cloudStore.refreshLocalCache()
         return debug
     }
@@ -2171,6 +2189,8 @@ struct ContentView: View {
     @State private var editingSession: EditingSession?
     @State private var timeEditingSession: TimeEditingSession?
     @State private var deleteCandidateId: String?
+    @State private var swipeDeleteCandidateId: String?
+    @State private var pendingDeleteIds: Set<String> = []
     @State private var memoDraft = ""
     @State private var draftAmount = ""
     @State private var draftShotCount = ""
@@ -2355,7 +2375,7 @@ struct ContentView: View {
             }
         }
         let summaries = winners.values
-            .filter { !$0.isDeleted }
+            .filter { !$0.isDeleted && !$0.isVoided }
             .filter { $0.shootingStart != nil || $0.selectingStart != nil || $0.endedAt != nil }
             .map { record in
                 SessionSummary(
@@ -3122,93 +3142,132 @@ struct ContentView: View {
     }
 
     private var homeView: some View {
+        let swipeDeleteBinding = Binding<Bool>(
+            get: { swipeDeleteCandidateId != nil },
+            set: { isPresented in
+                if !isPresented {
+                    swipeDeleteCandidateId = nil
+                }
+            }
+        )
         return NavigationStack {
             VStack(spacing: 12) {
                 homeFixedHeader
 
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        Text("会话时间线")
-                            .font(.headline)
-                        if effectiveSessionSummaries.isEmpty {
-                            Text("暂无记录")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            let displaySessions = Array(effectiveSessionSummaries.reversed())
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("会话时间线")
+                        .font(.headline)
+                    if effectiveSessionSummaries.isEmpty {
+                        Text("暂无记录")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        let displaySessions = Array(effectiveSessionSummaries.reversed())
+                        List {
                             ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
                                 let total = displaySessions.count
                                 let order = total - displayIndex
-                                let card = VStack(alignment: .leading, spacing: 4) {
-                                    HStack(alignment: .firstTextBaseline) {
-                                        HStack(spacing: 6) {
-                                            Text("第\(order)单")
-                                                .font(.subheadline)
-                                                .fontWeight(.semibold)
-                                            if let startTime = effectiveSessionStartTime(for: summary) {
-                                                Text(formatSessionTime(startTime))
-                                                    .font(.footnote)
-                                                    .foregroundStyle(.secondary)
-                                                    .monospacedDigit()
-                                            }
+                                sessionTimelineRow(summary: summary, order: order)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                                    .listRowBackground(Color.clear)
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                        Button("作废") {
+                                            performSwipeVoid(id: summary.id)
                                         }
-                                        Spacer(minLength: 8)
-                                        VStack(alignment: .trailing, spacing: 2) {
-                                            Text(amountText(for: summary))
-                                                .font(.headline)
-                                                .monospacedDigit()
-                                            Text(rphText(for: summary))
-                                                .font(.caption2)
-                                                .foregroundStyle(.secondary)
-                                                .monospacedDigit()
+                                        .tint(.orange)
+                                        Button("删除", role: .destructive) {
+                                            swipeDeleteCandidateId = summary.id
                                         }
                                     }
-                                    Text(sessionDurationSummary(for: summary))
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                        .monospacedDigit()
-                                        .lineLimit(1)
-                                    if let metaText = metaSummary(for: summary.id) {
-                                        Text(metaText)
-                                            .font(.footnote)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                    if let notePreview = metaNotePreview(for: summary.id) {
-                                        Text(notePreview)
-                                            .font(.footnote)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(2)
-                                    }
-                                }
-                                .padding(8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.thinMaterial)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                ZStack(alignment: .topTrailing) {
-                                    NavigationLink {
-                                        sessionDetailView(summary: summary, order: order)
-                                    } label: {
-                                        card
-                                    }
-                                    .buttonStyle(.plain)
-                                    Button(action: { startEditingMeta(for: summary.id) }) {
-                                        Image(systemName: "pencil")
-                                            .font(.caption)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .foregroundStyle(.secondary)
-                                    .padding(6)
-                                }
                             }
                         }
-                        homeDebugFooter
+                        .listStyle(.plain)
+                        .scrollContentBackground(.hidden)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    pendingDeleteBanner
+                    homeDebugFooter
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding()
+            .confirmationDialog("删除本单？", isPresented: swipeDeleteBinding, titleVisibility: .visible) {
+                Button("删除", role: .destructive) {
+                    if let id = swipeDeleteCandidateId {
+                        _ = deleteSession(id: id, showPending: true)
+                    }
+                    swipeDeleteCandidateId = nil
+                }
+                Button("取消", role: .cancel) {
+                    swipeDeleteCandidateId = nil
+                }
+            }
+        }
+    }
+
+    private func sessionTimelineRow(summary: SessionSummary, order: Int) -> some View {
+        let card = VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                HStack(spacing: 6) {
+                    Text("第\(order)单")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    if let startTime = effectiveSessionStartTime(for: summary) {
+                        Text(formatSessionTime(startTime))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(amountText(for: summary))
+                        .font(.headline)
+                        .monospacedDigit()
+                    Text(rphText(for: summary))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            Text(sessionDurationSummary(for: summary))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+            if let metaText = metaSummary(for: summary.id) {
+                Text(metaText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if let notePreview = metaNotePreview(for: summary.id) {
+                Text(notePreview)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+        return ZStack(alignment: .topTrailing) {
+            NavigationLink {
+                sessionDetailView(summary: summary, order: order)
+            } label: {
+                card
+            }
+            .buttonStyle(.plain)
+            Button(action: { startEditingMeta(for: summary.id) }) {
+                Image(systemName: "pencil")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .padding(6)
         }
     }
 
@@ -3357,29 +3416,65 @@ struct ContentView: View {
         .opacity(0.6)
     }
 
+    @ViewBuilder
+    private var pendingDeleteBanner: some View {
+        if !pendingDeleteIds.isEmpty {
+            Text("删除处理中 \(pendingDeleteIds.count)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .opacity(0.5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private func isSessionVisible(_ id: String) -> Bool {
         !sessionVisibilityStore.isDeleted(id) && !sessionVisibilityStore.isVoided(id)
     }
 
     private func toggleVoided(for id: String) {
         let isVoided = sessionVisibilityStore.isVoided(id)
-        sessionVisibilityStore.setVoided(id, isVoided: !isVoided)
+        let now = Date()
+        let revision = forcedVisibilityRevision(at: now)
+        sessionVisibilityStore.setVoided(id, isVoided: !isVoided, revision: revision, updatedAt: now)
+    }
+
+    private func forcedVisibilityRevision(at date: Date) -> Int64 {
+        Int64(date.timeIntervalSince1970 * 1000) + 10_000
+    }
+
+    private func performSwipeVoid(id: String) {
+        let now = Date()
+        let revision = forcedVisibilityRevision(at: now)
+        sessionSummaries.removeAll { $0.id == id }
+        sessionVisibilityStore.setVoided(id, isVoided: true, revision: revision, updatedAt: now)
+        syncSessionSummaries(from: cloudStore.sessionRecords)
     }
 
     @discardableResult
-    private func deleteSession(id: String) -> Bool {
+    private func deleteSession(id: String, showPending: Bool = false) -> Bool {
+        let now = Date()
+        let revision = forcedVisibilityRevision(at: now)
         if let index = sessionSummaries.firstIndex(where: { $0.id == id }),
            sessionSummaries[index].endedAt == nil {
             resetSession()
         }
-        metaStore.update(SessionMeta(), for: id)
         timeOverrideStore.clear(for: id)
         manualSessionStore.remove(id)
+        if showPending {
+            pendingDeleteIds.insert(id)
+        }
         sessionSummaries.removeAll { $0.id == id }
-        let debug = sessionVisibilityStore.markDeleted(id)
+        let debug = sessionVisibilityStore.markDeleted(id, updatedAt: now, revision: revision)
         syncSessionSummaries(from: cloudStore.sessionRecords)
+        if showPending {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                pendingDeleteIds.remove(id)
+            }
+        }
         if !debug.winnerDeleted {
+            pendingDeleteIds.remove(id)
             activeAlert = .validation("Delete failed: tombstone not persisted")
+            syncSessionSummaries(from: cloudStore.sessionRecords)
             return false
         }
         return true
@@ -4377,7 +4472,7 @@ struct ContentView: View {
         debugModeEnabled
     }
 
-    private let buildShortHashOverride = "fix158d"
+    private let buildShortHashOverride = "fix158e"
 
     private var buildFingerprintText: String {
         let info = Bundle.main.infoDictionary
