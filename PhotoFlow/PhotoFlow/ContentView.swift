@@ -2259,6 +2259,7 @@ struct ContentView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
+    @State private var todayDayKey: String = ContentView.dayKey(for: Date())
     @StateObject private var cloudStore: CloudDataStore
     @StateObject private var metaStore: SessionMetaStore
     @StateObject private var timeOverrideStore: SessionTimeOverrideStore
@@ -2422,6 +2423,7 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
+            updateTodayDayKey()
             if isReadOnlyDevice {
                 if let state = syncStore.reloadCanonicalState() {
                     applyCanonicalState(state, shouldPrompt: false)
@@ -2488,6 +2490,39 @@ struct ContentView: View {
         return byId.values
             .filter { isSessionVisible($0.id) }
             .sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+    }
+
+    private func updateTodayDayKey() {
+        todayDayKey = Self.dayKey(for: Date())
+    }
+
+    private func dayKey(for summary: SessionSummary) -> String? {
+        guard let shootingStart = effectiveTimes(for: summary).shootingStart else { return nil }
+        return Self.dayKey(for: shootingStart)
+    }
+
+    private func activeTimelineSessionId(from summaries: [SessionSummary]) -> String? {
+        if let candidate = summaries.first(where: { $0.endedAt == nil }) {
+            return candidate.id
+        }
+        if stage == .shooting || stage == .selecting,
+           let index = activeSessionIndex() {
+            return sessionSummaries[index].id
+        }
+        return nil
+    }
+
+    private func homeTimelineDisplaySessions() -> [SessionSummary] {
+        let filtered = effectiveSessionSummaries.filter { dayKey(for: $0) == todayDayKey }
+        var ordered = Array(filtered.reversed())
+        if let activeId = activeTimelineSessionId(from: effectiveSessionSummaries),
+           let activeSummary = effectiveSessionSummaries.first(where: { $0.id == activeId }) {
+            if let index = ordered.firstIndex(where: { $0.id == activeId }) {
+                ordered.remove(at: index)
+            }
+            ordered.insert(activeSummary, at: 0)
+        }
+        return ordered
     }
 
     private func effectiveTimes(for summary: SessionSummary) -> SessionTimes {
@@ -3247,17 +3282,22 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("会话时间线")
                         .font(.headline)
-                    if effectiveSessionSummaries.isEmpty {
+                    let displaySessions = homeTimelineDisplaySessions()
+                    let activeId = activeTimelineSessionId(from: effectiveSessionSummaries)
+                    if displaySessions.isEmpty {
                         Text("暂无记录")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        let displaySessions = Array(effectiveSessionSummaries.reversed())
                         List {
                             ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
                                 let total = displaySessions.count
                                 let order = total - displayIndex
-                                sessionTimelineRow(summary: summary, order: order)
+                                sessionTimelineRow(
+                                    summary: summary,
+                                    order: order,
+                                    isActive: summary.id == activeId
+                                )
                                     .listRowSeparator(.hidden)
                                     .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                                     .listRowBackground(Color.clear)
@@ -3305,13 +3345,22 @@ struct ContentView: View {
         }
     }
 
-    private func sessionTimelineRow(summary: SessionSummary, order: Int) -> some View {
+    private func sessionTimelineRow(summary: SessionSummary, order: Int, isActive: Bool) -> some View {
         let card = VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 HStack(spacing: 6) {
                     Text("第\(order)单")
                         .font(.subheadline)
                         .fontWeight(.semibold)
+                    if isActive {
+                        Text("进行中")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.15))
+                            .clipShape(Capsule())
+                    }
                     if let startTime = effectiveSessionStartTime(for: summary) {
                         Text(formatSessionTime(startTime))
                             .font(.footnote)
@@ -3377,6 +3426,20 @@ struct ContentView: View {
         formatter.dateFormat = "yyyy年M月d日 EEEE"
         return formatter
     }()
+
+    private static let dayKeyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar.current
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    private static func dayKey(for date: Date) -> String {
+        let startOfDay = Calendar.current.startOfDay(for: date)
+        return dayKeyFormatter.string(from: startOfDay)
+    }
 
     private static let exportTimestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
