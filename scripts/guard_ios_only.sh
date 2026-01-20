@@ -20,6 +20,10 @@ while IFS= read -r file; do
   [ -z "$file" ] && continue
   case "$file" in
     "PhotoFlow/PhotoFlowWatch Watch App/"*)
+      if [[ "$file" == "PhotoFlow/PhotoFlowWatch Watch App/Assets.xcassets/AppIcon.appiconset/Contents.json" ]] || \
+         [[ "$file" == PhotoFlow/PhotoFlowWatch\ Watch\ App/Assets.xcassets/AppIcon.appiconset/*.png ]]; then
+        continue
+      fi
       if [ "$allow_watch_swift" = "1" ] && [[ "$file" == *.swift ]]; then
         continue
       fi
