@@ -163,8 +163,8 @@ Acceptance:
 - 诊断字段可见：pendingEventCount / oldestPendingEventAge / lastProcessedEventAt / lastProcessError
 - ios_safe PASS；0 配置改动
 
-## ACTIVE — TC-IOS-HOME-TIMELINE-TODAY-ONLY-V1
-Status: ACTIVE
+## DONE — TC-IOS-HOME-TIMELINE-TODAY-ONLY-V1
+Status: DONE (merged in PR #163)
 ID: TC-IOS-HOME-TIMELINE-TODAY-ONLY-V1
 Title: Home 会话时间线仅今日展示 V1
 AssignedTo: Coordinator1/Codex
@@ -184,6 +184,29 @@ Acceptance:
 - Home 会话时间线只显示今天的会话
 - 历史会话不在 Home 显示，但在“记录/月历/iPad 看板”仍可见
 - 跨天进行中的单仍显示在 Home 顶部
+- ios_safe PASS；0 配置改动
+
+## ACTIVE — TC-IOS-HOME-DAYMEMO-TOGGLE-V1
+Status: ACTIVE
+ID: TC-IOS-HOME-DAYMEMO-TOGGLE-V1
+Title: Home 顶部备忘点日期展开收起 V1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- Home 顶部备忘默认隐藏；点击日期展开/收起；内容保留。
+
+Scope (Allowed files ONLY):
+- PhotoFlow/PhotoFlow/**/*.swift
+
+Guardrails:
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- 默认不显示备忘区域，不占空白
+- 点击日期展开备忘，再点收起且内容保留
+- 备忘位于日期下方、收入卡上方
 - ios_safe PASS；0 配置改动
 
 ## DONE — TC-SYNC-PHONE-TO-WATCH-V1
