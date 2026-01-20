@@ -2695,7 +2695,21 @@ struct ContentView: View {
     }
 
     private func updateTodayDayKey() {
-        todayDayKey = Self.dayKey(for: Date())
+        let previousDayKey = todayDayKey
+        let newDayKey = Self.dayKey(for: Date())
+        todayDayKey = newDayKey
+        guard newDayKey != previousDayKey else { return }
+        carryTomorrowActionIfNeeded(from: previousDayKey, to: newDayKey)
+    }
+
+    private func carryTomorrowActionIfNeeded(from previousDayKey: String, to currentDayKey: String) {
+        let todayMemo = dailyMemoStore.memo(for: currentDayKey)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard todayMemo.isEmpty else { return }
+        let action = cloudStore.dailyReview(for: previousDayKey)?.tomorrowOneAction?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !action.isEmpty else { return }
+        dailyMemoStore.setMemo(action, for: currentDayKey)
     }
 
     private func dayKey(for summary: SessionSummary) -> String? {
@@ -3683,12 +3697,36 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .contentShape(Rectangle())
+            tomorrowActionBanner
             if isDayMemoExpanded {
                 memoEditor
             }
             todayBanner
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var tomorrowActionBanner: some View {
+        Group {
+            if let action = tomorrowActionText {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("明天唯一动作")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(action)
+                        .font(.footnote)
+                }
+                .padding(8)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private var tomorrowActionText: String? {
+        let raw = cloudStore.dailyReview(for: todayDayKey)?.tomorrowOneAction?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return raw.isEmpty ? nil : raw
     }
 
     private var memoEditor: some View {
