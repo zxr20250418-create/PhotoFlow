@@ -1,6 +1,7 @@
 {
   "images" : [
     {
+      "filename" : "PhotoFlow_AppIcon_1024_NO_ALPHA.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
@@ -12,6 +13,7 @@
           "value" : "dark"
         }
       ],
+      "filename" : "PhotoFlow_AppIcon_1024_NO_ALPHA 1.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
@@ -23,6 +25,7 @@
           "value" : "tinted"
         }
       ],
+      "filename" : "PhotoFlow_AppIcon_1024_NO_ALPHA 2.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
