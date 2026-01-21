@@ -3595,52 +3595,58 @@ struct ContentView: View {
             let displaySessions = homeTimelineDisplaySessions()
             let activeId = activeTimelineSessionId(from: effectiveSessionSummaries)
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                List {
+                    Section {
                         homeFixedHeader
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    }
 
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("会话时间线")
-                                .font(.headline)
-                            if displaySessions.isEmpty {
-                                Text("暂无记录")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                LazyVStack(alignment: .leading, spacing: 8) {
-                                    ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
-                                        let total = displaySessions.count
-                                        let order = total - displayIndex
-                                        sessionTimelineRow(
-                                            summary: summary,
-                                            order: order,
-                                            isActive: summary.id == activeId
-                                        )
-                                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                            Button("作废") {
-                                                performSwipeVoid(id: summary.id)
-                                            }
-                                            .tint(.orange)
-                                            Button("删除", role: .destructive) {
-                                                swipeDeleteCandidateId = summary.id
-                                            }
-                                        }
+                    Section(header: Text("会话时间线").font(.headline).textCase(nil)) {
+                        if displaySessions.isEmpty {
+                            Text("暂无记录")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                        } else {
+                            ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
+                                let total = displaySessions.count
+                                let order = total - displayIndex
+                                sessionTimelineRow(
+                                    summary: summary,
+                                    order: order,
+                                    isActive: summary.id == activeId
+                                )
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                                .listRowBackground(Color.clear)
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button("作废") {
+                                        performSwipeVoid(id: summary.id)
+                                    }
+                                    .tint(.orange)
+                                    Button("删除", role: .destructive) {
+                                        swipeDeleteCandidateId = summary.id
                                     }
                                 }
                             }
-                            pendingDeleteBanner
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        pendingDeleteBanner
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                         Color.clear
                             .frame(height: 1)
                             .id("timelineBottom")
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                             .onAppear { isTimelineNearBottom = true }
                             .onDisappear { isTimelineNearBottom = false }
                     }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding()
                 }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
                 .simultaneousGesture(
                     DragGesture()
                         .onChanged { _ in
