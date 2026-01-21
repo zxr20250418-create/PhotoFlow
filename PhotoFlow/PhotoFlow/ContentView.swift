@@ -2453,7 +2453,7 @@ struct ContentView: View {
     @State private var selectedTab: Tab = .home
     @State private var sessionSummaries: [SessionSummary] = []
     @State private var todayDayKey: String = ContentView.dayKey(for: Date())
-    @State private var isDayMemoExpanded = false
+    @State private var isTopExpanded = false
     @StateObject private var cloudStore: CloudDataStore
     @StateObject private var metaStore: SessionMetaStore
     @StateObject private var timeOverrideStore: SessionTimeOverrideStore
@@ -3683,7 +3683,7 @@ struct ContentView: View {
     private var homeFixedHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                isDayMemoExpanded.toggle()
+                isTopExpanded.toggle()
             } label: {
                 Text(Self.homeDateFormatter.string(from: now))
                     .font(.headline)
@@ -3695,8 +3695,10 @@ struct ContentView: View {
                 showHomeDebugSheet = true
             }
 #endif
-            tomorrowActionBanner
-            if isDayMemoExpanded {
+            if isTopExpanded {
+                if let action = todayActionText {
+                    todayActionRow(action)
+                }
                 memoEditor
             }
             todayBanner
@@ -3704,27 +3706,46 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var tomorrowActionBanner: some View {
-        Group {
-            if let action = tomorrowActionText {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("明天唯一动作")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(action)
-                        .font(.footnote)
-                }
-                .padding(8)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
+    private func todayActionRow(_ action: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("今日唯一动作")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(action)
+                .font(.footnote)
+                .lineLimit(2)
         }
+        .padding(8)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private var tomorrowActionText: String? {
-        let raw = cloudStore.dailyReview(for: todayDayKey)?.tomorrowOneAction?
+    private var todayActionText: String? {
+        let todayKey = dailyMemoStore.dayKey(for: now)
+        let memoText = dailyMemoStore.memo(for: todayKey)
+        if let summary = memoActionSummary(memoText) {
+            return summary
+        }
+        let calendar = Calendar.current
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now) ?? now
+        let yesterdayKey = Self.dayKey(for: yesterday)
+        let fallback = cloudStore.dailyReview(for: yesterdayKey)?.tomorrowOneAction?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return raw.isEmpty ? nil : raw
+        return fallback.isEmpty ? nil : fallback
+    }
+
+    private func memoActionSummary(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lines = trimmed
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard let first = lines.first else { return nil }
+        if lines.count == 1 {
+            return String(first)
+        }
+        return "\(first)\n\(lines[1])"
     }
 
     private var memoEditor: some View {
