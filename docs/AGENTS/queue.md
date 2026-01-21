@@ -10,6 +10,27 @@ Status: ABANDONED (rollback; PR #33 closed)
 ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
+## DONE — TC-IOS-TIMELINE-SCROLL-STABILITY-V1
+Status: DONE (merged in PR #179)
+ID: TC-IOS-TIMELINE-SCROLL-STABILITY-V1
+Title: Home timeline scroll stability
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- 修复自动滚动干扰手动滚动，恢复左滑删除/作废。
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- 手动滑到底部不跳动
+- 新增会话仅在 near-bottom 且非拖动时自动滚动
+- 左滑删除/作废可见
+- ios_safe PASS；0 配置改动
+
 ## DONE — TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
 Status: DONE (merged in PR #177)
 # TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
