@@ -2485,6 +2485,7 @@ struct ContentView: View {
         var rationale: String?
         var outcomeVerdict: String?
         var nextDecision: String?
+        var rawNote: String?
         var updatedAt: Double?
     }
 
@@ -2624,6 +2625,7 @@ struct ContentView: View {
     @State private var shiftEnd: Date?
     @State private var reviewDraft = SessionDecisionDraft.empty
     @State private var reviewDraftLastSaved = SessionDecisionDraft.empty
+    @State private var reviewDraftRawNoteLastSaved = ""
     @State private var reviewDraftSessionId: String?
     @State private var reviewDraftWasStructured = false
     @State private var reviewExpanded = false
@@ -2712,26 +2714,128 @@ struct ContentView: View {
             Alert(title: Text(alert.message))
         }
         .sheet(item: $editingSession) { session in
+            let summary = effectiveSessionSummaries.first { $0.id == session.id }
+            let durations = summary.map(sessionDurations) ?? (shooting: 0.0, selecting: nil, total: 0.0)
+            let amountCents = parseAmountCents(from: draftAmount)
+            let amountText = amountCents.map(formatAmount) ?? "--"
+            let shot = parseInt(from: draftShotCount)
+            let selected = parseInt(from: draftSelected)
+            let pickRateText: String = {
+                guard let shot, shot > 0, let selected else { return "--" }
+                if selected > shot { return "--" }
+                if selected == shot { return "全要" }
+                let rate = Int((Double(selected) / Double(shot) * 100).rounded())
+                return "\(rate)%"
+            }()
+            let workSeconds = durations.shooting + (durations.selecting ?? 0)
+            let rphWorkText: String = {
+                guard let amountCents, workSeconds > 0 else { return "--" }
+                let revenue = Double(amountCents) / 100
+                let hours = workSeconds / 3600
+                return String(format: "¥%.0f/小时", revenue / hours)
+            }()
             NavigationStack {
-                Form {
-                    Section {
-                        TextField("金额", text: $draftAmount)
-                            .keyboardType(.decimalPad)
-                        TextField("拍摄张数", text: $draftShotCount)
-                            .keyboardType(.numberPad)
-                        TextField("选片张数", text: $draftSelected)
-                            .keyboardType(.numberPad)
-                    }
-                    Section("复盘备注") {
-                        if isStructuredReviewNote(metaStore.meta(for: session.id).reviewNote) {
-                            Text("复盘已结构化，请在详情页编辑")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            TextEditor(text: $draftReviewNote)
-                                .frame(minHeight: 100)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        GroupBox("指标") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                TextField("金额", text: $draftAmount)
+                                    .keyboardType(.decimalPad)
+                                    .textFieldStyle(.roundedBorder)
+                                TextField("拍摄张数", text: $draftShotCount)
+                                    .keyboardType(.numberPad)
+                                    .textFieldStyle(.roundedBorder)
+                                TextField("选片张数", text: $draftSelected)
+                                    .keyboardType(.numberPad)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        GroupBox("原始备注") {
+                            reviewFieldEditor(
+                                title: "原始备注",
+                                placeholder: "关键备注/补充说明…",
+                                text: $draftReviewNote
+                            )
+                        }
+
+                        GroupBox("复盘（5槽位）") {
+                            VStack(alignment: .leading, spacing: 12) {
+                                reviewFieldEditor(
+                                    title: "Facts",
+                                    placeholder: "关键信息/背景…",
+                                    text: $reviewDraft.facts
+                                )
+                                reviewFieldEditor(
+                                    title: "Decision",
+                                    placeholder: "这次做了什么决定…",
+                                    text: $reviewDraft.decision
+                                )
+                                reviewFieldEditor(
+                                    title: "Rationale",
+                                    placeholder: "为什么这么做…",
+                                    text: $reviewDraft.rationale
+                                )
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("Outcome（自动）")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    VStack(spacing: 6) {
+                                        HStack {
+                                            Text("收入")
+                                            Spacer()
+                                            Text(amountText)
+                                                .monospacedDigit()
+                                        }
+                                        HStack {
+                                            Text("拍摄时长")
+                                            Spacer()
+                                            Text(format(durations.shooting))
+                                                .monospacedDigit()
+                                        }
+                                        HStack {
+                                            Text("选片时长")
+                                            Spacer()
+                                            Text(durations.selecting.map(format) ?? "--")
+                                                .monospacedDigit()
+                                        }
+                                        HStack {
+                                            Text("RPH(拍+选)")
+                                            Spacer()
+                                            Text(rphWorkText)
+                                                .monospacedDigit()
+                                        }
+                                        HStack {
+                                            Text("选片率")
+                                            Spacer()
+                                            Text(pickRateText)
+                                                .monospacedDigit()
+                                        }
+                                    }
+                                    .font(.footnote)
+                                }
+                                reviewFieldEditor(
+                                    title: "Outcome（人工）",
+                                    placeholder: "结果=好/一般/差；主因=…；证据=…",
+                                    text: $reviewDraft.outcomeVerdict
+                                )
+                                reviewFieldEditor(
+                                    title: "NextDecision",
+                                    placeholder: "下一步/复用策略…",
+                                    text: $reviewDraft.nextDecision
+                                )
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .safeAreaInset(edge: .bottom) {
+                    Color.clear.frame(height: 80)
                 }
                 .navigationTitle("编辑指标")
                 .toolbar {
@@ -2956,32 +3060,22 @@ struct ContentView: View {
 
     private func reviewNoteSummaryText(_ note: String?) -> String? {
         if let log = decodeDecisionLog(from: note) {
-            return [log.nextDecision, log.outcomeVerdict, log.facts, log.decision, log.rationale]
+            return [log.nextDecision, log.outcomeVerdict, log.facts, log.decision, log.rationale, log.rawNote]
                 .compactMap { normalizedReviewText($0) }
                 .first
         }
         return normalizedReviewText(note)
     }
 
-    private func reviewSummaryText(for draft: SessionDecisionDraft) -> String? {
-        let candidates = [
-            draft.nextDecision,
-            draft.outcomeVerdict,
-            draft.facts,
-            draft.decision,
-            draft.rationale
-        ]
-        for value in candidates {
-            if let trimmed = normalizedReviewText(value) {
-                return trimmed
-            }
+    private func reviewRawNoteText(_ note: String?) -> String? {
+        if let log = decodeDecisionLog(from: note) {
+            return normalizedReviewText(log.rawNote)
         }
-        return nil
+        return normalizedReviewText(note)
     }
 
-    private func loadReviewDraft(for sessionId: String, note: String?) {
-        guard reviewDraftSessionId != sessionId else { return }
-        reviewExpanded = false
+    private func loadReviewDraft(for sessionId: String, note: String?, force: Bool = false) {
+        guard force || reviewDraftSessionId != sessionId else { return }
         if let log = decodeDecisionLog(from: note) {
             reviewDraft = SessionDecisionDraft(
                 facts: normalizedReviewText(log.facts) ?? "",
@@ -2990,6 +3084,7 @@ struct ContentView: View {
                 outcomeVerdict: normalizedReviewText(log.outcomeVerdict) ?? "",
                 nextDecision: normalizedReviewText(log.nextDecision) ?? ""
             )
+            draftReviewNote = normalizedReviewText(log.rawNote) ?? ""
             reviewDraftWasStructured = true
         } else {
             let fallback = normalizedReviewText(note) ?? ""
@@ -2998,46 +3093,14 @@ struct ContentView: View {
                 decision: "",
                 rationale: "",
                 outcomeVerdict: "",
-                nextDecision: fallback
+                nextDecision: ""
             )
+            draftReviewNote = fallback
             reviewDraftWasStructured = false
         }
         reviewDraftLastSaved = reviewDraft
+        reviewDraftRawNoteLastSaved = draftReviewNote
         reviewDraftSessionId = sessionId
-    }
-
-    private func saveReviewDraftIfNeeded(for sessionId: String) {
-        guard reviewDraftSessionId == sessionId else { return }
-        let meta = metaStore.meta(for: sessionId)
-        let shouldWrite = !reviewDraftWasStructured || reviewDraft != reviewDraftLastSaved
-        guard shouldWrite else { return }
-        let now = Date()
-        let log = SessionDecisionLogV1(
-            facts: normalizedReviewText(reviewDraft.facts),
-            decision: normalizedReviewText(reviewDraft.decision),
-            rationale: normalizedReviewText(reviewDraft.rationale),
-            outcomeVerdict: normalizedReviewText(reviewDraft.outcomeVerdict),
-            nextDecision: normalizedReviewText(reviewDraft.nextDecision),
-            updatedAt: now.timeIntervalSince1970
-        )
-        let hasContent = [
-            log.facts,
-            log.decision,
-            log.rationale,
-            log.outcomeVerdict,
-            log.nextDecision
-        ].contains { normalizedReviewText($0) != nil }
-        let noteToSave = hasContent ? encodeDecisionLog(log) : nil
-        if noteToSave == meta.reviewNote {
-            reviewDraftLastSaved = reviewDraft
-            reviewDraftWasStructured = noteToSave != nil
-            return
-        }
-        var updated = meta
-        updated.reviewNote = noteToSave
-        metaStore.update(updated, for: sessionId)
-        reviewDraftLastSaved = reviewDraft
-        reviewDraftWasStructured = noteToSave != nil
     }
 
     private func dayKey(for summary: SessionSummary) -> String? {
@@ -4410,8 +4473,10 @@ struct ContentView: View {
             let rate = Int((Double(selected) / Double(shot) * 100).rounded())
             return "\(rate)%"
         }()
-        let note = reviewNoteSummaryText(meta.reviewNote) ?? ""
-        let noteText = note.isEmpty ? "暂无备注" : note
+        let reviewLog = decodeDecisionLog(from: meta.reviewNote)
+        let reviewSummary = reviewNoteSummaryText(meta.reviewNote) ?? "暂无复盘"
+        let rawNote = reviewRawNoteText(meta.reviewNote) ?? ""
+        let noteText = rawNote.isEmpty ? "暂无备注" : rawNote
 
         return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -4436,7 +4501,6 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    let reviewHasChanges = !reviewDraftWasStructured || reviewDraft != reviewDraftLastSaved
                     HStack {
                         Text("复盘（5槽位）")
                             .font(.headline)
@@ -4446,78 +4510,66 @@ struct ContentView: View {
                         }
                         .font(.caption)
                         .buttonStyle(.plain)
+                        Button("编辑") {
+                            startEditingMeta(for: summary.id)
+                        }
+                        .font(.caption)
+                        .buttonStyle(.plain)
                     }
                     if reviewExpanded {
-                        reviewFieldEditor(
-                            title: "Facts",
-                            placeholder: "关键信息/背景…",
-                            text: $reviewDraft.facts
-                        )
-                        reviewFieldEditor(
-                            title: "Decision",
-                            placeholder: "这次做了什么决定…",
-                            text: $reviewDraft.decision
-                        )
-                        reviewFieldEditor(
-                            title: "Rationale",
-                            placeholder: "为什么这么做…",
-                            text: $reviewDraft.rationale
-                        )
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Outcome（自动）")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            VStack(spacing: 6) {
-                                HStack {
-                                    Text("收入")
-                                    Spacer()
-                                    Text(amountText)
-                                        .monospacedDigit()
+                        VStack(alignment: .leading, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Outcome（自动）")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                VStack(spacing: 6) {
+                                    HStack {
+                                        Text("收入")
+                                        Spacer()
+                                        Text(amountText)
+                                            .monospacedDigit()
+                                    }
+                                    HStack {
+                                        Text("拍摄时长")
+                                        Spacer()
+                                        Text(format(durations.shooting))
+                                            .monospacedDigit()
+                                    }
+                                    HStack {
+                                        Text("选片时长")
+                                        Spacer()
+                                        Text(durations.selecting.map(format) ?? "--")
+                                            .monospacedDigit()
+                                    }
+                                    HStack {
+                                        Text("RPH(拍+选)")
+                                        Spacer()
+                                        Text(rphWorkText)
+                                            .monospacedDigit()
+                                    }
+                                    HStack {
+                                        Text("选片率")
+                                        Spacer()
+                                        Text(pickRateText)
+                                            .monospacedDigit()
+                                    }
                                 }
-                                HStack {
-                                    Text("拍摄时长")
-                                    Spacer()
-                                    Text(format(durations.shooting))
-                                        .monospacedDigit()
-                                }
-                                HStack {
-                                    Text("选片时长")
-                                    Spacer()
-                                    Text(durations.selecting.map(format) ?? "--")
-                                        .monospacedDigit()
-                                }
-                                HStack {
-                                    Text("RPH(拍+选)")
-                                    Spacer()
-                                    Text(rphWorkText)
-                                        .monospacedDigit()
-                                }
-                                HStack {
-                                    Text("选片率")
-                                    Spacer()
-                                    Text(pickRateText)
-                                        .monospacedDigit()
-                                }
+                                .font(.footnote)
                             }
-                            .font(.footnote)
+                            if let reviewLog {
+                                reviewFieldReadOnly(title: "Facts", value: reviewLog.facts)
+                                reviewFieldReadOnly(title: "Decision", value: reviewLog.decision)
+                                reviewFieldReadOnly(title: "Rationale", value: reviewLog.rationale)
+                                reviewFieldReadOnly(title: "Outcome（人工）", value: reviewLog.outcomeVerdict)
+                                reviewFieldReadOnly(title: "NextDecision", value: reviewLog.nextDecision)
+                            } else {
+                                Text("暂无复盘")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        reviewFieldEditor(
-                            title: "Outcome（人工）",
-                            placeholder: "结果=好/一般/差；主因=…；证据=…",
-                            text: $reviewDraft.outcomeVerdict
-                        )
-                        reviewFieldEditor(
-                            title: "NextDecision",
-                            placeholder: "下一步/复用策略…",
-                            text: $reviewDraft.nextDecision
-                        )
-                        Button("保存") {
-                            saveReviewDraftIfNeeded(for: summary.id)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!reviewHasChanges)
                     } else {
-                        Text(reviewSummaryText(for: reviewDraft) ?? "暂无复盘")
+                        Text(reviewSummary)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -4576,17 +4628,17 @@ struct ContentView: View {
                 .font(.footnote)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("复盘备注")
+                    Text("原始备注")
                         .font(.headline)
                     Text(noteText)
                         .font(.footnote)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Button("复制备注") {
-                        UIPasteboard.general.string = note
+                        UIPasteboard.general.string = rawNote
                     }
                     .buttonStyle(.bordered)
-                    .disabled(note.isEmpty)
+                    .disabled(rawNote.isEmpty)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -4656,10 +4708,7 @@ struct ContentView: View {
             .padding()
         }
         .onAppear {
-            loadReviewDraft(for: summary.id, note: meta.reviewNote)
-        }
-        .onDisappear {
-            saveReviewDraftIfNeeded(for: summary.id)
+            reviewExpanded = false
         }
         .navigationTitle("单子详情")
         .toolbar {
@@ -6606,17 +6655,37 @@ struct ContentView: View {
         draftAmount = meta.amountCents.map(amountText(from:)) ?? ""
         draftShotCount = meta.shotCount.map(String.init) ?? ""
         draftSelected = meta.selectedCount.map(String.init) ?? ""
-        if isStructuredReviewNote(meta.reviewNote) {
-            draftReviewNote = ""
-        } else {
-            draftReviewNote = meta.reviewNote ?? ""
-        }
+        loadReviewDraft(for: sessionId, note: meta.reviewNote, force: true)
         editingSession = EditingSession(id: sessionId)
     }
 
     private func saveMeta(for sessionId: String) {
         let existingNote = metaStore.meta(for: sessionId).reviewNote
-        let reviewNote = isStructuredReviewNote(existingNote) ? existingNote : normalizedNote(from: draftReviewNote)
+        let reviewChanged = reviewDraft != reviewDraftLastSaved
+        let rawNoteNormalized = normalizedReviewText(draftReviewNote)
+        let rawChanged = normalizedReviewText(reviewDraftRawNoteLastSaved) != rawNoteNormalized
+        let reviewNote: String? = {
+            guard reviewChanged || rawChanged else { return existingNote }
+            let now = Date()
+            let log = SessionDecisionLogV1(
+                facts: normalizedReviewText(reviewDraft.facts),
+                decision: normalizedReviewText(reviewDraft.decision),
+                rationale: normalizedReviewText(reviewDraft.rationale),
+                outcomeVerdict: normalizedReviewText(reviewDraft.outcomeVerdict),
+                nextDecision: normalizedReviewText(reviewDraft.nextDecision),
+                rawNote: rawNoteNormalized,
+                updatedAt: now.timeIntervalSince1970
+            )
+            let hasContent = [
+                log.facts,
+                log.decision,
+                log.rationale,
+                log.outcomeVerdict,
+                log.nextDecision,
+                log.rawNote
+            ].contains { normalizedReviewText($0) != nil }
+            return hasContent ? encodeDecisionLog(log) : nil
+        }()
         let meta = SessionMeta(
             amountCents: parseAmountCents(from: draftAmount),
             shotCount: parseInt(from: draftShotCount),
@@ -6624,6 +6693,12 @@ struct ContentView: View {
             reviewNote: reviewNote
         )
         metaStore.update(meta, for: sessionId)
+        if reviewChanged || rawChanged {
+            reviewDraftLastSaved = reviewDraft
+            reviewDraftRawNoteLastSaved = rawNoteNormalized ?? ""
+            reviewDraftWasStructured = isStructuredReviewNote(reviewNote)
+            reviewDraftSessionId = sessionId
+        }
     }
 
     private func promptSettlementIfNeeded(for sessionId: String) {
