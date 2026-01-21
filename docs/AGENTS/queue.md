@@ -10,6 +10,26 @@ Status: ABANDONED (rollback; PR #33 closed)
 ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
+## DONE — TC-IOS-DUTY-STATE-RESUME-FIX
+Status: DONE (merged in PR #181)
+ID: TC-IOS-DUTY-STATE-RESUME-FIX
+Title: 上班状态前后台恢复修复
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- 上班状态由 ShiftRecord 持久化推导，前后台/冷启动不回到未上班。
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- 前后台切换仍显示已上班
+- 冷启动仍能恢复已上班
+- ios_safe PASS；0 配置改动
+
 ## DONE — TC-IOS-TIMELINE-SCROLL-STABILITY-V1
 Status: DONE (merged in PR #179)
 ID: TC-IOS-TIMELINE-SCROLL-STABILITY-V1
