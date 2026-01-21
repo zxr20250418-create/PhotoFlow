@@ -2520,6 +2520,7 @@ struct ContentView: View {
     @State private var importError: String?
 #if DEBUG
     @State private var showDebugPanel = false
+    @State private var showHomeDebugSheet = false
 #endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
@@ -3492,31 +3493,29 @@ struct ContentView: View {
             }
         )
         return NavigationStack {
-            VStack(spacing: 12) {
-                homeFixedHeader
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    homeFixedHeader
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("会话时间线")
-                        .font(.headline)
-                    let displaySessions = homeTimelineDisplaySessions()
-                    let activeId = activeTimelineSessionId(from: effectiveSessionSummaries)
-                    if displaySessions.isEmpty {
-                        Text("暂无记录")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        List {
-                            ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
-                                let total = displaySessions.count
-                                let order = total - displayIndex
-                                sessionTimelineRow(
-                                    summary: summary,
-                                    order: order,
-                                    isActive: summary.id == activeId
-                                )
-                                    .listRowSeparator(.hidden)
-                                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                                    .listRowBackground(Color.clear)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("会话时间线")
+                            .font(.headline)
+                        let displaySessions = homeTimelineDisplaySessions()
+                        let activeId = activeTimelineSessionId(from: effectiveSessionSummaries)
+                        if displaySessions.isEmpty {
+                            Text("暂无记录")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
+                                    let total = displaySessions.count
+                                    let order = total - displayIndex
+                                    sessionTimelineRow(
+                                        summary: summary,
+                                        order: order,
+                                        isActive: summary.id == activeId
+                                    )
                                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                         Button("作废") {
                                             performSwipeVoid(id: summary.id)
@@ -3526,18 +3525,17 @@ struct ContentView: View {
                                             swipeDeleteCandidateId = summary.id
                                         }
                                     }
+                                }
                             }
                         }
-                        .listStyle(.plain)
-                        .scrollContentBackground(.hidden)
+                        pendingDeleteBanner
                     }
-                    pendingDeleteBanner
-                    homeDebugFooter
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding()
+            .frame(maxWidth: .infinity, alignment: .topLeading)
             .confirmationDialog("删除本单？", isPresented: swipeDeleteBinding, titleVisibility: .visible) {
                 Button("删除", role: .destructive) {
                     if let id = swipeDeleteCandidateId {
@@ -3549,15 +3547,11 @@ struct ContentView: View {
                     swipeDeleteCandidateId = nil
                 }
             }
-            .overlay(alignment: .bottomLeading) {
-                Text(buildFingerprintText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .opacity(0.6)
-                    .padding(.leading, 4)
-                    .padding(.bottom, 56)
+#if DEBUG
+            .sheet(isPresented: $showHomeDebugSheet) {
+                homeDebugSheet
             }
+#endif
         }
     }
 
@@ -3689,7 +3683,6 @@ struct ContentView: View {
     private var homeFixedHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                registerDebugTap()
                 isDayMemoExpanded.toggle()
             } label: {
                 Text(Self.homeDateFormatter.string(from: now))
@@ -3697,6 +3690,11 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .contentShape(Rectangle())
+#if DEBUG
+            .onLongPressGesture(minimumDuration: 2) {
+                showHomeDebugSheet = true
+            }
+#endif
             tomorrowActionBanner
             if isDayMemoExpanded {
                 memoEditor
@@ -3838,6 +3836,19 @@ struct ContentView: View {
         .padding(.top, 8)
         .opacity(0.6)
     }
+
+#if DEBUG
+    private var homeDebugSheet: some View {
+        NavigationStack {
+            ScrollView {
+                homeDebugFooter
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+            .navigationTitle("Debug")
+        }
+    }
+#endif
 
     @ViewBuilder
     private var pendingDeleteBanner: some View {
