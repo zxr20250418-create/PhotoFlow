@@ -1,5 +1,47 @@
-## ACTIVE — TC-IOS-SESSION-5SLOT-REVIEW-V1
-Status: ACTIVE
+## ACTIVE — TC-IOS-API-CONNECTIVITY-BADGE-V1
+Priority: P1
+Goal:
+- 增加“连接已测试”状态，明确 API 是否可用（例如 openai 与 Claude）
+Scope:
+- Settings 页展示 badge + lastTestAt + lastError
+- 测试按钮触发 health check（10 秒超时）
+- 可选自动测试：app active 且 lastTestAt 过期时自动跑一次
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist project.pbxproj entitlements targets appex watch widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+Acceptance:
+A 有效 key 测试后显示 ✅ 连接已测试 且时间更新
+B 无效 key 或断网显示 ❌ 测试失败 且错误摘要可读
+C 冷启动后仍能看到上次状态
+D ios_safe PASS 0 配置改动
+
+## QUEUED — TC-IOS-AI-REVIEW-CHECKER-V1
+Priority: P0
+Goal:
+- AI 校验 5 槽位是否合格 指出哪段不合格 给重写指令
+Scope:
+- 在单子详情页或编辑指标页增加按钮：AI 校验
+- 输入：Facts Decision Rationale OutcomeVerdict NextDecision + 自动指标快照（收入 拍摄时长 选片时长 RPH(拍+选) 选片率）
+- 输出并落盘：
+  score 0 到 10
+  perFieldPass（Facts Decision Rationale OutcomeVerdict NextDecision）
+  rewriteInstructions（仅对不合格字段给一句重写要求）
+  blindspot（可选一句话）
+- 结构化输出必须固定 schema
+- V1 仅支持手动点击触发 不自动跑
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist project.pbxproj entitlements targets appex watch widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+Acceptance:
+A 点 AI 校验后能得到 score 与每段 PASS FAIL
+B 对 FAIL 段给出一条重写指令 且只针对 FAIL 段
+C 保存后重启仍存在 且多端同步可见
+D ios_safe PASS 0 配置改动
+
+## DONE — TC-IOS-SESSION-5SLOT-REVIEW-V1
+Status: DONE (merged in PR #184)
 ID: TC-IOS-SESSION-5SLOT-REVIEW-V1
 Title: 单子详情页 5 槽位复盘 V1
 AssignedTo: Coordinator1/Codex
