@@ -579,6 +579,7 @@ final class CloudDataStore: ObservableObject {
     struct DayMemoSnapshot: Equatable {
         let dayKey: String
         let text: String?
+        let actionSeed: String?
         let revision: Int64
         let updatedAt: Date
         let sourceDevice: String
@@ -663,6 +664,7 @@ final class CloudDataStore: ObservableObject {
     private enum MemoField {
         static let dayKey = "dayKey"
         static let text = "text"
+        static let actionSeed = "actionSeed"
         static let revision = "revision"
         static let updatedAt = "updatedAt"
         static let sourceDevice = "sourceDevice"
@@ -1072,6 +1074,67 @@ final class CloudDataStore: ObservableObject {
         updatedAt: Date = Date(),
         sourceDevice: String? = nil
     ) {
+        upsertDayMemoInternal(
+            dayKey: dayKey,
+            text: text,
+            actionSeed: nil,
+            preserveText: false,
+            preserveActionSeed: true,
+            revision: revision,
+            updatedAt: updatedAt,
+            sourceDevice: sourceDevice
+        )
+    }
+
+    func upsertDayMemo(
+        dayKey: String,
+        text: String?,
+        actionSeed: String?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        upsertDayMemoInternal(
+            dayKey: dayKey,
+            text: text,
+            actionSeed: actionSeed,
+            preserveText: false,
+            preserveActionSeed: false,
+            revision: revision,
+            updatedAt: updatedAt,
+            sourceDevice: sourceDevice
+        )
+    }
+
+    func updateDayMemoActionSeed(
+        dayKey: String,
+        actionSeed: String?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        upsertDayMemoInternal(
+            dayKey: dayKey,
+            text: nil,
+            actionSeed: actionSeed,
+            preserveText: true,
+            preserveActionSeed: false,
+            revision: revision,
+            updatedAt: updatedAt,
+            sourceDevice: sourceDevice
+        )
+    }
+
+    private func upsertDayMemoInternal(
+        dayKey: String,
+        text: String?,
+        actionSeed: String?,
+        preserveText: Bool,
+        preserveActionSeed: Bool,
+        revision: Int64?,
+        updatedAt: Date,
+        sourceDevice: String?
+    ) {
         guard !dayKey.isEmpty else {
             assertionFailure("dayKey is required")
             return
@@ -1087,9 +1150,14 @@ final class CloudDataStore: ObservableObject {
             existingRevision: existingRevision,
             existingSource: existingSource
         ) else { return }
+        let existingText = record?.value(forKey: MemoField.text) as? String
+        let existingSeed = record?.value(forKey: MemoField.actionSeed) as? String
+        let nextText = preserveText ? existingText : text
+        let nextSeed = preserveActionSeed ? existingSeed : actionSeed
         let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.memo, into: context)
         target.setValue(dayKey, forKey: MemoField.dayKey)
-        target.setValue(text, forKey: MemoField.text)
+        target.setValue(nextText, forKey: MemoField.text)
+        target.setValue(nextSeed, forKey: MemoField.actionSeed)
         target.setValue(nextRevisionValue, forKey: MemoField.revision)
         target.setValue(updatedAt.timeIntervalSince1970, forKey: MemoField.updatedAt)
         target.setValue(source, forKey: MemoField.sourceDevice)
@@ -1569,6 +1637,7 @@ final class CloudDataStore: ObservableObject {
             return DayMemoSnapshot(
                 dayKey: dayKey,
                 text: object.value(forKey: MemoField.text) as? String,
+                actionSeed: object.value(forKey: MemoField.actionSeed) as? String,
                 revision: int64Value(object, key: MemoField.revision),
                 updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
                 sourceDevice: stringValue(object, key: MemoField.sourceDevice, fallback: "unknown")
@@ -1960,6 +2029,7 @@ final class CloudDataStore: ObservableObject {
         memo.properties = [
             attribute(MemoField.dayKey, type: .stringAttributeType, optional: true),
             attribute(MemoField.text, type: .stringAttributeType, optional: true),
+            attribute(MemoField.actionSeed, type: .stringAttributeType, optional: true),
             attribute(MemoField.revision, type: .integer64AttributeType, defaultValue: 0),
             attribute(MemoField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
             attribute(MemoField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
@@ -2222,6 +2292,7 @@ final class ShiftRecordStore: ObservableObject {
 @MainActor
 final class DailyMemoStore: ObservableObject {
     @Published private(set) var memos: [String: String] = [:]
+    @Published private(set) var actionSeeds: [String: String] = [:]
     private let cloudStore: CloudDataStore
     private var cancellables: Set<AnyCancellable> = []
     private let formatter: DateFormatter
@@ -2251,6 +2322,10 @@ final class DailyMemoStore: ObservableObject {
         memos[key] ?? ""
     }
 
+    func actionSeed(for key: String) -> String {
+        actionSeeds[key] ?? ""
+    }
+
     func setMemo(_ memo: String, for key: String) {
         let trimmed = memo.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
@@ -2260,14 +2335,25 @@ final class DailyMemoStore: ObservableObject {
         }
     }
 
+    func setActionSeed(_ seed: String?, for key: String) {
+        let trimmed = seed?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalized = trimmed.isEmpty ? nil : trimmed
+        cloudStore.updateDayMemoActionSeed(dayKey: key, actionSeed: normalized)
+    }
+
     private func apply(records: [String: CloudDataStore.DayMemoSnapshot]) {
         var mapped: [String: String] = [:]
+        var seeds: [String: String] = [:]
         for (key, memo) in records {
             if let text = memo.text, !text.isEmpty {
                 mapped[key] = text
             }
+            if let seed = memo.actionSeed, !seed.isEmpty {
+                seeds[key] = seed
+            }
         }
         memos = mapped
+        actionSeeds = seeds
     }
 }
 
@@ -2699,18 +2785,29 @@ struct ContentView: View {
         let previousDayKey = todayDayKey
         let newDayKey = Self.dayKey(for: Date())
         todayDayKey = newDayKey
-        guard newDayKey != previousDayKey else { return }
-        carryTomorrowActionIfNeeded(from: previousDayKey, to: newDayKey)
+        if newDayKey != previousDayKey {
+            carryTomorrowActionIfNeeded(from: previousDayKey, to: newDayKey)
+        }
+        migrateActionSeedIfNeeded(for: newDayKey)
     }
 
     private func carryTomorrowActionIfNeeded(from previousDayKey: String, to currentDayKey: String) {
-        let todayMemo = dailyMemoStore.memo(for: currentDayKey)
+        let existingSeed = dailyMemoStore.actionSeed(for: currentDayKey)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard todayMemo.isEmpty else { return }
+        guard existingSeed.isEmpty else { return }
         let action = cloudStore.dailyReview(for: previousDayKey)?.tomorrowOneAction?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !action.isEmpty else { return }
-        dailyMemoStore.setMemo(action, for: currentDayKey)
+        dailyMemoStore.setActionSeed(action, for: currentDayKey)
+    }
+
+    private func migrateActionSeedIfNeeded(for dayKey: String) {
+        let existingSeed = dailyMemoStore.actionSeed(for: dayKey)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard existingSeed.isEmpty else { return }
+        let memoText = dailyMemoStore.memo(for: dayKey)
+        guard let summary = memoActionSummary(memoText) else { return }
+        dailyMemoStore.setActionSeed(summary, for: dayKey)
     }
 
     private func dayKey(for summary: SessionSummary) -> String? {
@@ -3722,9 +3819,10 @@ struct ContentView: View {
 
     private var todayActionText: String? {
         let todayKey = dailyMemoStore.dayKey(for: now)
-        let memoText = dailyMemoStore.memo(for: todayKey)
-        if let summary = memoActionSummary(memoText) {
-            return summary
+        let seed = dailyMemoStore.actionSeed(for: todayKey)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !seed.isEmpty {
+            return seed
         }
         let calendar = Calendar.current
         let yesterday = calendar.date(byAdding: .day, value: -1, to: now) ?? now
@@ -3742,10 +3840,7 @@ struct ContentView: View {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         guard let first = lines.first else { return nil }
-        if lines.count == 1 {
-            return String(first)
-        }
-        return "\(first)\n\(lines[1])"
+        return String(first)
     }
 
     private var memoEditor: some View {
@@ -5418,7 +5513,8 @@ struct ContentView: View {
                 dayKey: nil,
                 startAt: nil,
                 endAt: nil,
-                text: nil
+                text: nil,
+                actionSeed: nil
             )
             return RecordEnvelope(
                 type: .session,
@@ -5445,7 +5541,8 @@ struct ContentView: View {
                 dayKey: record.dayKey,
                 startAt: record.startAt?.timeIntervalSince1970,
                 endAt: record.endAt?.timeIntervalSince1970,
-                text: nil
+                text: nil,
+                actionSeed: nil
             )
             return RecordEnvelope(
                 type: .shift,
@@ -5472,7 +5569,8 @@ struct ContentView: View {
                 dayKey: record.dayKey,
                 startAt: nil,
                 endAt: nil,
-                text: record.text
+                text: record.text,
+                actionSeed: record.actionSeed
             )
             return RecordEnvelope(
                 type: .memo,
@@ -5700,6 +5798,7 @@ struct ContentView: View {
             cloudStore.upsertDayMemo(
                 dayKey: dayKey,
                 text: payload.text,
+                actionSeed: payload.actionSeed,
                 revision: envelope.revision,
                 updatedAt: updatedAt,
                 sourceDevice: sourceDevice
@@ -5723,7 +5822,8 @@ struct ContentView: View {
             dayKey: nil,
             startAt: nil,
             endAt: nil,
-            text: nil
+            text: nil,
+            actionSeed: nil
         )
     }
 
@@ -5743,7 +5843,8 @@ struct ContentView: View {
             dayKey: record.dayKey,
             startAt: record.startAt?.timeIntervalSince1970,
             endAt: record.endAt?.timeIntervalSince1970,
-            text: nil
+            text: nil,
+            actionSeed: nil
         )
     }
 
@@ -5763,7 +5864,8 @@ struct ContentView: View {
             dayKey: record.dayKey,
             startAt: nil,
             endAt: nil,
-            text: record.text
+            text: record.text,
+            actionSeed: record.actionSeed
         )
     }
 
@@ -6989,6 +7091,7 @@ private struct RecordPayload: Codable, Equatable {
     var startAt: Double?
     var endAt: Double?
     var text: String?
+    var actionSeed: String?
 }
 
 private struct RecordEnvelope: Codable {
