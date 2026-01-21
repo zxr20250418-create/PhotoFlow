@@ -2477,6 +2477,41 @@ struct ContentView: View {
         var endedAt: Date?
     }
 
+    private static let reviewLogPrefix = "PF_DECLOG_V1:"
+
+    private struct SessionDecisionLogV1: Codable, Equatable {
+        var facts: String?
+        var decision: String?
+        var rationale: String?
+        var outcomeVerdict: String?
+        var nextDecision: String?
+        var updatedAt: Double?
+    }
+
+    private struct SessionDecisionDraft: Equatable {
+        var facts: String
+        var decision: String
+        var rationale: String
+        var outcomeVerdict: String
+        var nextDecision: String
+
+        static let empty = SessionDecisionDraft(
+            facts: "",
+            decision: "",
+            rationale: "",
+            outcomeVerdict: "",
+            nextDecision: ""
+        )
+
+        var isEmpty: Bool {
+            facts.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            decision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            rationale.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            outcomeVerdict.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            nextDecision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     private enum DutyLoadState {
         case loading
         case loaded
@@ -2587,6 +2622,11 @@ struct ContentView: View {
     @State private var statsRange: StatsRange = .today
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
+    @State private var reviewDraft = SessionDecisionDraft.empty
+    @State private var reviewDraftLastSaved = SessionDecisionDraft.empty
+    @State private var reviewDraftSessionId: String?
+    @State private var reviewDraftWasStructured = false
+    @State private var reviewExpanded = false
     @State private var dutyLoadState: DutyLoadState = .loading
     @State private var latestOpenShift: CloudDataStore.ShiftRecordSnapshot?
     @State private var lastKnownOnDuty = false
@@ -2683,8 +2723,14 @@ struct ContentView: View {
                             .keyboardType(.numberPad)
                     }
                     Section("复盘备注") {
-                        TextEditor(text: $draftReviewNote)
-                            .frame(minHeight: 100)
+                        if isStructuredReviewNote(metaStore.meta(for: session.id).reviewNote) {
+                            Text("复盘已结构化，请在详情页编辑")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            TextEditor(text: $draftReviewNote)
+                                .frame(minHeight: 100)
+                        }
                     }
                 }
                 .navigationTitle("编辑指标")
@@ -2883,6 +2929,115 @@ struct ContentView: View {
         let memoText = dailyMemoStore.memo(for: dayKey)
         guard let summary = memoActionSummary(memoText) else { return }
         dailyMemoStore.setActionSeed(summary, for: dayKey)
+    }
+
+    private func normalizedReviewText(_ value: String?) -> String? {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func isStructuredReviewNote(_ note: String?) -> Bool {
+        guard let note else { return false }
+        return note.hasPrefix(Self.reviewLogPrefix)
+    }
+
+    private func decodeDecisionLog(from note: String?) -> SessionDecisionLogV1? {
+        guard let note, note.hasPrefix(Self.reviewLogPrefix) else { return nil }
+        let json = String(note.dropFirst(Self.reviewLogPrefix.count))
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(SessionDecisionLogV1.self, from: data)
+    }
+
+    private func encodeDecisionLog(_ log: SessionDecisionLogV1) -> String? {
+        guard let data = try? JSONEncoder().encode(log),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return Self.reviewLogPrefix + json
+    }
+
+    private func reviewNoteSummaryText(_ note: String?) -> String? {
+        if let log = decodeDecisionLog(from: note) {
+            return [log.nextDecision, log.outcomeVerdict, log.facts, log.decision, log.rationale]
+                .compactMap { normalizedReviewText($0) }
+                .first
+        }
+        return normalizedReviewText(note)
+    }
+
+    private func reviewSummaryText(for draft: SessionDecisionDraft) -> String? {
+        let candidates = [
+            draft.nextDecision,
+            draft.outcomeVerdict,
+            draft.facts,
+            draft.decision,
+            draft.rationale
+        ]
+        for value in candidates {
+            if let trimmed = normalizedReviewText(value) {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
+    private func loadReviewDraft(for sessionId: String, note: String?) {
+        guard reviewDraftSessionId != sessionId else { return }
+        reviewExpanded = false
+        if let log = decodeDecisionLog(from: note) {
+            reviewDraft = SessionDecisionDraft(
+                facts: normalizedReviewText(log.facts) ?? "",
+                decision: normalizedReviewText(log.decision) ?? "",
+                rationale: normalizedReviewText(log.rationale) ?? "",
+                outcomeVerdict: normalizedReviewText(log.outcomeVerdict) ?? "",
+                nextDecision: normalizedReviewText(log.nextDecision) ?? ""
+            )
+            reviewDraftWasStructured = true
+        } else {
+            let fallback = normalizedReviewText(note) ?? ""
+            reviewDraft = SessionDecisionDraft(
+                facts: "",
+                decision: "",
+                rationale: "",
+                outcomeVerdict: "",
+                nextDecision: fallback
+            )
+            reviewDraftWasStructured = false
+        }
+        reviewDraftLastSaved = reviewDraft
+        reviewDraftSessionId = sessionId
+    }
+
+    private func saveReviewDraftIfNeeded(for sessionId: String) {
+        guard reviewDraftSessionId == sessionId else { return }
+        let meta = metaStore.meta(for: sessionId)
+        let shouldWrite = !reviewDraftWasStructured || reviewDraft != reviewDraftLastSaved
+        guard shouldWrite else { return }
+        let now = Date()
+        let log = SessionDecisionLogV1(
+            facts: normalizedReviewText(reviewDraft.facts),
+            decision: normalizedReviewText(reviewDraft.decision),
+            rationale: normalizedReviewText(reviewDraft.rationale),
+            outcomeVerdict: normalizedReviewText(reviewDraft.outcomeVerdict),
+            nextDecision: normalizedReviewText(reviewDraft.nextDecision),
+            updatedAt: now.timeIntervalSince1970
+        )
+        let hasContent = [
+            log.facts,
+            log.decision,
+            log.rationale,
+            log.outcomeVerdict,
+            log.nextDecision
+        ].contains { normalizedReviewText($0) != nil }
+        let noteToSave = hasContent ? encodeDecisionLog(log) : nil
+        if noteToSave == meta.reviewNote {
+            reviewDraftLastSaved = reviewDraft
+            reviewDraftWasStructured = noteToSave != nil
+            return
+        }
+        var updated = meta
+        updated.reviewNote = noteToSave
+        metaStore.update(updated, for: sessionId)
+        reviewDraftLastSaved = reviewDraft
+        reviewDraftWasStructured = noteToSave != nil
     }
 
     private func dayKey(for summary: SessionSummary) -> String? {
@@ -3579,7 +3734,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let note = record.reviewNote, !note.isEmpty {
+            if let note = reviewNoteSummaryText(record.reviewNote) {
                 Text(note)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -3592,7 +3747,8 @@ struct ContentView: View {
         let amountText = record.amountCents.map { formatAmount(cents: $0) } ?? "—"
         let shotText = record.shotCount.map(String.init) ?? "—"
         let selectedText = record.selectedCount.map(String.init) ?? "—"
-        let noteText = record.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let noteText = reviewNoteSummaryText(record.reviewNote)
+        let reviewLog = decodeDecisionLog(from: record.reviewNote)
         let tombstoneInfo = sessionVisibilityStore.tombstoneInfo(for: record.id)
         let recordsFoundText = tombstoneInfo.map { String($0.recordsFound) } ?? "--"
         let maxRevisionBeforeText = tombstoneInfo.map { String($0.maxRevisionBefore) } ?? "--"
@@ -3634,6 +3790,21 @@ struct ContentView: View {
                 Text(noteText?.isEmpty == false ? noteText ?? "" : "—")
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("复盘（5槽位）") {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let reviewLog {
+                        reviewFieldReadOnly(title: "Facts", value: reviewLog.facts)
+                        reviewFieldReadOnly(title: "Decision", value: reviewLog.decision)
+                        reviewFieldReadOnly(title: "Rationale", value: reviewLog.rationale)
+                        reviewFieldReadOnly(title: "Outcome", value: reviewLog.outcomeVerdict)
+                        reviewFieldReadOnly(title: "NextDecision", value: reviewLog.nextDecision)
+                    } else {
+                        Text(noteText?.isEmpty == false ? noteText ?? "" : "—")
+                            .font(.caption)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             GroupBox("同步") {
                 VStack(alignment: .leading, spacing: 4) {
@@ -3981,6 +4152,53 @@ struct ContentView: View {
         }
     }
 
+    private func limitedTextBinding(_ text: Binding<String>, limit: Int) -> Binding<String> {
+        Binding(
+            get: { text.wrappedValue },
+            set: { newValue in
+                let clipped = String(newValue.prefix(limit))
+                text.wrappedValue = clipped
+            }
+        )
+    }
+
+    private func reviewFieldEditor(title: String, placeholder: String, text: Binding<String>) -> some View {
+        let binding = limitedTextBinding(text, limit: 120)
+        let isEmpty = binding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ZStack(alignment: .topLeading) {
+                if isEmpty {
+                    Text(placeholder)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                        .padding(.leading, 6)
+                }
+                TextEditor(text: binding)
+                    .font(.footnote)
+                    .frame(height: 72)
+                    .scrollContentBackground(.hidden)
+            }
+            .padding(8)
+            .background(Color.secondary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func reviewFieldReadOnly(title: String, value: String?) -> some View {
+        let text = normalizedReviewText(value) ?? "—"
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption)
+        }
+    }
+
     private var homeDebugFooter: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -4163,6 +4381,14 @@ struct ContentView: View {
         let timeText = startTime.map(formatSessionTime) ?? "--"
         let amountText = meta.amountCents.map { formatAmount(cents: $0) } ?? "--"
         let rphLine = rphText(for: summary)
+        let durations = sessionDurations(for: summary)
+        let workSeconds = durations.shooting + (durations.selecting ?? 0)
+        let rphWorkText: String = {
+            guard let amountCents = meta.amountCents, workSeconds > 0 else { return "--" }
+            let revenue = Double(amountCents) / 100
+            let hours = workSeconds / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
         let hasOverride = timeOverrideStore.override(for: summary.id) != nil
         let record = latestSessionRecord(for: summary.id)
         let revisionText = record.map { String($0.revision) } ?? "--"
@@ -4184,7 +4410,7 @@ struct ContentView: View {
             let rate = Int((Double(selected) / Double(shot) * 100).rounded())
             return "\(rate)%"
         }()
-        let note = meta.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let note = reviewNoteSummaryText(meta.reviewNote) ?? ""
         let noteText = note.isEmpty ? "暂无备注" : note
 
         return ScrollView {
@@ -4206,6 +4432,95 @@ struct ContentView: View {
                         Text("已更正")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    let reviewHasChanges = !reviewDraftWasStructured || reviewDraft != reviewDraftLastSaved
+                    HStack {
+                        Text("复盘（5槽位）")
+                            .font(.headline)
+                        Spacer(minLength: 8)
+                        Button(reviewExpanded ? "收起" : "展开") {
+                            reviewExpanded.toggle()
+                        }
+                        .font(.caption)
+                        .buttonStyle(.plain)
+                    }
+                    if reviewExpanded {
+                        reviewFieldEditor(
+                            title: "Facts",
+                            placeholder: "关键信息/背景…",
+                            text: $reviewDraft.facts
+                        )
+                        reviewFieldEditor(
+                            title: "Decision",
+                            placeholder: "这次做了什么决定…",
+                            text: $reviewDraft.decision
+                        )
+                        reviewFieldEditor(
+                            title: "Rationale",
+                            placeholder: "为什么这么做…",
+                            text: $reviewDraft.rationale
+                        )
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Outcome（自动）")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            VStack(spacing: 6) {
+                                HStack {
+                                    Text("收入")
+                                    Spacer()
+                                    Text(amountText)
+                                        .monospacedDigit()
+                                }
+                                HStack {
+                                    Text("拍摄时长")
+                                    Spacer()
+                                    Text(format(durations.shooting))
+                                        .monospacedDigit()
+                                }
+                                HStack {
+                                    Text("选片时长")
+                                    Spacer()
+                                    Text(durations.selecting.map(format) ?? "--")
+                                        .monospacedDigit()
+                                }
+                                HStack {
+                                    Text("RPH(拍+选)")
+                                    Spacer()
+                                    Text(rphWorkText)
+                                        .monospacedDigit()
+                                }
+                                HStack {
+                                    Text("选片率")
+                                    Spacer()
+                                    Text(pickRateText)
+                                        .monospacedDigit()
+                                }
+                            }
+                            .font(.footnote)
+                        }
+                        reviewFieldEditor(
+                            title: "Outcome（人工）",
+                            placeholder: "结果=好/一般/差；主因=…；证据=…",
+                            text: $reviewDraft.outcomeVerdict
+                        )
+                        reviewFieldEditor(
+                            title: "NextDecision",
+                            placeholder: "下一步/复用策略…",
+                            text: $reviewDraft.nextDecision
+                        )
+                        Button("保存") {
+                            saveReviewDraftIfNeeded(for: summary.id)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!reviewHasChanges)
+                    } else {
+                        Text(reviewSummaryText(for: reviewDraft) ?? "暂无复盘")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
 
@@ -4339,6 +4654,12 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
+        }
+        .onAppear {
+            loadReviewDraft(for: summary.id, note: meta.reviewNote)
+        }
+        .onDisappear {
+            saveReviewDraftIfNeeded(for: summary.id)
         }
         .navigationTitle("单子详情")
         .toolbar {
@@ -6251,7 +6572,7 @@ struct ContentView: View {
             if meta.selectedCount == nil {
                 missingParts.append("缺选")
             }
-            let note = meta.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let note = reviewNoteSummaryText(meta.reviewNote) ?? ""
             if note.isEmpty {
                 missingParts.append("缺备注")
             }
@@ -6285,16 +6606,22 @@ struct ContentView: View {
         draftAmount = meta.amountCents.map(amountText(from:)) ?? ""
         draftShotCount = meta.shotCount.map(String.init) ?? ""
         draftSelected = meta.selectedCount.map(String.init) ?? ""
-        draftReviewNote = meta.reviewNote ?? ""
+        if isStructuredReviewNote(meta.reviewNote) {
+            draftReviewNote = ""
+        } else {
+            draftReviewNote = meta.reviewNote ?? ""
+        }
         editingSession = EditingSession(id: sessionId)
     }
 
     private func saveMeta(for sessionId: String) {
+        let existingNote = metaStore.meta(for: sessionId).reviewNote
+        let reviewNote = isStructuredReviewNote(existingNote) ? existingNote : normalizedNote(from: draftReviewNote)
         let meta = SessionMeta(
             amountCents: parseAmountCents(from: draftAmount),
             shotCount: parseInt(from: draftShotCount),
             selectedCount: parseInt(from: draftSelected),
-            reviewNote: normalizedNote(from: draftReviewNote)
+            reviewNote: reviewNote
         )
         metaStore.update(meta, for: sessionId)
     }
@@ -6344,7 +6671,7 @@ struct ContentView: View {
         var lines: [String] = []
         for (index, summary) in ordered.enumerated() {
             let meta = metaStore.meta(for: summary.id)
-            let note = meta.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let note = reviewNoteSummaryText(meta.reviewNote) ?? ""
             guard !note.isEmpty else { continue }
             var parts: [String] = []
             let order = index + 1
@@ -6414,14 +6741,12 @@ struct ContentView: View {
                 return (summary.id, revenue / hours)
             }
             guard let worst = items.sorted(by: { $0.1 < $1.1 }).first else { return nil }
-            let note = metaStore.meta(for: worst.0).reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let trimmed = (note ?? "").isEmpty ? nil : note
-            return (worst.0, trimmed)
+            let note = reviewNoteSummaryText(metaStore.meta(for: worst.0).reviewNote)
+            return (worst.0, note)
         }()
         let notesAll: String? = {
             let notes = ordered.compactMap { summary -> String? in
-                let note = metaStore.meta(for: summary.id).reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                return note.isEmpty ? nil : note
+                reviewNoteSummaryText(metaStore.meta(for: summary.id).reviewNote)
             }
             return notes.isEmpty ? nil : notes.joined(separator: "\n")
         }()
@@ -6724,9 +7049,7 @@ struct ContentView: View {
     }
 
     private func metaNotePreview(for sessionId: String) -> String? {
-        guard let note = metaStore.meta(for: sessionId).reviewNote else { return nil }
-        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        reviewNoteSummaryText(metaStore.meta(for: sessionId).reviewNote)
     }
 
     private func formatAmount(cents: Int) -> String {
