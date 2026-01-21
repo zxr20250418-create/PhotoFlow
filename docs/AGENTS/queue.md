@@ -1,3 +1,24 @@
+## ACTIVE — TC-IOS-SESSION-5SLOT-REVIEW-V1
+Status: ACTIVE
+ID: TC-IOS-SESSION-5SLOT-REVIEW-V1
+Title: 单子详情页 5 槽位复盘 V1
+AssignedTo: Coordinator1/Codex
+Priority: P1
+
+Goal:
+- 单子详情页新增 5 槽位复盘（Facts/Decision/Rationale/Outcome/NextDecision），手动输入并持久化，同步三端。
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- 禁止触碰: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget 配置
+- PR 前必跑并贴: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- 详情页可折叠展开 5 槽位，收起显示摘要
+- 输入后离开/冷启动仍可见
+- iPhone 修改后 iPad 同步可见
+- ios_safe PASS；0 配置改动
+
 ## PAUSED — TC-PREFLIGHT-EMBEDDED-WATCHAPP
 ID: TC-PREFLIGHT-EMBEDDED-WATCHAPP
 Status: PAUSED (postponed; return after stability restored)
