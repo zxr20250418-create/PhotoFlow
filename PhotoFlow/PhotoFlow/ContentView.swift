@@ -2577,6 +2577,29 @@ struct ContentView: View {
         }
     }
 
+    private enum ApiProvider: String, CaseIterable {
+        case openai
+        case claude
+
+        var title: String {
+            switch self {
+            case .openai:
+                return "OpenAI"
+            case .claude:
+                return "Claude"
+            }
+        }
+
+        var endpoint: URL {
+            switch self {
+            case .openai:
+                return URL(string: "https://api.openai.com/v1/models")!
+            case .claude:
+                return URL(string: "https://api.anthropic.com/v1/models")!
+            }
+        }
+    }
+
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
@@ -2650,6 +2673,14 @@ struct ContentView: View {
     @State private var ipadMemoConflictNotice: String?
     @State private var ipadMemoLastRevision: Int64 = 0
     @State private var ipadMemoLastSource = ""
+    @AppStorage("pf_openai_api_key") private var openaiApiKey = ""
+    @AppStorage("pf_claude_api_key") private var claudeApiKey = ""
+    @AppStorage("pf_api_openai_last_test_ok") private var openaiLastTestOk = false
+    @AppStorage("pf_api_claude_last_test_ok") private var claudeLastTestOk = false
+    @AppStorage("pf_api_openai_last_test_at") private var openaiLastTestAt: Double = 0
+    @AppStorage("pf_api_claude_last_test_at") private var claudeLastTestAt: Double = 0
+    @AppStorage("pf_api_openai_last_error") private var openaiLastError = ""
+    @AppStorage("pf_api_claude_last_error") private var claudeLastError = ""
     @AppStorage("pf_debug_mode_enabled") private var debugModeEnabled = false
     @State private var debugTapCount = 0
     @State private var lastDebugTapAt: Date?
@@ -2663,6 +2694,7 @@ struct ContentView: View {
     @State private var pendingImportBundle: ExportBundle?
     @State private var importStatus: String?
     @State private var importError: String?
+    @State private var apiTestingProviders: Set<ApiProvider> = []
 #if DEBUG
     @State private var showDebugPanel = false
     @State private var showHomeDebugSheet = false
@@ -2898,6 +2930,7 @@ struct ContentView: View {
                 }
                 return
             }
+            autoTestApiConnectivityIfNeeded()
             if let state = syncStore.reloadCanonicalState() {
                 applyCanonicalState(state, shouldPrompt: false)
                 syncStore.updateCanonicalState(state, send: true)
@@ -3583,6 +3616,63 @@ struct ContentView: View {
         }
     }
 
+    private var apiConnectivityPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("API 连接")
+                .font(.headline)
+            ForEach(ApiProvider.allCases, id: \.self) { provider in
+                apiConnectivityRow(provider)
+            }
+        }
+    }
+
+    private func apiConnectivityRow(_ provider: ApiProvider) -> some View {
+        let lastTestText = apiLastTestAt(for: provider).map(formatApiTestTime) ?? "—"
+        let lastErrorText = apiLastError(for: provider)
+        let isTesting = apiTestingProviders.contains(provider)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(provider.title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+                Text(apiBadgeText(for: provider))
+                    .font(.caption)
+                    .foregroundStyle(apiBadgeColor(for: provider))
+            }
+            TextField("\(provider.title) API Key", text: apiKeyBinding(for: provider))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 8) {
+                Button("测试连接") {
+                    runApiConnectivityTest(provider, triggeredByAuto: false)
+                }
+                .buttonStyle(.bordered)
+                .disabled(isTesting)
+                if isTesting {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Testing…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            Text("lastTestAt: \(lastTestText)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if !lastErrorText.isEmpty {
+                Text("lastError: \(lastErrorText)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
     private func ipadCloudDebugPanel(records: [CloudDataStore.SessionRecord]) -> some View {
         let memoPrefix = CloudDataStore.cloudTestMemoPrefix
         let testMemos = cloudStore.dayMemos.values
@@ -4183,6 +4273,174 @@ struct ContentView: View {
             .filter { !$0.isEmpty }
         guard let first = lines.first else { return nil }
         return String(first)
+    }
+
+    private func apiKey(for provider: ApiProvider) -> String {
+        switch provider {
+        case .openai:
+            return openaiApiKey
+        case .claude:
+            return claudeApiKey
+        }
+    }
+
+    private func setApiKey(_ value: String, for provider: ApiProvider) {
+        switch provider {
+        case .openai:
+            openaiApiKey = value
+        case .claude:
+            claudeApiKey = value
+        }
+    }
+
+    private func apiKeyBinding(for provider: ApiProvider) -> Binding<String> {
+        Binding(
+            get: { apiKey(for: provider) },
+            set: { setApiKey($0, for: provider) }
+        )
+    }
+
+    private func apiLastTestOk(for provider: ApiProvider) -> Bool {
+        switch provider {
+        case .openai:
+            return openaiLastTestOk
+        case .claude:
+            return claudeLastTestOk
+        }
+    }
+
+    private func setApiLastTestOk(_ value: Bool, for provider: ApiProvider) {
+        switch provider {
+        case .openai:
+            openaiLastTestOk = value
+        case .claude:
+            claudeLastTestOk = value
+        }
+    }
+
+    private func apiLastTestAt(for provider: ApiProvider) -> Date? {
+        let timestamp: Double
+        switch provider {
+        case .openai:
+            timestamp = openaiLastTestAt
+        case .claude:
+            timestamp = claudeLastTestAt
+        }
+        guard timestamp > 0 else { return nil }
+        return Date(timeIntervalSince1970: timestamp)
+    }
+
+    private func setApiLastTestAt(_ date: Date, for provider: ApiProvider) {
+        let timestamp = date.timeIntervalSince1970
+        switch provider {
+        case .openai:
+            openaiLastTestAt = timestamp
+        case .claude:
+            claudeLastTestAt = timestamp
+        }
+    }
+
+    private func apiLastError(for provider: ApiProvider) -> String {
+        switch provider {
+        case .openai:
+            return openaiLastError
+        case .claude:
+            return claudeLastError
+        }
+    }
+
+    private func setApiLastError(_ value: String, for provider: ApiProvider) {
+        switch provider {
+        case .openai:
+            openaiLastError = value
+        case .claude:
+            claudeLastError = value
+        }
+    }
+
+    private func apiBadgeText(for provider: ApiProvider) -> String {
+        guard apiLastTestAt(for: provider) != nil else { return "⚠️ 未测试" }
+        return apiLastTestOk(for: provider) ? "✅ 连接已测试" : "❌ 测试失败"
+    }
+
+    private func apiBadgeColor(for provider: ApiProvider) -> Color {
+        guard apiLastTestAt(for: provider) != nil else { return .orange }
+        return apiLastTestOk(for: provider) ? .green : .red
+    }
+
+    private func autoTestApiConnectivityIfNeeded() {
+        let now = Date()
+        for provider in ApiProvider.allCases {
+            guard !apiTestingProviders.contains(provider) else { continue }
+            let key = apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            if let lastAt = apiLastTestAt(for: provider) {
+                guard now.timeIntervalSince(lastAt) > 6 * 3600 else { continue }
+            }
+            runApiConnectivityTest(provider, triggeredByAuto: true)
+        }
+    }
+
+    private func runApiConnectivityTest(_ provider: ApiProvider, triggeredByAuto: Bool) {
+        guard !apiTestingProviders.contains(provider) else { return }
+        let key = apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            if !triggeredByAuto {
+                setApiTestResult(provider, ok: false, error: "缺少 API Key")
+            }
+            return
+        }
+        apiTestingProviders.insert(provider)
+        Task {
+            let result = await performApiHealthCheck(provider, apiKey: key)
+            await MainActor.run {
+                apiTestingProviders.remove(provider)
+                setApiTestResult(provider, ok: result.ok, error: result.error)
+            }
+        }
+    }
+
+    private func setApiTestResult(_ provider: ApiProvider, ok: Bool, error: String?) {
+        setApiLastTestAt(Date(), for: provider)
+        setApiLastTestOk(ok, for: provider)
+        setApiLastError(ok ? "" : (error ?? "unknown error"), for: provider)
+    }
+
+    private func performApiHealthCheck(_ provider: ApiProvider, apiKey: String) async -> (ok: Bool, error: String?) {
+        var request = URLRequest(url: provider.endpoint)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        switch provider {
+        case .openai:
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        case .claude:
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return (false, "无效响应")
+            }
+            if (200..<300).contains(http.statusCode) {
+                return (true, nil)
+            }
+            let body = String(data: data, encoding: .utf8)
+            return (false, apiErrorSummary(statusCode: http.statusCode, body: body))
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
+    private func apiErrorSummary(statusCode: Int, body: String?) -> String {
+        let trimmed = (body ?? "")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "HTTP \(statusCode)"
+        }
+        let snippet = String(trimmed.prefix(120))
+        return "HTTP \(statusCode) · \(snippet)"
     }
 
     private var memoEditor: some View {
@@ -5435,6 +5693,8 @@ struct ContentView: View {
             if !isReadOnlyDevice {
                 Divider()
                 filesTransferPanel
+                Divider()
+                apiConnectivityPanel
             }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -6571,6 +6831,12 @@ struct ContentView: View {
         return formatter
     }()
 
+    private static let apiTestTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }()
+
     private static let reviewDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
@@ -6583,6 +6849,10 @@ struct ContentView: View {
 
     private func formatSessionTimeWithSeconds(_ date: Date) -> String {
         ContentView.sessionTimeWithSecondsFormatter.string(from: date)
+    }
+
+    private func formatApiTestTime(_ date: Date) -> String {
+        ContentView.apiTestTimeFormatter.string(from: date)
     }
 
     private func reviewDateText(_ date: Date) -> String {
