@@ -2540,6 +2540,8 @@ struct ContentView: View {
     @State private var sessionSummaries: [SessionSummary] = []
     @State private var todayDayKey: String = ContentView.dayKey(for: Date())
     @State private var isTopExpanded = false
+    @State private var userIsDragging = false
+    @State private var isTimelineNearBottom = true
     @StateObject private var cloudStore: CloudDataStore
     @StateObject private var metaStore: SessionMetaStore
     @StateObject private var timeOverrideStore: SessionTimeOverrideStore
@@ -3590,49 +3592,82 @@ struct ContentView: View {
             }
         )
         return NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    homeFixedHeader
+            let displaySessions = homeTimelineDisplaySessions()
+            let activeId = activeTimelineSessionId(from: effectiveSessionSummaries)
+            ScrollViewReader { proxy in
+                List {
+                    Section {
+                        homeFixedHeader
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    }
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("会话时间线")
-                            .font(.headline)
-                        let displaySessions = homeTimelineDisplaySessions()
-                        let activeId = activeTimelineSessionId(from: effectiveSessionSummaries)
+                    Section(header: Text("会话时间线").font(.headline).textCase(nil)) {
                         if displaySessions.isEmpty {
                             Text("暂无记录")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
                         } else {
-                            LazyVStack(alignment: .leading, spacing: 8) {
-                                ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
-                                    let total = displaySessions.count
-                                    let order = total - displayIndex
-                                    sessionTimelineRow(
-                                        summary: summary,
-                                        order: order,
-                                        isActive: summary.id == activeId
-                                    )
-                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                        Button("作废") {
-                                            performSwipeVoid(id: summary.id)
-                                        }
-                                        .tint(.orange)
-                                        Button("删除", role: .destructive) {
-                                            swipeDeleteCandidateId = summary.id
-                                        }
+                            ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
+                                let total = displaySessions.count
+                                let order = total - displayIndex
+                                sessionTimelineRow(
+                                    summary: summary,
+                                    order: order,
+                                    isActive: summary.id == activeId
+                                )
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                                .listRowBackground(Color.clear)
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button("作废") {
+                                        performSwipeVoid(id: summary.id)
+                                    }
+                                    .tint(.orange)
+                                    Button("删除", role: .destructive) {
+                                        swipeDeleteCandidateId = summary.id
                                     }
                                 }
                             }
                         }
                         pendingDeleteBanner
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                        Color.clear
+                            .frame(height: 1)
+                            .id("timelineBottom")
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .onAppear { isTimelineNearBottom = true }
+                            .onDisappear { isTimelineNearBottom = false }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding()
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .simultaneousGesture(
+                    DragGesture()
+                        .onChanged { _ in
+                            userIsDragging = true
+                        }
+                        .onEnded { _ in
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                userIsDragging = false
+                            }
+                        }
+                )
+                .onChange(of: displaySessions.count) { oldValue, newValue in
+                    guard newValue > oldValue else { return }
+                    guard !userIsDragging, isTimelineNearBottom else { return }
+                    DispatchQueue.main.async {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("timelineBottom", anchor: .bottom)
+                        }
+                    }
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
             .confirmationDialog("删除本单？", isPresented: swipeDeleteBinding, titleVisibility: .visible) {
                 Button("删除", role: .destructive) {
                     if let id = swipeDeleteCandidateId {
