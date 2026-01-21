@@ -11,7 +11,7 @@ ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
 ## DONE — TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
-Status: DONE (merged in PR #175)
+Status: DONE (merged in PR #177)
 # TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
 Priority: P1
 Goal:
