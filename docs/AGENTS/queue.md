@@ -10,8 +10,8 @@ Status: ABANDONED (rollback; PR #33 closed)
 ID: TC-WIDGET-TAP-OPEN-APP
 Status: PAUSED (superseded by sync priority)
 
-## ACTIVE — TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
-Status: ACTIVE
+## DONE — TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
+Status: DONE (merged in PR #175)
 # TC-IOS-HOME-TOMORROW-ACTION-BANNER-V1
 Priority: P1
 Goal:
