@@ -13,6 +13,8 @@ import UIKit
 import UniformTypeIdentifiers
 import WatchConnectivity
 
+private let appLaunchId = UUID().uuidString
+
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     fileprivate enum StageSyncKey {
@@ -1249,6 +1251,10 @@ final class CloudDataStore: ObservableObject {
         }
     }
 
+    func refreshFromStore() {
+        refreshAll()
+    }
+
     private func refreshAll() {
         sessionRecords = fetchSessionRecords()
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
@@ -2471,6 +2477,11 @@ struct ContentView: View {
         var endedAt: Date?
     }
 
+    private enum DutyLoadState {
+        case loading
+        case loaded
+    }
+
     struct DataQualityItem: Identifiable {
         let id = UUID()
         let summary: SessionSummary
@@ -2576,6 +2587,10 @@ struct ContentView: View {
     @State private var statsRange: StatsRange = .today
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
+    @State private var dutyLoadState: DutyLoadState = .loading
+    @State private var latestOpenShift: CloudDataStore.ShiftRecordSnapshot?
+    @State private var lastKnownOnDuty = false
+    @State private var dutyFetchCount = 0
     @State private var isReviewDigestPresented = false
     @State private var isDailyReviewPresented = false
     @State private var dailyReviewSelection: String?
@@ -2617,6 +2632,11 @@ struct ContentView: View {
         self.syncStore = syncStore
         let cloud = CloudDataStore()
         _cloudStore = StateObject(wrappedValue: cloud)
+        let openShift = Self.latestOpenShiftRecord(from: Array(cloud.shiftRecords.values))
+        _latestOpenShift = State(initialValue: openShift)
+        _lastKnownOnDuty = State(initialValue: openShift != nil)
+        _dutyFetchCount = State(initialValue: cloud.shiftRecords.count)
+        _dutyLoadState = State(initialValue: .loaded)
         _metaStore = StateObject(wrappedValue: SessionMetaStore(cloudStore: cloud))
         _timeOverrideStore = StateObject(wrappedValue: SessionTimeOverrideStore())
         _manualSessionStore = StateObject(wrappedValue: ManualSessionStore())
@@ -2627,8 +2647,10 @@ struct ContentView: View {
         let defaults = UserDefaults.standard
         let start = defaults.object(forKey: "pf_shift_start") as? Date
         let end = defaults.object(forKey: "pf_shift_end") as? Date
-        _shiftStart = State(initialValue: start)
-        _shiftEnd = State(initialValue: end)
+        let derivedStart = openShift?.startAt ?? start
+        let derivedEnd = openShift?.endAt ?? end
+        _shiftStart = State(initialValue: derivedStart)
+        _shiftEnd = State(initialValue: derivedEnd)
         shiftStore.seedFromLegacy(start: start, end: end)
     }
 
@@ -2705,6 +2727,9 @@ struct ContentView: View {
         .onReceive(cloudStore.$sessionRecords) { records in
             syncSessionSummaries(from: records)
         }
+        .onReceive(cloudStore.$shiftRecords) { _ in
+            refreshDutyState()
+        }
         .onReceive(dailyMemoStore.$memos) { memos in
             let dayKey = dailyMemoStore.dayKey(for: now)
             let latest = memos[dayKey] ?? ""
@@ -2714,6 +2739,8 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
+            cloudStore.refreshFromStore()
+            refreshDutyState()
             updateTodayDayKey()
             if isReadOnlyDevice {
                 if let state = syncStore.reloadCanonicalState() {
@@ -2727,6 +2754,9 @@ struct ContentView: View {
             } else {
                 syncStageState(now: now)
             }
+        }
+        .task {
+            refreshDutyState()
         }
         }
     }
@@ -2791,6 +2821,49 @@ struct ContentView: View {
             carryTomorrowActionIfNeeded(from: previousDayKey, to: newDayKey)
         }
         migrateActionSeedIfNeeded(for: newDayKey)
+    }
+
+    private func refreshDutyState() {
+        let records = Array(cloudStore.shiftRecords.values)
+        dutyFetchCount = records.count
+        let openShift = Self.latestOpenShiftRecord(from: records)
+        latestOpenShift = openShift
+        let onDuty = openShift != nil
+        lastKnownOnDuty = onDuty
+        dutyLoadState = .loaded
+        if syncStore.isOnDuty != onDuty {
+            syncStore.setOnDuty(onDuty)
+        }
+        refreshShiftWindow(openShift: openShift)
+    }
+
+    private static func latestOpenShiftRecord(from records: [CloudDataStore.ShiftRecordSnapshot]) -> CloudDataStore.ShiftRecordSnapshot? {
+        let candidates = records.compactMap { record -> CloudDataStore.ShiftRecordSnapshot? in
+            guard let _ = record.startAt, record.endAt == nil else { return nil }
+            return record
+        }
+        return candidates.max { lhs, rhs in
+            guard let leftStart = lhs.startAt, let rightStart = rhs.startAt else { return false }
+            return leftStart < rightStart
+        }
+    }
+
+    private func refreshShiftWindow(openShift: CloudDataStore.ShiftRecordSnapshot?) {
+        let todayKey = shiftRecordStore.dayKey(for: Date())
+        let todayRecord = cloudStore.shiftRecords[todayKey]
+        if let openShift {
+            shiftStart = openShift.startAt
+            shiftEnd = openShift.endAt
+        } else if let todayRecord {
+            shiftStart = todayRecord.startAt
+            shiftEnd = todayRecord.endAt
+        } else {
+            shiftStart = nil
+            shiftEnd = nil
+        }
+        let defaults = UserDefaults.standard
+        defaults.set(shiftStart, forKey: "pf_shift_start")
+        defaults.set(shiftEnd, forKey: "pf_shift_end")
     }
 
     private func carryTomorrowActionIfNeeded(from previousDayKey: String, to currentDayKey: String) {
@@ -3931,6 +4004,26 @@ struct ContentView: View {
                     .monospacedDigit()
             }
 
+#if DEBUG
+            VStack(alignment: .leading, spacing: 4) {
+                Text("dutyState")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("launchId: \(appLaunchId)")
+                Text("latestOpenShift.dayKey: \(latestOpenShift?.dayKey ?? "--")")
+                Text("latestOpenShift.startAt: \(latestOpenShift?.startAt.map(formatSessionTimeWithSeconds) ?? "--")")
+                Text("latestOpenShift.endAt: \(latestOpenShift?.endAt.map(formatSessionTimeWithSeconds) ?? "--")")
+                Text("fetchCount: \(dutyFetchCount)")
+                Text("lastError: \(cloudStore.lastCloudError ?? "none")")
+            }
+            .font(.caption2)
+            .textSelection(.enabled)
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+#endif
+
             if debugModeEnabled && !isReadOnlyDevice && !isDebugBuild {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Debug Mode")
@@ -4718,7 +4811,7 @@ struct ContentView: View {
         let dataQuality = dataQualityReport(for: filteredSessions, sessionLabel: sessionLabel)
         let shiftWindow: (start: Date, end: Date)? = {
             guard let start = shiftStart else { return nil }
-            let end = shiftEnd ?? (syncStore.isOnDuty ? now : nil)
+            let end = shiftEnd ?? (effectiveOnDuty ? now : nil)
             guard let end, end > start else { return nil }
             return (start, end)
         }()
@@ -5073,11 +5166,15 @@ struct ContentView: View {
         return "\(buildLabel) · \(versionText)"
     }
 
+    private var derivedOnDuty: Bool {
+        latestOpenShift != nil
+    }
+
     private var effectiveOnDuty: Bool {
-        if isReadOnlyDevice {
-            return stage != .idle
+        if dutyLoadState == .loading {
+            return lastKnownOnDuty
         }
-        return syncStore.isOnDuty
+        return derivedOnDuty
     }
 
     private var nextActionButton: some View {
@@ -5140,28 +5237,30 @@ struct ContentView: View {
 
     private func setDuty(_ onDuty: Bool) {
         guard !isReadOnlyDevice else { return }
-        syncStore.setOnDuty(onDuty)
-        let key = shiftRecordStore.dayKey(for: now)
-        var record = shiftRecordStore.record(for: key) ?? ShiftRecord()
+        let now = Date()
+        let revision = Int64(now.timeIntervalSince1970 * 1000)
         if onDuty {
-            if record.startAt == nil {
-                record.startAt = now
-            }
-            record.endAt = nil
-            shiftStart = record.startAt
-            shiftEnd = nil
+            guard latestOpenShift == nil else { return }
+            let key = shiftRecordStore.dayKey(for: now)
+            cloudStore.upsertShiftRecord(
+                dayKey: key,
+                startAt: now,
+                endAt: nil,
+                revision: revision,
+                updatedAt: now
+            )
         } else {
-            if record.startAt == nil {
-                record.startAt = shiftStart ?? now
-            }
-            record.endAt = now
-            shiftEnd = now
+            guard let openShift = Self.latestOpenShiftRecord(from: Array(cloudStore.shiftRecords.values)) else { return }
+            cloudStore.upsertShiftRecord(
+                dayKey: openShift.dayKey,
+                startAt: openShift.startAt,
+                endAt: now,
+                revision: revision,
+                updatedAt: now
+            )
             resetSession()
         }
-        shiftRecordStore.upsert(record, for: key)
-        let defaults = UserDefaults.standard
-        defaults.set(shiftStart, forKey: "pf_shift_start")
-        defaults.set(shiftEnd, forKey: "pf_shift_end")
+        refreshDutyState()
     }
 
     private func resetSession() {
@@ -5187,7 +5286,7 @@ struct ContentView: View {
 
     private func performStageAction(_ targetStage: Stage) {
         guard !isReadOnlyDevice else { return }
-        guard syncStore.isOnDuty else {
+        guard effectiveOnDuty else {
             activeAlert = .notOnDuty
             return
         }
