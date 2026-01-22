@@ -2654,6 +2654,7 @@ struct ContentView: View {
 
     private enum OpenAiReasoningEffort: String, CaseIterable {
         case none
+        case minimal
         case low
         case medium
         case high
@@ -2663,6 +2664,8 @@ struct ContentView: View {
             switch self {
             case .none:
                 return "none"
+            case .minimal:
+                return "minimal"
             case .low:
                 return "low"
             case .medium:
@@ -4492,6 +4495,14 @@ struct ContentView: View {
         }
     }
 
+    private func openAiSupportsReasoning(model: String) -> Bool {
+        model.lowercased().hasPrefix("gpt-5")
+    }
+
+    private func openAiUsesResponsesApi(model: String) -> Bool {
+        openAiSupportsReasoning(model: model)
+    }
+
     private func apiSelectionKey(_ selection: ApiSelection) -> String {
         let modelKey = selection.model.replacingOccurrences(of: "|", with: "_")
         return "\(selection.provider.rawValue)|\(modelKey)|\(selection.effort.rawValue)"
@@ -4816,24 +4827,41 @@ struct ContentView: View {
         var request: URLRequest
         switch provider {
         case .openai:
-            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
-            request.httpMethod = "POST"
-            request.timeoutInterval = 15
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            var body: [String: Any] = [
-                "model": model,
-                "temperature": 0.2,
-                "response_format": ["type": "json_object"],
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": prompt]
+            if openAiUsesResponsesApi(model: model) {
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 15
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                var body: [String: Any] = [
+                    "model": model,
+                    "temperature": 0.2,
+                    "input": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": prompt]
+                    ]
                 ]
-            ]
-            if model == OpenAiModelOption.gpt52Thinking.modelId || model == OpenAiModelOption.gpt52Pro.modelId {
-                body["reasoning"] = ["effort": selection.effort.rawValue]
+                if openAiSupportsReasoning(model: model) {
+                    body["reasoning"] = ["effort": selection.effort.rawValue]
+                }
+                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            } else {
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 15
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                let body: [String: Any] = [
+                    "model": model,
+                    "temperature": 0.2,
+                    "response_format": ["type": "json_object"],
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": prompt]
+                    ]
+                ]
+                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
             }
-            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         case .claude:
             request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
             request.httpMethod = "POST"
@@ -4879,10 +4907,32 @@ struct ContentView: View {
         }
         switch provider {
         case .openai:
-            guard let choices = json["choices"] as? [[String: Any]],
-                  let message = choices.first?["message"] as? [String: Any],
-                  let content = message["content"] as? String else { return nil }
-            return content
+            if let choices = json["choices"] as? [[String: Any]],
+               let message = choices.first?["message"] as? [String: Any],
+               let content = message["content"] as? String {
+                return content
+            }
+            if let outputText = json["output_text"] as? String {
+                return outputText
+            }
+            if let output = json["output"] as? [[String: Any]] {
+                for item in output {
+                    if let content = item["content"] as? [[String: Any]] {
+                        for part in content {
+                            if let text = part["text"] as? String {
+                                return text
+                            }
+                            if let text = part["output_text"] as? String {
+                                return text
+                            }
+                        }
+                    }
+                    if let text = item["output_text"] as? String {
+                        return text
+                    }
+                }
+            }
+            return nil
         case .claude:
             guard let content = json["content"] as? [[String: Any]],
                   let first = content.first,
