@@ -1,4 +1,5 @@
-## ACTIVE — TC-IOS-AI-MODEL-PICKER-V1
+## DONE — TC-IOS-AI-MODEL-PICKER-V1
+Status: DONE (merged in PR #190)
 Priority: P0
 Goal:
 - Settings 增加 provider+model+reasoning.effort 选择
