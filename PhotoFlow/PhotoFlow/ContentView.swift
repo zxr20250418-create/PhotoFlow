@@ -652,10 +652,30 @@ final class CloudDataStore: ObservableObject {
         let sourceDevice: String
     }
 
+    struct WeeklyReviewSnapshot: Equatable {
+        let weekKey: String
+        let incomeCents: Int64?
+        let shootingTotal: TimeInterval
+        let selectingTotal: TimeInterval
+        let rphShoot: Double?
+        let sessionCount: Int
+        let top3SessionIds: [String]
+        let bottom1SessionId: String?
+        let decisionTagTop2: [String]
+        let sopText: String?
+        let experimentAction: String?
+        let experimentTrigger: String?
+        let experimentSuccess: String?
+        let revision: Int64
+        let updatedAt: Date
+        let sourceDevice: String
+    }
+
     @Published private(set) var sessionRecords: [SessionRecord] = []
     @Published private(set) var shiftRecords: [String: ShiftRecordSnapshot] = [:]
     @Published private(set) var dayMemos: [String: DayMemoSnapshot] = [:]
     @Published private(set) var dailyReviews: [String: DailyReviewSnapshot] = [:]
+    @Published private(set) var weeklyReviews: [String: WeeklyReviewSnapshot] = [:]
     @Published private(set) var lastCloudSyncAt: Date?
     @Published private(set) var lastRevision: Int64 = 0
     @Published private(set) var pendingCount: Int = 0
@@ -676,6 +696,7 @@ final class CloudDataStore: ObservableObject {
         static let shift = "ShiftRecord"
         static let memo = "DayMemo"
         static let review = "DailyReview"
+        static let weeklyReview = "WeeklyReview"
     }
 
     static let cloudContainerIdentifier = "iCloud.com.zhengxinrong.PhotoFlow"
@@ -737,6 +758,25 @@ final class CloudDataStore: ObservableObject {
         static let sourceDevice = "sourceDevice"
     }
 
+    private enum WeeklyReviewField {
+        static let weekKey = "weekKey"
+        static let incomeCents = "incomeCents"
+        static let shootingTotal = "shootingTotal"
+        static let selectingTotal = "selectingTotal"
+        static let rphShoot = "rphShoot"
+        static let sessionCount = "sessionCount"
+        static let top3SessionIds = "top3SessionIds"
+        static let bottom1SessionId = "bottom1SessionId"
+        static let decisionTagTop2 = "decisionTagTop2"
+        static let sopText = "sopText"
+        static let experimentAction = "experimentAction"
+        static let experimentTrigger = "experimentTrigger"
+        static let experimentSuccess = "experimentSuccess"
+        static let revision = "revision"
+        static let updatedAt = "updatedAt"
+        static let sourceDevice = "sourceDevice"
+    }
+
     let localSourceDevice: String
     private let container: NSPersistentCloudKitContainer
     private let context: NSManagedObjectContext
@@ -783,6 +823,10 @@ final class CloudDataStore: ObservableObject {
 
     func dailyReview(for dayKey: String) -> DailyReviewSnapshot? {
         dailyReviews[dayKey]
+    }
+
+    func weeklyReview(for weekKey: String) -> WeeklyReviewSnapshot? {
+        weeklyReviews[weekKey]
     }
 
     func upsertSessionTiming(
@@ -1285,6 +1329,94 @@ final class CloudDataStore: ObservableObject {
         )
     }
 
+    func upsertWeeklyReview(
+        weekKey: String,
+        incomeCents: Int64?,
+        shootingTotal: TimeInterval,
+        selectingTotal: TimeInterval,
+        rphShoot: Double?,
+        sessionCount: Int,
+        top3SessionIds: [String],
+        bottom1SessionId: String?,
+        decisionTagTop2: [String],
+        sopText: String?,
+        experimentAction: String?,
+        experimentTrigger: String?,
+        experimentSuccess: String?,
+        revision: Int64? = nil,
+        updatedAt: Date = Date(),
+        sourceDevice: String? = nil
+    ) {
+        guard !weekKey.isEmpty else {
+            assertionFailure("weekKey is required")
+            return
+        }
+        let source = sourceDevice ?? localSourceDevice
+        let record = fetchWeeklyReviewManagedObject(weekKey: weekKey)
+        let existingRevision = int64Value(record, key: WeeklyReviewField.revision)
+        let existingSource = stringValue(record, key: WeeklyReviewField.sourceDevice, fallback: "unknown")
+        let nextRevisionValue = revision ?? nextRevision(existing: existingRevision)
+        guard shouldApply(
+            incomingRevision: nextRevisionValue,
+            incomingSource: source,
+            existingRevision: existingRevision,
+            existingSource: existingSource
+        ) else { return }
+        let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.weeklyReview, into: context)
+        target.setValue(weekKey, forKey: WeeklyReviewField.weekKey)
+        target.setValue(incomeCents, forKey: WeeklyReviewField.incomeCents)
+        target.setValue(shootingTotal, forKey: WeeklyReviewField.shootingTotal)
+        target.setValue(selectingTotal, forKey: WeeklyReviewField.selectingTotal)
+        target.setValue(rphShoot, forKey: WeeklyReviewField.rphShoot)
+        target.setValue(Int64(sessionCount), forKey: WeeklyReviewField.sessionCount)
+        target.setValue(encodeStringArray(top3SessionIds), forKey: WeeklyReviewField.top3SessionIds)
+        target.setValue(bottom1SessionId, forKey: WeeklyReviewField.bottom1SessionId)
+        target.setValue(encodeStringArray(decisionTagTop2), forKey: WeeklyReviewField.decisionTagTop2)
+        target.setValue(sopText, forKey: WeeklyReviewField.sopText)
+        target.setValue(experimentAction, forKey: WeeklyReviewField.experimentAction)
+        target.setValue(experimentTrigger, forKey: WeeklyReviewField.experimentTrigger)
+        target.setValue(experimentSuccess, forKey: WeeklyReviewField.experimentSuccess)
+        target.setValue(nextRevisionValue, forKey: WeeklyReviewField.revision)
+        target.setValue(updatedAt.timeIntervalSince1970, forKey: WeeklyReviewField.updatedAt)
+        target.setValue(source, forKey: WeeklyReviewField.sourceDevice)
+        saveContext()
+    }
+
+    func updateWeeklyReviewManual(
+        weekKey: String,
+        sopText: String?,
+        experimentAction: String?,
+        experimentTrigger: String?,
+        experimentSuccess: String?
+    ) {
+        guard let existing = weeklyReviews[weekKey] else { return }
+        let normalizedSop = normalizedDailyReviewText(sopText)
+        let normalizedAction = normalizedDailyReviewText(experimentAction)
+        let normalizedTrigger = normalizedDailyReviewText(experimentTrigger)
+        let normalizedSuccess = normalizedDailyReviewText(experimentSuccess)
+        if normalizedSop == existing.sopText,
+           normalizedAction == existing.experimentAction,
+           normalizedTrigger == existing.experimentTrigger,
+           normalizedSuccess == existing.experimentSuccess {
+            return
+        }
+        upsertWeeklyReview(
+            weekKey: weekKey,
+            incomeCents: existing.incomeCents,
+            shootingTotal: existing.shootingTotal,
+            selectingTotal: existing.selectingTotal,
+            rphShoot: existing.rphShoot,
+            sessionCount: existing.sessionCount,
+            top3SessionIds: existing.top3SessionIds,
+            bottom1SessionId: existing.bottom1SessionId,
+            decisionTagTop2: existing.decisionTagTop2,
+            sopText: normalizedSop,
+            experimentAction: normalizedAction,
+            experimentTrigger: normalizedTrigger,
+            experimentSuccess: normalizedSuccess
+        )
+    }
+
     private func saveContext() {
         guard context.hasChanges else { return }
         do {
@@ -1308,6 +1440,7 @@ final class CloudDataStore: ObservableObject {
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
         dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
         dailyReviews = Dictionary(uniqueKeysWithValues: fetchDailyReviews().map { ($0.dayKey, $0) })
+        weeklyReviews = Dictionary(uniqueKeysWithValues: fetchWeeklyReviews().map { ($0.weekKey, $0) })
         updateRevisionSnapshot()
         updateDeletedSnapshot()
     }
@@ -1333,7 +1466,8 @@ final class CloudDataStore: ObservableObject {
         let shiftMax = shiftRecords.values.map(\.revision).max() ?? 0
         let memoMax = dayMemos.values.map(\.revision).max() ?? 0
         let reviewMax = dailyReviews.values.map(\.revision).max() ?? 0
-        lastRevision = max(sessionMax, max(shiftMax, max(memoMax, reviewMax)))
+        let weeklyMax = weeklyReviews.values.map(\.revision).max() ?? 0
+        lastRevision = max(sessionMax, max(shiftMax, max(memoMax, max(reviewMax, weeklyMax))))
     }
 
     private func observeRemoteChanges() {
@@ -1735,6 +1869,42 @@ final class CloudDataStore: ObservableObject {
         }
     }
 
+    private func fetchWeeklyReviews() -> [WeeklyReviewSnapshot] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: EntityName.weeklyReview)
+        let objects = (try? context.fetch(request)) ?? []
+        let deduped = dedupeObjects(
+            objects,
+            idKey: WeeklyReviewField.weekKey,
+            revisionKey: WeeklyReviewField.revision,
+            sourceKey: WeeklyReviewField.sourceDevice
+        )
+        return deduped.values.compactMap { object in
+            guard let weekKey = object.value(forKey: WeeklyReviewField.weekKey) as? String,
+                  !weekKey.isEmpty else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: WeeklyReviewField.updatedAt)
+            let top3Value = object.value(forKey: WeeklyReviewField.top3SessionIds) as? String
+            let tagValue = object.value(forKey: WeeklyReviewField.decisionTagTop2) as? String
+            return WeeklyReviewSnapshot(
+                weekKey: weekKey,
+                incomeCents: object.value(forKey: WeeklyReviewField.incomeCents) as? Int64,
+                shootingTotal: doubleValue(object, key: WeeklyReviewField.shootingTotal),
+                selectingTotal: doubleValue(object, key: WeeklyReviewField.selectingTotal),
+                rphShoot: object.value(forKey: WeeklyReviewField.rphShoot) as? Double,
+                sessionCount: Int(int64Value(object, key: WeeklyReviewField.sessionCount)),
+                top3SessionIds: decodeStringArray(top3Value),
+                bottom1SessionId: object.value(forKey: WeeklyReviewField.bottom1SessionId) as? String,
+                decisionTagTop2: decodeStringArray(tagValue),
+                sopText: object.value(forKey: WeeklyReviewField.sopText) as? String,
+                experimentAction: object.value(forKey: WeeklyReviewField.experimentAction) as? String,
+                experimentTrigger: object.value(forKey: WeeklyReviewField.experimentTrigger) as? String,
+                experimentSuccess: object.value(forKey: WeeklyReviewField.experimentSuccess) as? String,
+                revision: int64Value(object, key: WeeklyReviewField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: WeeklyReviewField.sourceDevice, fallback: "unknown")
+            )
+        }
+    }
+
     private func fetchSessionManagedObject(sessionId: String) -> NSManagedObject? {
         fetchUniqueManagedObject(
             entityName: EntityName.session,
@@ -1772,6 +1942,16 @@ final class CloudDataStore: ObservableObject {
             idValue: dayKey,
             revisionKey: ReviewField.revision,
             sourceKey: ReviewField.sourceDevice
+        )
+    }
+
+    private func fetchWeeklyReviewManagedObject(weekKey: String) -> NSManagedObject? {
+        fetchUniqueManagedObject(
+            entityName: EntityName.weeklyReview,
+            idKey: WeeklyReviewField.weekKey,
+            idValue: weekKey,
+            revisionKey: WeeklyReviewField.revision,
+            sourceKey: WeeklyReviewField.sourceDevice
         )
     }
 
@@ -2112,7 +2292,29 @@ final class CloudDataStore: ObservableObject {
             attribute(ReviewField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
         ]
 
-        model.entities = [session, shift, memo, review]
+        let weekly = NSEntityDescription()
+        weekly.name = EntityName.weeklyReview
+        weekly.managedObjectClassName = NSStringFromClass(NSManagedObject.self)
+        weekly.properties = [
+            attribute(WeeklyReviewField.weekKey, type: .stringAttributeType, optional: true),
+            attribute(WeeklyReviewField.incomeCents, type: .integer64AttributeType, optional: true),
+            attribute(WeeklyReviewField.shootingTotal, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(WeeklyReviewField.selectingTotal, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(WeeklyReviewField.rphShoot, type: .doubleAttributeType, optional: true),
+            attribute(WeeklyReviewField.sessionCount, type: .integer64AttributeType, defaultValue: 0),
+            attribute(WeeklyReviewField.top3SessionIds, type: .stringAttributeType, optional: true),
+            attribute(WeeklyReviewField.bottom1SessionId, type: .stringAttributeType, optional: true),
+            attribute(WeeklyReviewField.decisionTagTop2, type: .stringAttributeType, optional: true),
+            attribute(WeeklyReviewField.sopText, type: .stringAttributeType, optional: true),
+            attribute(WeeklyReviewField.experimentAction, type: .stringAttributeType, optional: true),
+            attribute(WeeklyReviewField.experimentTrigger, type: .stringAttributeType, optional: true),
+            attribute(WeeklyReviewField.experimentSuccess, type: .stringAttributeType, optional: true),
+            attribute(WeeklyReviewField.revision, type: .integer64AttributeType, defaultValue: 0),
+            attribute(WeeklyReviewField.updatedAt, type: .doubleAttributeType, defaultValue: 0.0),
+            attribute(WeeklyReviewField.sourceDevice, type: .stringAttributeType, defaultValue: "unknown")
+        ]
+
+        model.entities = [session, shift, memo, review, weekly]
         return model
     }
 
@@ -2539,6 +2741,7 @@ struct ContentView: View {
     }
 
     private static let reviewLogPrefix = "PF_DECLOG_V1:"
+    private let decisionTagOptions = ["话术", "选片", "定价", "筛选", "节奏", "交付"]
 
     private struct SessionDecisionDrafts: Codable, Equatable {
         var facts: String?
@@ -2570,6 +2773,7 @@ struct ContentView: View {
     private struct SessionDecisionLogV1: Codable, Equatable {
         var facts: String?
         var decision: String?
+        var decisionTag: String?
         var rationale: String?
         var outcomeVerdict: String?
         var nextDecision: String?
@@ -2598,6 +2802,7 @@ struct ContentView: View {
     private struct SessionDecisionDraft: Equatable {
         var facts: String
         var decision: String
+        var decisionTag: String
         var rationale: String
         var outcomeVerdict: String
         var nextDecision: String
@@ -2605,6 +2810,7 @@ struct ContentView: View {
         static let empty = SessionDecisionDraft(
             facts: "",
             decision: "",
+            decisionTag: "",
             rationale: "",
             outcomeVerdict: "",
             nextDecision: ""
@@ -2856,6 +3062,13 @@ struct ContentView: View {
     @State private var dailyReviewExpandedSessions: Set<String> = []
     @State private var dailyReviewMonth = ContentView.monthStart(for: Date())
     @State private var dailyReviewSearchText = ""
+    @State private var isWeeklyReviewPresented = false
+    @State private var weeklyReviewSelection: String?
+    @State private var weeklyReviewSopDraft = ""
+    @State private var weeklyReviewExperimentActionDraft = ""
+    @State private var weeklyReviewExperimentTriggerDraft = ""
+    @State private var weeklyReviewExperimentSuccessDraft = ""
+    @State private var weeklyReviewDraftWeekKey: String?
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
     @State private var selectedIpadSessionId: String?
@@ -2985,6 +3198,18 @@ struct ContentView: View {
 
                         GroupBox("复盘（5槽位）") {
                             VStack(alignment: .leading, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("decisionTag")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Picker("decisionTag", selection: $reviewDraft.decisionTag) {
+                                        Text("未选择").tag("")
+                                        ForEach(decisionTagOptions, id: \.self) { option in
+                                            Text(option).tag(option)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                }
                                 reviewFieldWithRewrite(
                                     key: .facts,
                                     title: "Facts",
@@ -3121,6 +3346,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isDailyReviewPresented) {
             dailyReviewSheet
+        }
+        .sheet(isPresented: $isWeeklyReviewPresented) {
+            weeklyReviewSheet
         }
         .sheet(isPresented: $showIpadSyncDebug) {
             ipadSyncView
@@ -3436,6 +3664,7 @@ struct ContentView: View {
         return SessionDecisionLogV1(
             facts: normalizedReviewText(reviewDraft.facts),
             decision: normalizedReviewText(reviewDraft.decision),
+            decisionTag: normalizedReviewText(reviewDraft.decisionTag),
             rationale: normalizedReviewText(reviewDraft.rationale),
             outcomeVerdict: normalizedReviewText(reviewDraft.outcomeVerdict),
             nextDecision: normalizedReviewText(reviewDraft.nextDecision),
@@ -3452,6 +3681,7 @@ struct ContentView: View {
         let hasContent = [
             log.facts,
             log.decision,
+            log.decisionTag,
             log.rationale,
             log.outcomeVerdict,
             log.nextDecision,
@@ -3469,6 +3699,7 @@ struct ContentView: View {
             reviewDraft = SessionDecisionDraft(
                 facts: normalizedReviewText(log.facts) ?? "",
                 decision: normalizedReviewText(log.decision) ?? "",
+                decisionTag: normalizedReviewText(log.decisionTag) ?? "",
                 rationale: normalizedReviewText(log.rationale) ?? "",
                 outcomeVerdict: normalizedReviewText(log.outcomeVerdict) ?? "",
                 nextDecision: normalizedReviewText(log.nextDecision) ?? ""
@@ -3483,6 +3714,7 @@ struct ContentView: View {
             reviewDraft = SessionDecisionDraft(
                 facts: "",
                 decision: "",
+                decisionTag: "",
                 rationale: "",
                 outcomeVerdict: "",
                 nextDecision: ""
@@ -4368,6 +4600,11 @@ struct ContentView: View {
             GroupBox("复盘（5槽位）") {
                 VStack(alignment: .leading, spacing: 6) {
                     if let reviewLog {
+                        if let tag = reviewLog.decisionTag, !tag.isEmpty {
+                            Text("decisionTag：\(tag)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                         reviewFieldReadOnly(title: "Facts", value: reviewLog.facts)
                         reviewFieldReadOnly(title: "Decision", value: reviewLog.decision)
                         reviewFieldReadOnly(title: "Rationale", value: reviewLog.rationale)
@@ -6114,6 +6351,11 @@ struct ContentView: View {
                                 .font(.footnote)
                             }
                             if let reviewLog {
+                                if let tag = reviewLog.decisionTag, !tag.isEmpty {
+                                    Text("decisionTag：\(tag)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                                 reviewFieldReadOnly(title: "Facts", value: reviewLog.facts)
                                 reviewFieldReadOnly(title: "Decision", value: reviewLog.decision)
                                 reviewFieldReadOnly(title: "Rationale", value: reviewLog.rationale)
@@ -6694,6 +6936,9 @@ struct ContentView: View {
             return (avgText, shareText, weightedText)
         }()
         let reviewDigestText = dailyReviewDigestText()
+        let currentWeekKey = isoWeekKey(for: now)
+        let currentWeeklyReview = cloudStore.weeklyReview(for: currentWeekKey)
+        let showWeeklyGenerate = isSundayNight(now) && currentWeeklyReview == nil
         let orderById = Dictionary(uniqueKeysWithValues: effectiveSessionSummaries.enumerated().map { ($0.element.id, $0.offset + 1) })
         let sessionLabel: (SessionSummary) -> String = { summary in
             var parts: [String] = []
@@ -6912,6 +7157,36 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             } else {
                 Text("今日复盘已生成")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("本周复盘")
+                .font(.headline)
+            HStack(spacing: 12) {
+                if showWeeklyGenerate {
+                    Button("生成本周复盘") {
+                        generateWeeklyReview(for: currentWeekKey)
+                        weeklyReviewSelection = currentWeekKey
+                        isWeeklyReviewPresented = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+                if currentWeeklyReview != nil {
+                    Button("查看本周复盘") {
+                        weeklyReviewSelection = currentWeekKey
+                        isWeeklyReviewPresented = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Button("周复盘记录") {
+                    weeklyReviewSelection = nil
+                    isWeeklyReviewPresented = true
+                }
+                .buttonStyle(.bordered)
+            }
+            if !showWeeklyGenerate && currentWeeklyReview == nil {
+                Text("周日 20:30 后可生成")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -8457,6 +8732,237 @@ struct ContentView: View {
         .searchable(text: $dailyReviewSearchText, prompt: "搜索复盘")
     }
 
+    private var weeklyReviewSheet: some View {
+        NavigationStack {
+            if let selected = weeklyReviewSelection,
+               let review = cloudStore.weeklyReview(for: selected) {
+                weeklyReviewDetailView(review)
+                    .navigationTitle("周复盘")
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("列表") {
+                                weeklyReviewSelection = nil
+                            }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                isWeeklyReviewPresented = false
+                            }
+                        }
+                    }
+            } else {
+                weeklyReviewListView
+                    .navigationTitle("周复盘记录")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                isWeeklyReviewPresented = false
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
+    private var weeklyReviewListView: some View {
+        let reviews = weeklyReviewsSorted()
+        return List {
+            if reviews.isEmpty {
+                Text("暂无周复盘")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(reviews, id: \.weekKey) { review in
+                    Button {
+                        weeklyReviewSelection = review.weekKey
+                    } label: {
+                        weeklyReviewRow(review)
+                    }
+                }
+            }
+        }
+    }
+
+    private func weeklyReviewsSorted() -> [CloudDataStore.WeeklyReviewSnapshot] {
+        cloudStore.weeklyReviews.values.sorted { $0.weekKey > $1.weekKey }
+    }
+
+    private func weeklyReviewRow(_ review: CloudDataStore.WeeklyReviewSnapshot) -> some View {
+        let incomeText = review.incomeCents.map { formatAmount(cents: Int($0)) } ?? "--"
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(weeklyReviewDateText(review.weekKey))
+                .font(.headline)
+            Text("收入 \(incomeText) · \(review.sessionCount)单")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func weeklyReviewDetailView(_ review: CloudDataStore.WeeklyReviewSnapshot) -> some View {
+        let incomeText = review.incomeCents.map { formatAmount(cents: Int($0)) } ?? "--"
+        let weekSessions = weeklyReviewSessions(for: review.weekKey)
+        let orderById = Dictionary(uniqueKeysWithValues: weekSessions.enumerated().map { ($0.element.id, $0.offset + 1) })
+        let labelForId: (String) -> String = { id in
+            guard let summary = weekSessions.first(where: { $0.id == id }) else { return id }
+            var parts: [String] = []
+            if let order = orderById[id] {
+                parts.append("第\(order)单")
+            }
+            if let start = effectiveSessionStartTime(for: summary) {
+                parts.append(formatSessionTime(start))
+            }
+            return parts.isEmpty ? id : parts.joined(separator: " ")
+        }
+        let pickRateText = weeklyReviewPickRateText(for: weekSessions)
+        let rphText: String = {
+            guard let incomeCents = review.incomeCents else { return "--" }
+            let workSeconds = review.shootingTotal + review.selectingTotal
+            guard workSeconds > 0 else { return "--" }
+            let revenue = Double(incomeCents) / 100
+            let hours = workSeconds / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        let markdownText = weeklyReviewMarkdownText(
+            review: review,
+            weekSessions: weekSessions,
+            labelForId: labelForId
+        )
+        let markdownUrl = weeklyReviewMarkdownExportURL(
+            weekKey: review.weekKey,
+            text: markdownText
+        )
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(weeklyReviewDateText(review.weekKey))
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("收入 \(incomeText)")
+                    Text("单数 \(review.sessionCount)")
+                    Text("拍摄总时长 \(format(review.shootingTotal))")
+                    Text("选片总时长 \(format(review.selectingTotal))")
+                    Text("RPH(拍+选) \(rphText)")
+                    Text("选片占比 \(pickRateText)")
+                }
+                .font(.footnote)
+                .monospacedDigit()
+
+                Divider()
+
+                Text("Top3（收入）")
+                    .font(.headline)
+                if review.top3SessionIds.isEmpty {
+                    Text("暂无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(review.top3SessionIds, id: \.self) { sessionId in
+                        Text(labelForId(sessionId))
+                            .font(.footnote)
+                    }
+                }
+
+                Text("Bottom1（最低 RPH(拍+选)）")
+                    .font(.headline)
+                if let bottomId = review.bottom1SessionId {
+                    Text(labelForId(bottomId))
+                        .font(.footnote)
+                } else {
+                    Text("暂无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+
+                Text("decisionTag Top2")
+                    .font(.headline)
+                if review.decisionTagTop2.isEmpty {
+                    Text("暂无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(review.decisionTagTop2, id: \.self) { tag in
+                        Text(tag)
+                            .font(.footnote)
+                    }
+                }
+
+                Divider()
+
+                Text("本周 SOP")
+                    .font(.headline)
+                ZStack(alignment: .topLeading) {
+                    if weeklyReviewSopDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("本周 SOP 一句话…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 8)
+                            .padding(.leading, 6)
+                    }
+                    TextEditor(text: $weeklyReviewSopDraft)
+                        .font(.footnote)
+                        .frame(height: 72)
+                        .scrollContentBackground(.hidden)
+                }
+                .padding(8)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .onChange(of: weeklyReviewSopDraft) { _, newValue in
+                    updateWeeklyReviewDraft(for: review.weekKey, sop: newValue)
+                }
+
+                Text("下周唯一实验")
+                    .font(.headline)
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("动作", text: $weeklyReviewExperimentActionDraft)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("触发信号", text: $weeklyReviewExperimentTriggerDraft)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("成功判定", text: $weeklyReviewExperimentSuccessDraft)
+                        .textFieldStyle(.roundedBorder)
+                }
+                .onChange(of: weeklyReviewExperimentActionDraft) { _, _ in
+                    updateWeeklyReviewDraft(for: review.weekKey)
+                }
+                .onChange(of: weeklyReviewExperimentTriggerDraft) { _, _ in
+                    updateWeeklyReviewDraft(for: review.weekKey)
+                }
+                .onChange(of: weeklyReviewExperimentSuccessDraft) { _, _ in
+                    updateWeeklyReviewDraft(for: review.weekKey)
+                }
+
+                Divider()
+
+                Text("导出 Markdown")
+                    .font(.headline)
+                HStack(spacing: 12) {
+                    Button("复制 Markdown") {
+                        UIPasteboard.general.string = markdownText
+                    }
+                    .buttonStyle(.bordered)
+                    if let markdownUrl {
+                        ShareLink(item: markdownUrl) {
+                            Text("保存到 Files")
+                        }
+                    } else {
+                        Text("无法生成文件")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding()
+            .onAppear {
+                loadWeeklyReviewDraft(for: review.weekKey)
+            }
+            .onChange(of: review.weekKey) { _, newKey in
+                loadWeeklyReviewDraft(for: newKey)
+            }
+        }
+    }
+
     private var dailyReviewMonthPickerRow: some View {
         HStack(spacing: 12) {
             Button {
@@ -8782,6 +9288,13 @@ struct ContentView: View {
             return reviewDateText(date)
         }
         return dayKey
+    }
+
+    private func weeklyReviewDateText(_ weekKey: String) -> String {
+        guard let interval = isoWeekInterval(for: weekKey) else { return weekKey }
+        let startText = reviewDateText(interval.start)
+        let endText = reviewDateText(interval.end.addingTimeInterval(-1))
+        return "\(weekKey) (\(startText)–\(endText))"
     }
 
     private func dailyReviewNotesText(_ raw: String?) -> String {
@@ -9259,6 +9772,236 @@ struct ContentView: View {
 
     private func dailyReviewMonthText(_ date: Date) -> String {
         ContentView.reviewMonthFormatter.string(from: date)
+    }
+
+    private func isoWeekKey(for date: Date) -> String {
+        let calendar = Calendar(identifier: .iso8601)
+        let week = calendar.component(.weekOfYear, from: date)
+        let year = calendar.component(.yearForWeekOfYear, from: date)
+        return String(format: "%04d-W%02d", year, week)
+    }
+
+    private func isoWeekInterval(for weekKey: String) -> DateInterval? {
+        let parts = weekKey.components(separatedBy: "-W")
+        guard parts.count == 2,
+              let year = Int(parts[0]),
+              let week = Int(parts[1]) else { return nil }
+        var components = DateComponents()
+        components.yearForWeekOfYear = year
+        components.weekOfYear = week
+        components.weekday = 2
+        let calendar = Calendar(identifier: .iso8601)
+        guard let start = calendar.date(from: components) else { return nil }
+        guard let end = calendar.date(byAdding: .day, value: 7, to: start) else { return nil }
+        return DateInterval(start: start, end: end)
+    }
+
+    private func weeklyReviewSessions(for weekKey: String) -> [SessionSummary] {
+        guard let interval = isoWeekInterval(for: weekKey) else { return [] }
+        return effectiveSessionSummaries
+            .filter { summary in
+                guard let start = effectiveTimes(for: summary).shootingStart else { return false }
+                return interval.contains(start)
+            }
+            .sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+    }
+
+    private func weeklyReviewPickRateText(for sessions: [SessionSummary]) -> String {
+        var sumSelected = 0
+        var sumShot = 0
+        for summary in sessions {
+            let meta = metaStore.meta(for: summary.id)
+            if let shot = meta.shotCount, let selected = meta.selectedCount, selected <= shot {
+                sumSelected += selected
+                sumShot += shot
+            }
+        }
+        guard sumShot > 0 else { return "--" }
+        let rate = Int((Double(sumSelected) / Double(sumShot) * 100).rounded())
+        return "\(rate)%"
+    }
+
+    private func weeklyReviewMarkdownText(
+        review: CloudDataStore.WeeklyReviewSnapshot,
+        weekSessions: [SessionSummary],
+        labelForId: (String) -> String
+    ) -> String {
+        let incomeText = review.incomeCents.map { formatAmount(cents: Int($0)) } ?? "--"
+        let rphText: String = {
+            guard let incomeCents = review.incomeCents else { return "--" }
+            let workSeconds = review.shootingTotal + review.selectingTotal
+            guard workSeconds > 0 else { return "--" }
+            let revenue = Double(incomeCents) / 100
+            let hours = workSeconds / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        let pickRateText = weeklyReviewPickRateText(for: weekSessions)
+        var lines: [String] = []
+        lines.append("# \(weeklyReviewDateText(review.weekKey)) 周复盘")
+        lines.append("")
+        lines.append("## 本周指标")
+        lines.append("- 收入：\(incomeText)")
+        lines.append("- 单数：\(review.sessionCount)")
+        lines.append("- 拍摄总时长：\(format(review.shootingTotal))")
+        lines.append("- 选片总时长：\(format(review.selectingTotal))")
+        lines.append("- RPH(拍+选)：\(rphText)")
+        lines.append("- 选片占比：\(pickRateText)")
+        lines.append("")
+        lines.append("## Top3（收入）")
+        if review.top3SessionIds.isEmpty {
+            lines.append("- 暂无")
+        } else {
+            review.top3SessionIds.forEach { lines.append("- \(labelForId($0))") }
+        }
+        lines.append("")
+        lines.append("## Bottom1（最低 RPH(拍+选)）")
+        if let bottomId = review.bottom1SessionId {
+            lines.append("- \(labelForId(bottomId))")
+        } else {
+            lines.append("- 暂无")
+        }
+        lines.append("")
+        lines.append("## decisionTag Top2")
+        if review.decisionTagTop2.isEmpty {
+            lines.append("- 暂无")
+        } else {
+            review.decisionTagTop2.forEach { lines.append("- \($0)") }
+        }
+        lines.append("")
+        lines.append("## 本周 SOP")
+        let sop = (review.sopText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        lines.append(sop.isEmpty ? "- 暂无" : "- \(sop)")
+        lines.append("")
+        lines.append("## 下周唯一实验")
+        let action = (review.experimentAction ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let trigger = (review.experimentTrigger ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let success = (review.experimentSuccess ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        lines.append("- 动作：\(action.isEmpty ? "—" : action)")
+        lines.append("- 触发信号：\(trigger.isEmpty ? "—" : trigger)")
+        lines.append("- 成功判定：\(success.isEmpty ? "—" : success)")
+        return lines.joined(separator: "\n")
+    }
+
+    private func weeklyReviewMarkdownExportURL(weekKey: String, text: String) -> URL? {
+        let safeKey = weekKey.replacingOccurrences(of: "/", with: "-")
+        let fileName = "PhotoFlow-weekly-\(safeKey).md"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        guard let data = text.data(using: .utf8) else { return nil }
+        do {
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    private func loadWeeklyReviewDraft(for weekKey: String) {
+        guard let review = cloudStore.weeklyReview(for: weekKey) else { return }
+        weeklyReviewSopDraft = review.sopText ?? ""
+        weeklyReviewExperimentActionDraft = review.experimentAction ?? ""
+        weeklyReviewExperimentTriggerDraft = review.experimentTrigger ?? ""
+        weeklyReviewExperimentSuccessDraft = review.experimentSuccess ?? ""
+        weeklyReviewDraftWeekKey = weekKey
+    }
+
+    private func updateWeeklyReviewDraft(
+        for weekKey: String,
+        sop: String? = nil
+    ) {
+        let effectiveSop = sop ?? weeklyReviewSopDraft
+        cloudStore.updateWeeklyReviewManual(
+            weekKey: weekKey,
+            sopText: effectiveSop,
+            experimentAction: weeklyReviewExperimentActionDraft,
+            experimentTrigger: weeklyReviewExperimentTriggerDraft,
+            experimentSuccess: weeklyReviewExperimentSuccessDraft
+        )
+    }
+
+    private func generateWeeklyReview(for weekKey: String) {
+        let sessions = weeklyReviewSessions(for: weekKey)
+        let ordered = sessions.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        var shootingTotal: TimeInterval = 0
+        var selectingTotal: TimeInterval = 0
+        var incomeTotal = 0
+        var hasIncome = false
+        for summary in ordered {
+            let durations = sessionDurations(for: summary)
+            shootingTotal += durations.shooting
+            if let selecting = durations.selecting {
+                selectingTotal += selecting
+            }
+            if let amount = metaStore.meta(for: summary.id).amountCents {
+                incomeTotal += amount
+                hasIncome = true
+            }
+        }
+        let incomeCents: Int64? = hasIncome ? Int64(incomeTotal) : nil
+        let workSeconds = shootingTotal + selectingTotal
+        let rphShoot: Double? = {
+            guard let incomeCents, workSeconds > 0 else { return nil }
+            let revenue = Double(incomeCents) / 100
+            let hours = workSeconds / 3600
+            return revenue / hours
+        }()
+        let top3SessionIds: [String] = {
+            let items = ordered.compactMap { summary -> (String, Int)? in
+                guard let amount = metaStore.meta(for: summary.id).amountCents else { return nil }
+                return (summary.id, amount)
+            }
+            return items.sorted { $0.1 > $1.1 }.prefix(3).map(\.0)
+        }()
+        let bottom1: String? = {
+            let items = ordered.compactMap { summary -> (String, Double)? in
+                let meta = metaStore.meta(for: summary.id)
+                guard let amount = meta.amountCents else { return nil }
+                let durations = sessionDurations(for: summary)
+                let work = durations.shooting + (durations.selecting ?? 0)
+                guard work > 0 else { return nil }
+                let revenue = Double(amount) / 100
+                let hours = work / 3600
+                return (summary.id, revenue / hours)
+            }
+            return items.sorted(by: { $0.1 < $1.1 }).first?.0
+        }()
+        let decisionTagTop2: [String] = {
+            var counts: [String: Int] = [:]
+            for summary in ordered {
+                let note = metaStore.meta(for: summary.id).reviewNote
+                guard let tag = decodeDecisionLog(from: note)?.decisionTag,
+                      !tag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                counts[tag, default: 0] += 1
+            }
+            return counts
+                .sorted { $0.value > $1.value }
+                .prefix(2)
+                .map { "\($0.key) \($0.value)" }
+        }()
+        let existing = cloudStore.weeklyReview(for: weekKey)
+        cloudStore.upsertWeeklyReview(
+            weekKey: weekKey,
+            incomeCents: incomeCents,
+            shootingTotal: shootingTotal,
+            selectingTotal: selectingTotal,
+            rphShoot: rphShoot,
+            sessionCount: ordered.count,
+            top3SessionIds: top3SessionIds,
+            bottom1SessionId: bottom1,
+            decisionTagTop2: decisionTagTop2,
+            sopText: existing?.sopText,
+            experimentAction: existing?.experimentAction,
+            experimentTrigger: existing?.experimentTrigger,
+            experimentSuccess: existing?.experimentSuccess
+        )
+    }
+
+    private func isSundayNight(_ date: Date) -> Bool {
+        let calendar = Calendar.current
+        let weekday = calendar.component(.weekday, from: date)
+        guard weekday == 1 else { return false }
+        let comps = calendar.dateComponents([.hour, .minute], from: date)
+        let minutes = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+        return minutes >= (20 * 60 + 30)
     }
 
     private func shiftDailyReviewMonth(_ date: Date, by offset: Int) -> Date {
