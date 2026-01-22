@@ -1194,7 +1194,8 @@ B AI重写生成草稿，原文字段不变
 C 点击“接受”才写入字段并保存；重启后仍在
 D 草稿可清空；不影响原文
 E 不再出现 reasoning/temperature 400
-## ACTIVE — TC-IOS-DAILY-REVIEW-AGG-AI-MD-V1
+## DONE — TC-IOS-DAILY-REVIEW-AGG-AI-MD-V1
+Status: DONE (merged in PR #196)
 Priority: P0
 Goal:
 - 将“每单复盘 5 槽位”汇总到“每日复盘详情”
@@ -1235,3 +1236,45 @@ A DailyReview 详情页可看到当日每单 5 槽位汇总（折叠/展开正�
 B 一键生成 Markdown：可复制到剪贴板；可保存到 Files
 C AI 生成总结：手动触发，成功后可查看并可选“应用建议”；不强行覆盖用户手写
 D ios_safe PASS；0 配置改动
+
+## ACTIVE — TC-IOS-WEEKLY-REVIEW-SUN-V1
+Priority: P0
+Goal:
+- Stats 顶部周日晚上出现“生成本周复盘”
+- 引入 decisionTag（话术/选片/定价/筛选/节奏/交付）让周模式统计更准
+- 周复盘详情支持：周指标 + Top3/Bottom1 + tag 分布 + 本周 SOP + 下周唯一实验
+- 一键导出 Markdown（复制或保存到 Files）
+
+Scope:
+1) decisionTag
+- 在 5 槽位复盘编辑区新增 decisionTag 选择器（6 选 1）
+- 存储：写入 PF_DECLOG_V1 JSON（reviewNote 内 decisionTag 字段）
+- 展示：详情页显示 decisionTag
+
+2) 周日晚上入口（Stats 顶部）
+- 条件：周日且 >= 20:30
+- 若本周未生成 WeeklyReview，显示按钮“生成本周复盘”
+- 不自动生成，仅手动点击生成并保存
+
+3) WeeklyReview 生成与详情
+- weekKey：ISO 8601，周一为周开始（如 2026-W04）
+- 自动区：周收入/周单数/拍摄总时长/选片总时长/RPH(拍+选)/选片占比 + Top3(收入)/Bottom1(最低RPH)
+- 模式区：decisionTag 分布 Top2
+- 手填区：本周 SOP（1 条）+ 下周唯一实验（三行：动作/触发/成功判定）
+
+4) Markdown 导出
+- 复制到剪贴板
+- 分享保存到 Files（.md）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- 可选：.xcdatamodeld 仅在必须新增 WeeklyReview 实体时使用，字段 optional 或 default，且无 unique constraints
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A decisionTag 可选，保存后重启仍在
+B 周日晚上 Stats 顶部出现入口且可生成周复盘
+C 周复盘详情页自动区正确，手填区可保存
+D Markdown 可复制与保存到 Files
+E ios_safe PASS；0 配置改动
