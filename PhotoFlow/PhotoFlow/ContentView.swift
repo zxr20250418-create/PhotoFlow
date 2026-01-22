@@ -14,6 +14,53 @@ import UniformTypeIdentifiers
 import WatchConnectivity
 
 private let appLaunchId = UUID().uuidString
+private let dailyReviewNotePrefix = "PF_DAILY_V1:"
+
+struct DailyReviewAiCandidate: Codable, Equatable {
+    var action: String?
+    var trigger: String?
+    var success: String?
+}
+
+struct DailyReviewAiSummary: Codable, Equatable {
+    var lossSource: String?
+    var actionCandidates: [DailyReviewAiCandidate]?
+    var blindspot: String?
+    var provider: String?
+    var model: String?
+    var effort: String?
+    var updatedAt: Double?
+}
+
+private struct DailyReviewNoteV1: Codable, Equatable {
+    var notesAll: String?
+    var aiSummary: DailyReviewAiSummary?
+}
+
+private func normalizedDailyReviewText(_ text: String?) -> String? {
+    let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+private func decodeDailyReviewNote(_ raw: String?) -> DailyReviewNoteV1? {
+    guard let raw, raw.hasPrefix(dailyReviewNotePrefix) else { return nil }
+    let json = String(raw.dropFirst(dailyReviewNotePrefix.count))
+    guard let data = json.data(using: .utf8) else { return nil }
+    return try? JSONDecoder().decode(DailyReviewNoteV1.self, from: data)
+}
+
+private func encodeDailyReviewNote(notesAll: String?, aiSummary: DailyReviewAiSummary?) -> String? {
+    let normalizedNotes = normalizedDailyReviewText(notesAll)
+    if normalizedNotes == nil && aiSummary == nil {
+        return nil
+    }
+    let payload = DailyReviewNoteV1(notesAll: normalizedNotes, aiSummary: aiSummary)
+    guard let data = try? JSONEncoder().encode(payload),
+          let json = String(data: data, encoding: .utf8) else {
+        return normalizedNotes
+    }
+    return dailyReviewNotePrefix + json
+}
 
 @MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
@@ -598,6 +645,7 @@ final class CloudDataStore: ObservableObject {
         let bottom1SessionId: String?
         let bottom1Note: String?
         let notesAll: String?
+        let aiSummary: DailyReviewAiSummary?
         let tomorrowOneAction: String?
         let revision: Int64
         let updatedAt: Date
@@ -1665,6 +1713,8 @@ final class CloudDataStore: ObservableObject {
                   !dayKey.isEmpty else { return nil }
             let updatedAtSeconds = doubleValue(object, key: ReviewField.updatedAt)
             let top3Value = object.value(forKey: ReviewField.top3SessionIds) as? String
+            let rawNotes = object.value(forKey: ReviewField.notesAll) as? String
+            let parsedNotes = decodeDailyReviewNote(rawNotes)
             return DailyReviewSnapshot(
                 dayKey: dayKey,
                 incomeCents: object.value(forKey: ReviewField.incomeCents) as? Int64,
@@ -1675,7 +1725,8 @@ final class CloudDataStore: ObservableObject {
                 top3SessionIds: decodeStringArray(top3Value),
                 bottom1SessionId: object.value(forKey: ReviewField.bottom1SessionId) as? String,
                 bottom1Note: object.value(forKey: ReviewField.bottom1Note) as? String,
-                notesAll: object.value(forKey: ReviewField.notesAll) as? String,
+                notesAll: rawNotes,
+                aiSummary: parsedNotes?.aiSummary,
                 tomorrowOneAction: object.value(forKey: ReviewField.tomorrowOneAction) as? String,
                 revision: int64Value(object, key: ReviewField.revision),
                 updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
@@ -2477,6 +2528,16 @@ struct ContentView: View {
         var endedAt: Date?
     }
 
+    private struct DailyReviewAggregateItem: Identifiable {
+        let id: String
+        let label: String
+        let facts: String?
+        let decision: String?
+        let rationale: String?
+        let outcomeVerdict: String?
+        let nextDecision: String?
+    }
+
     private static let reviewLogPrefix = "PF_DECLOG_V1:"
 
     private struct SessionDecisionDrafts: Codable, Equatable {
@@ -2518,6 +2579,7 @@ struct ContentView: View {
         var draftMeta: SessionDraftMeta?
         var updatedAt: Double?
     }
+
 
     private struct SessionAIReview: Codable, Equatable {
         var score: Int?
@@ -2787,6 +2849,11 @@ struct ContentView: View {
     @State private var isDailyReviewPresented = false
     @State private var dailyReviewSelection: String?
     @State private var dailyReviewActionDraft = ""
+    @State private var dailyReviewAiSummary: DailyReviewAiSummary?
+    @State private var dailyReviewAiDayKey: String?
+    @State private var dailyReviewAiError: String?
+    @State private var isDailyReviewAiRunning = false
+    @State private var dailyReviewExpandedSessions: Set<String> = []
     @State private var dailyReviewMonth = ContentView.monthStart(for: Date())
     @State private var dailyReviewSearchText = ""
     @State private var isDataQualityPresented = false
@@ -8315,7 +8382,10 @@ struct ContentView: View {
             }
             return notes.isEmpty ? nil : notes.joined(separator: "\n")
         }()
-        let existingAction = cloudStore.dailyReview(for: targetDayKey)?.tomorrowOneAction
+        let existingReview = cloudStore.dailyReview(for: targetDayKey)
+        let existingAction = existingReview?.tomorrowOneAction
+        let existingPayload = decodeDailyReviewNote(existingReview?.notesAll)
+        let encodedNotes = encodeDailyReviewNote(notesAll: notesAll, aiSummary: existingPayload?.aiSummary)
         cloudStore.upsertDailyReview(
             dayKey: targetDayKey,
             incomeCents: incomeCents,
@@ -8326,7 +8396,7 @@ struct ContentView: View {
             top3SessionIds: top3SessionIds,
             bottom1SessionId: bottom1?.id,
             bottom1Note: bottom1?.note,
-            notesAll: notesAll,
+            notesAll: encodedNotes,
             tomorrowOneAction: existingAction
         )
     }
@@ -8427,7 +8497,7 @@ struct ContentView: View {
                 let haystack = [
                     review.dayKey,
                     review.tomorrowOneAction,
-                    review.notesAll,
+                    dailyReviewNotesText(review.notesAll),
                     review.bottom1Note
                 ]
                 .compactMap { $0 }
@@ -8476,7 +8546,21 @@ struct ContentView: View {
             }
             return parts.isEmpty ? id : parts.joined(separator: " ")
         }
-        let notesText = (review.notesAll ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let notesText = dailyReviewNotesText(review.notesAll).trimmingCharacters(in: .whitespacesAndNewlines)
+        let aggregateItems = dailyReviewAggregateItems(
+            dayKey: review.dayKey,
+            daySessions: daySessions,
+            labelForId: labelForId
+        )
+        let markdownText = dailyReviewMarkdownText(
+            review: review,
+            aggregateItems: aggregateItems,
+            labelForId: labelForId
+        )
+        let markdownUrl = dailyReviewMarkdownExportURL(
+            dayKey: review.dayKey,
+            text: markdownText
+        )
         return ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text(dailyReviewDateText(review.dayKey))
@@ -8538,6 +8622,122 @@ struct ContentView: View {
 
                 Divider()
 
+                Text("5 槽位汇总（今日）")
+                    .font(.headline)
+                if aggregateItems.isEmpty {
+                    Text("暂无复盘")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(aggregateItems) { item in
+                        let isExpanded = dailyReviewExpandedSessions.contains(item.id)
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(item.label)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button(isExpanded ? "收起" : "展开") {
+                                    if isExpanded {
+                                        dailyReviewExpandedSessions.remove(item.id)
+                                    } else {
+                                        dailyReviewExpandedSessions.insert(item.id)
+                                    }
+                                }
+                                .font(.caption2)
+                            }
+                            if isExpanded {
+                                if let value = item.facts, !value.isEmpty {
+                                    reviewFieldReadOnly(title: "Facts", value: value)
+                                }
+                                if let value = item.decision, !value.isEmpty {
+                                    reviewFieldReadOnly(title: "Decision", value: value)
+                                }
+                                if let value = item.rationale, !value.isEmpty {
+                                    reviewFieldReadOnly(title: "Rationale", value: value)
+                                }
+                                if let value = item.outcomeVerdict, !value.isEmpty {
+                                    reviewFieldReadOnly(title: "Outcome（人工）", value: value)
+                                }
+                                if let value = item.nextDecision, !value.isEmpty {
+                                    reviewFieldReadOnly(title: "NextDecision", value: value)
+                                }
+                            } else {
+                                let outcomeLine = item.outcomeVerdict?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                                let nextLine = item.nextDecision?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                                if !outcomeLine.isEmpty {
+                                    Text("Outcome：\(outcomeLine)")
+                                        .font(.caption)
+                                }
+                                if !nextLine.isEmpty {
+                                    Text("Next：\(nextLine)")
+                                        .font(.caption)
+                                }
+                                if outcomeLine.isEmpty && nextLine.isEmpty {
+                                    Text("暂无 Outcome/Next")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+
+                Divider()
+
+                Text("AI 今日总结")
+                    .font(.headline)
+                HStack(spacing: 12) {
+                    Button("AI 生成今日总结") {
+                        runDailyReviewAiSummary(
+                            review: review,
+                            aggregateItems: aggregateItems,
+                            labelForId: labelForId
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isDailyReviewAiRunning)
+                    if isDailyReviewAiRunning {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("生成中…")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let summary = dailyReviewAiSummary {
+                    dailyReviewAiSummaryView(summary, review: review)
+                } else if let error = dailyReviewAiError, !error.isEmpty {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
+
+                Divider()
+
+                Text("导出 Markdown")
+                    .font(.headline)
+                HStack(spacing: 12) {
+                    Button("复制 Markdown") {
+                        UIPasteboard.general.string = markdownText
+                    }
+                    .buttonStyle(.bordered)
+                    if let markdownUrl {
+                        ShareLink(item: markdownUrl) {
+                            Text("保存到 Files")
+                        }
+                    } else {
+                        Text("无法生成文件")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Divider()
+
                 Text("明天唯一动作")
                     .font(.headline)
                 ZStack(alignment: .topLeading) {
@@ -8556,17 +8756,24 @@ struct ContentView: View {
                 .padding(8)
                 .background(Color.secondary.opacity(0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .onAppear {
-                    loadDailyReviewActionDraft(for: review.dayKey)
-                }
-                .onChange(of: review.dayKey) { _, newKey in
-                    loadDailyReviewActionDraft(for: newKey)
-                }
                 .onChange(of: dailyReviewActionDraft) { _, newValue in
                     cloudStore.updateDailyReviewAction(dayKey: review.dayKey, action: newValue)
                 }
             }
             .padding()
+            .onAppear {
+                loadDailyReviewActionDraft(for: review.dayKey)
+                loadDailyReviewAiSummary(for: review.dayKey)
+                dailyReviewExpandedSessions = []
+            }
+            .onChange(of: review.dayKey) { _, newKey in
+                loadDailyReviewActionDraft(for: newKey)
+                loadDailyReviewAiSummary(for: newKey)
+                dailyReviewExpandedSessions = []
+            }
+            .onChange(of: review.aiSummary?.updatedAt ?? 0) { _, _ in
+                loadDailyReviewAiSummary(for: review.dayKey)
+            }
         }
     }
 
@@ -8575,6 +8782,479 @@ struct ContentView: View {
             return reviewDateText(date)
         }
         return dayKey
+    }
+
+    private func dailyReviewNotesText(_ raw: String?) -> String {
+        if let decoded = decodeDailyReviewNote(raw) {
+            return decoded.notesAll ?? ""
+        }
+        return raw ?? ""
+    }
+
+    private func dailyReviewAggregateItems(
+        dayKey: String,
+        daySessions: [SessionSummary],
+        labelForId: (String) -> String
+    ) -> [DailyReviewAggregateItem] {
+        daySessions.compactMap { summary in
+            let note = metaStore.meta(for: summary.id).reviewNote
+            guard let log = decodeDecisionLog(from: note) else { return nil }
+            let facts = normalizedReviewText(log.facts)
+            let decision = normalizedReviewText(log.decision)
+            let rationale = normalizedReviewText(log.rationale)
+            let outcome = normalizedReviewText(log.outcomeVerdict)
+            let next = normalizedReviewText(log.nextDecision)
+            let hasAny = [facts, decision, rationale, outcome, next].contains { value in
+                guard let value else { return false }
+                return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            guard hasAny else { return nil }
+            return DailyReviewAggregateItem(
+                id: summary.id,
+                label: labelForId(summary.id),
+                facts: facts,
+                decision: decision,
+                rationale: rationale,
+                outcomeVerdict: outcome,
+                nextDecision: next
+            )
+        }
+    }
+
+    private func dailyReviewMarkdownText(
+        review: CloudDataStore.DailyReviewSnapshot,
+        aggregateItems: [DailyReviewAggregateItem],
+        labelForId: (String) -> String
+    ) -> String {
+        let incomeText = review.incomeCents.map { formatAmount(cents: Int($0)) } ?? "--"
+        let rphText: String = {
+            guard let incomeCents = review.incomeCents else { return "--" }
+            let workSeconds = review.shootingTotal + review.selectingTotal
+            guard workSeconds > 0 else { return "--" }
+            let revenue = Double(incomeCents) / 100
+            let hours = workSeconds / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        let pickRate: String = {
+            let sessions = effectiveSessionSummaries.filter { dayKey(for: $0) == review.dayKey }
+            var sumSelected = 0
+            var sumShot = 0
+            for summary in sessions {
+                let meta = metaStore.meta(for: summary.id)
+                if let shot = meta.shotCount, let selected = meta.selectedCount, selected <= shot {
+                    sumSelected += selected
+                    sumShot += shot
+                }
+            }
+            guard sumShot > 0 else { return "--" }
+            let rate = Int((Double(sumSelected) / Double(sumShot) * 100).rounded())
+            return "\(rate)%"
+        }()
+        var lines: [String] = []
+        lines.append("# \(dailyReviewDateText(review.dayKey)) 复盘")
+        lines.append("")
+        lines.append("## 今日指标")
+        lines.append("- 收入：\(incomeText)")
+        lines.append("- 单数：\(review.sessionCount)")
+        lines.append("- 拍摄总时长：\(format(review.shootingTotal))")
+        lines.append("- 选片总时长：\(format(review.selectingTotal))")
+        lines.append("- RPH(拍+选)：\(rphText)")
+        lines.append("- 选片率：\(pickRate)")
+        lines.append("")
+        lines.append("## Top3（收入）")
+        if review.top3SessionIds.isEmpty {
+            lines.append("- 暂无")
+        } else {
+            review.top3SessionIds.forEach { sessionId in
+                lines.append("- \(labelForId(sessionId))")
+            }
+        }
+        lines.append("")
+        lines.append("## Bottom1（最低 RPH(拍+选)）")
+        if let bottomId = review.bottom1SessionId {
+            lines.append("- \(labelForId(bottomId))")
+            if let note = review.bottom1Note, !note.isEmpty {
+                lines.append("  - 备注：\(note)")
+            }
+        } else {
+            lines.append("- 暂无")
+        }
+        lines.append("")
+        lines.append("## 明天唯一动作")
+        let actionText = (review.tomorrowOneAction ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        lines.append(actionText.isEmpty ? "- 暂无" : "- \(actionText)")
+        lines.append("")
+        lines.append("## 5 槽位汇总（今日）")
+        if aggregateItems.isEmpty {
+            lines.append("- 暂无")
+        } else {
+            for item in aggregateItems {
+                lines.append("### \(item.label)")
+                if let value = item.facts, !value.isEmpty {
+                    lines.append("- Facts：\(value)")
+                }
+                if let value = item.decision, !value.isEmpty {
+                    lines.append("- Decision：\(value)")
+                }
+                if let value = item.rationale, !value.isEmpty {
+                    lines.append("- Rationale：\(value)")
+                }
+                if let value = item.outcomeVerdict, !value.isEmpty {
+                    lines.append("- Outcome：\(value)")
+                }
+                if let value = item.nextDecision, !value.isEmpty {
+                    lines.append("- NextDecision：\(value)")
+                }
+                lines.append("")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func dailyReviewMarkdownExportURL(dayKey: String, text: String) -> URL? {
+        let safeDayKey = dayKey.replacingOccurrences(of: "/", with: "-")
+        let fileName = "PhotoFlow-review-\(safeDayKey).md"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        guard let data = text.data(using: .utf8) else { return nil }
+        do {
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    private func loadDailyReviewAiSummary(for dayKey: String) {
+        guard dailyReviewAiDayKey != dayKey else { return }
+        dailyReviewAiSummary = cloudStore.dailyReview(for: dayKey)?.aiSummary
+        dailyReviewAiDayKey = dayKey
+        dailyReviewAiError = nil
+    }
+
+    private func persistDailyReviewAiSummary(
+        dayKey: String,
+        summary: DailyReviewAiSummary?
+    ) {
+        guard let existing = cloudStore.dailyReview(for: dayKey) else { return }
+        let existingPayload = decodeDailyReviewNote(existing.notesAll)
+        let notesText = existingPayload?.notesAll ?? existing.notesAll
+        let encodedNotes = encodeDailyReviewNote(notesAll: notesText, aiSummary: summary)
+        cloudStore.upsertDailyReview(
+            dayKey: dayKey,
+            incomeCents: existing.incomeCents,
+            shootingTotal: existing.shootingTotal,
+            selectingTotal: existing.selectingTotal,
+            rphShoot: existing.rphShoot,
+            sessionCount: existing.sessionCount,
+            top3SessionIds: existing.top3SessionIds,
+            bottom1SessionId: existing.bottom1SessionId,
+            bottom1Note: existing.bottom1Note,
+            notesAll: encodedNotes,
+            tomorrowOneAction: existing.tomorrowOneAction
+        )
+    }
+
+    private func dailyReviewAiPrompt(
+        review: CloudDataStore.DailyReviewSnapshot,
+        aggregateItems: [DailyReviewAggregateItem],
+        labelForId: (String) -> String
+    ) -> String {
+        let incomeText = review.incomeCents.map { formatAmount(cents: Int($0)) } ?? "--"
+        let workSeconds = review.shootingTotal + review.selectingTotal
+        let rphText: String = {
+            guard let incomeCents = review.incomeCents, workSeconds > 0 else { return "--" }
+            let revenue = Double(incomeCents) / 100
+            let hours = workSeconds / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        let summaryLines: [String] = aggregateItems.compactMap { item in
+            let outcome = item.outcomeVerdict?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let next = item.nextDecision?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !outcome.isEmpty || !next.isEmpty else { return nil }
+            var parts: [String] = []
+            if !outcome.isEmpty { parts.append("Outcome=\(outcome)") }
+            if !next.isEmpty { parts.append("Next=\(next)") }
+            return "- \(item.label): " + parts.joined(separator: "；")
+        }
+        let top3Lines = review.top3SessionIds.isEmpty
+            ? "暂无"
+            : review.top3SessionIds.map(labelForId).joined(separator: " / ")
+        let bottom1Line = review.bottom1SessionId.map(labelForId) ?? "暂无"
+        let summaryText = summaryLines.isEmpty ? "暂无" : summaryLines.joined(separator: "\n")
+        return """
+        你是每日复盘助手，请基于以下数据输出 JSON：
+
+        指标：
+        收入: \(incomeText)
+        单数: \(review.sessionCount)
+        拍摄总时长: \(format(review.shootingTotal))
+        选片总时长: \(format(review.selectingTotal))
+        RPH(拍+选): \(rphText)
+
+        Top3(收入): \(top3Lines)
+        Bottom1(最低RPH): \(bottom1Line)
+
+        5 槽位汇总（只含 Outcome/Next）：
+        \(summaryText)
+
+        JSON schema：
+        {
+          "lossSource": "最大损耗源一句话",
+          "tomorrowCandidates": [
+            { "action": "明天唯一动作", "trigger": "触发信号", "success": "成功判定" },
+            { "action": "...", "trigger": "...", "success": "..." },
+            { "action": "...", "trigger": "...", "success": "..." }
+          ],
+          "blindspot": "盲点提示一句"
+        }
+        只返回 JSON，不要输出其它文字。
+        """
+    }
+
+    private func runDailyReviewAiSummary(
+        review: CloudDataStore.DailyReviewSnapshot,
+        aggregateItems: [DailyReviewAggregateItem],
+        labelForId: (String) -> String
+    ) {
+        guard !isDailyReviewAiRunning else { return }
+        let provider = selectedAiProvider
+        let apiKey = apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else {
+            dailyReviewAiError = "缺少 API Key"
+            activeAlert = .validation("缺少 API Key")
+            return
+        }
+        let selection = apiSelection(for: provider)
+        guard apiLastTestAt(for: selection) != nil, apiLastTestOk(for: selection) else {
+            let label = aiSelectionLabel(selection)
+            dailyReviewAiError = "请先在设置页测试连接（\(label)）"
+            activeAlert = .validation("请先在设置页测试连接")
+            return
+        }
+        let prompt = dailyReviewAiPrompt(
+            review: review,
+            aggregateItems: aggregateItems,
+            labelForId: labelForId
+        )
+        dailyReviewAiError = nil
+        isDailyReviewAiRunning = true
+        Task {
+            let result = await performDailyReviewAiSummary(
+                selection: selection,
+                apiKey: apiKey,
+                prompt: prompt
+            )
+            await MainActor.run {
+                isDailyReviewAiRunning = false
+                switch result {
+                case .success(let summary):
+                    dailyReviewAiSummary = summary
+                    dailyReviewAiDayKey = review.dayKey
+                    persistDailyReviewAiSummary(dayKey: review.dayKey, summary: summary)
+                case .failure(let error):
+                    dailyReviewAiError = error.message
+                }
+            }
+        }
+    }
+
+    private func performDailyReviewAiSummary(
+        selection: ApiSelection,
+        apiKey: String,
+        prompt: String
+    ) async -> Result<DailyReviewAiSummary, AiReviewError> {
+        let systemPrompt = "你是每日复盘总结助手，输出严格 JSON。"
+        let provider = selection.provider
+        let model = selection.model
+        var request: URLRequest
+        switch provider {
+        case .openai:
+            if openAiUsesResponsesApi(model: model) {
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 20
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                let sendReasoning = openAiSupportsReasoning(model: model) && selection.effort != .none
+                let sendTemperature = openAiSupportsTemperature(model: model, effort: selection.effort)
+                var body: [String: Any] = [
+                    "model": model,
+                    "input": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": prompt]
+                    ]
+                ]
+                if sendReasoning {
+                    body["reasoning"] = ["effort": selection.effort.rawValue]
+                }
+                if sendTemperature {
+                    body["temperature"] = 0.2
+                }
+                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            } else {
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 20
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                let sendTemperature = openAiSupportsTemperature(model: model, effort: selection.effort)
+                var body: [String: Any] = [
+                    "model": model,
+                    "response_format": ["type": "json_object"],
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": prompt]
+                    ]
+                ]
+                if sendTemperature {
+                    body["temperature"] = 0.2
+                }
+                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            }
+        case .claude:
+            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 20
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let body: [String: Any] = [
+                "model": model,
+                "max_tokens": 800,
+                "temperature": 0.2,
+                "system": systemPrompt,
+                "messages": [
+                    ["role": "user", "content": prompt]
+                ]
+            ]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(AiReviewError(message: "无效响应"))
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8)
+                return .failure(AiReviewError(message: apiErrorSummary(statusCode: http.statusCode, body: body)))
+            }
+            guard let contentText = extractAiContent(from: data, provider: provider) else {
+                return .failure(AiReviewError(message: "无法解析返回内容"))
+            }
+            guard let parsed = parseDailyReviewAiSummary(
+                from: contentText,
+                provider: provider,
+                model: model,
+                effort: selection.effort
+            ) else {
+                return .failure(AiReviewError(message: "输出格式不符合 JSON 结构"))
+            }
+            return .success(parsed)
+        } catch {
+            return .failure(AiReviewError(message: error.localizedDescription))
+        }
+    }
+
+    private func parseDailyReviewAiSummary(
+        from text: String,
+        provider: ApiProvider,
+        model: String,
+        effort: OpenAiReasoningEffort
+    ) -> DailyReviewAiSummary? {
+        guard let jsonText = extractFirstJsonObject(from: text),
+              let data = jsonText.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let lossSource = normalizedReviewText(raw["lossSource"] as? String)
+        let blindspot = normalizedReviewText(raw["blindspot"] as? String)
+        let candidatesRaw = raw["tomorrowCandidates"] ?? raw["actionCandidates"] ?? raw["candidates"]
+        var candidates: [DailyReviewAiCandidate] = []
+        if let array = candidatesRaw as? [[String: Any]] {
+            for entry in array {
+                let action = normalizedReviewText(entry["action"] as? String)
+                let trigger = normalizedReviewText(entry["trigger"] as? String)
+                let success = normalizedReviewText(entry["success"] as? String)
+                if action != nil || trigger != nil || success != nil {
+                    candidates.append(DailyReviewAiCandidate(action: action, trigger: trigger, success: success))
+                }
+            }
+        }
+        if candidates.count > 3 {
+            candidates = Array(candidates.prefix(3))
+        }
+        return DailyReviewAiSummary(
+            lossSource: lossSource,
+            actionCandidates: candidates.isEmpty ? nil : candidates,
+            blindspot: blindspot,
+            provider: provider.rawValue,
+            model: model,
+            effort: effort.rawValue,
+            updatedAt: Date().timeIntervalSince1970
+        )
+    }
+
+    private func dailyReviewAiSummaryView(
+        _ summary: DailyReviewAiSummary,
+        review: CloudDataStore.DailyReviewSnapshot
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let loss = summary.lossSource, !loss.isEmpty {
+                Text("最大损耗源：\(loss)")
+                    .font(.footnote)
+            }
+            if let blindspot = summary.blindspot, !blindspot.isEmpty {
+                Text("盲点提示：\(blindspot)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if let candidates = summary.actionCandidates, !candidates.isEmpty {
+                Text("明天唯一动作候选")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(Array(candidates.enumerated()), id: \.offset) { index, candidate in
+                    VStack(alignment: .leading, spacing: 4) {
+                        let title = candidate.action?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        Text("\(index + 1). \(title.isEmpty ? "（空）" : title)")
+                            .font(.footnote)
+                        if let trigger = candidate.trigger, !trigger.isEmpty {
+                            Text("触发：\(trigger)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let success = candidate.success, !success.isEmpty {
+                            Text("成功：\(success)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack {
+                            Spacer()
+                            Button("应用此建议") {
+                                applyDailyReviewAiCandidate(candidate, review: review)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled((candidate.action ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+            }
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func applyDailyReviewAiCandidate(
+        _ candidate: DailyReviewAiCandidate,
+        review: CloudDataStore.DailyReviewSnapshot
+    ) {
+        let action = (candidate.action ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !action.isEmpty else { return }
+        dailyReviewActionDraft = action
+        cloudStore.updateDailyReviewAction(dayKey: review.dayKey, action: action)
     }
 
     private func dailyReviewMonthText(_ date: Date) -> String {
