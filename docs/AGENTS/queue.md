@@ -1194,3 +1194,44 @@ B AI重写生成草稿，原文字段不变
 C 点击“接受”才写入字段并保存；重启后仍在
 D 草稿可清空；不影响原文
 E 不再出现 reasoning/temperature 400
+## ACTIVE — TC-IOS-DAILY-REVIEW-AGG-AI-MD-V1
+Priority: P0
+Goal:
+- 将“每单复盘 5 槽位”汇总到“每日复盘详情”
+- 支持 AI 生成每日复盘总结（可选，手动触发）
+- 一键生成 Markdown：今日指标 + Top3 + Bottom1 + 明天唯一动作 + 5 槽位汇总，复制到剪贴板或保存到 Files
+
+Scope:
+1) DailyReview 详情页新增区块「5 槽位汇总（今日）」
+- 数据来源：当天所有 SessionRecord 的 PF_DECLOG_V1（Facts/Decision/Rationale/OutcomeVerdict/NextDecision）
+- 展示形式：列表（每单一块），默认折叠（仅显示 OutcomeVerdict + NextDecision），点击展开显示 5 槽位全文
+- 缺失字段不显示，不要渲染空大块
+
+2) AI 每日复盘总结（按钮，手动触发）
+- 按钮：AI 生成今日总结
+- 输入：今日指标快照 + Top3/Bottom1 + 5 槽位汇总（可只取 NextDecision/OutcomeVerdict 以控长）
+- 输出：最大损耗源一句话 + 明天唯一动作候选 3 条（含触发信号/成功判定）+ 盲点提示一句
+- 存储：结果落盘（不覆盖用户手写 tomorrowOneAction，除非用户点“应用此建议”）
+
+3) Markdown 导出（按钮）
+- 按钮：复制 Markdown / 保存到 Files
+- Markdown 内容包含：
+  - 日期
+  - 今日指标（收入/单数/拍摄总时长/选片总时长/RPH(拍+选)/选片率）
+  - Top3（收入）
+  - Bottom1（最低 RPH(拍+选)）
+  - 明天唯一动作
+  - 5 槽位汇总（每单：Facts/Decision/Rationale/OutcomeVerdict/NextDecision）
+- “复制”写入剪贴板；“保存到 Files”用 ShareLink/系统分享导出 .md 文件
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- 可选：.xcdatamodeld 仅在必须新增持久化字段时使用；所有新字段必须 optional 或有 default；不得使用 unique constraints
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A DailyReview 详情页可看到当日每单 5 槽位汇总（折叠/展开正常）
+B 一键生成 Markdown：可复制到剪贴板；可保存到 Files
+C AI 生成总结：手动触发，成功后可查看并可选“应用建议”；不强行覆盖用户手写
+D ios_safe PASS；0 配置改动
