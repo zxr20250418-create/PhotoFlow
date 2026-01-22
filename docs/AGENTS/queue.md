@@ -1157,7 +1157,8 @@ StopCondition:
 - CI green
 - exec.md 更新（若有）
 - STOP
-## ACTIVE — TC-IOS-AI-REWRITE-FAIL-V1
+## DONE — TC-IOS-AI-REWRITE-FAIL-V1
+Status: DONE (merged in PR #193)
 Priority: P0
 Goal:
 - 对每个 FAIL 段落提供“一键重写”
