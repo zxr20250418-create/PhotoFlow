@@ -2615,6 +2615,72 @@ struct ContentView: View {
         }
     }
 
+    private enum OpenAiModelOption: String, CaseIterable {
+        case gpt52Thinking
+        case gpt52Instant
+        case gpt52Pro
+
+        var title: String {
+            switch self {
+            case .gpt52Thinking:
+                return "GPT-5.2 Thinking"
+            case .gpt52Instant:
+                return "GPT-5.2 Instant"
+            case .gpt52Pro:
+                return "GPT-5.2 Pro"
+            }
+        }
+
+        var modelId: String {
+            switch self {
+            case .gpt52Thinking:
+                return "gpt-5.2"
+            case .gpt52Instant:
+                return "gpt-5.2-chat-latest"
+            case .gpt52Pro:
+                return "gpt-5.2-pro"
+            }
+        }
+
+        var supportsEffort: Bool {
+            switch self {
+            case .gpt52Thinking, .gpt52Pro:
+                return true
+            case .gpt52Instant:
+                return false
+            }
+        }
+    }
+
+    private enum OpenAiReasoningEffort: String, CaseIterable {
+        case none
+        case low
+        case medium
+        case high
+        case xhigh
+
+        var title: String {
+            switch self {
+            case .none:
+                return "none"
+            case .low:
+                return "low"
+            case .medium:
+                return "medium"
+            case .high:
+                return "high"
+            case .xhigh:
+                return "xhigh"
+            }
+        }
+    }
+
+    private struct ApiSelection: Hashable {
+        let provider: ApiProvider
+        let model: String
+        let effort: OpenAiReasoningEffort
+    }
+
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
@@ -2694,12 +2760,9 @@ struct ContentView: View {
     @State private var ipadMemoLastSource = ""
     @AppStorage("pf_openai_api_key") private var openaiApiKey = ""
     @AppStorage("pf_claude_api_key") private var claudeApiKey = ""
-    @AppStorage("pf_api_openai_last_test_ok") private var openaiLastTestOk = false
-    @AppStorage("pf_api_claude_last_test_ok") private var claudeLastTestOk = false
-    @AppStorage("pf_api_openai_last_test_at") private var openaiLastTestAt: Double = 0
-    @AppStorage("pf_api_claude_last_test_at") private var claudeLastTestAt: Double = 0
-    @AppStorage("pf_api_openai_last_error") private var openaiLastError = ""
-    @AppStorage("pf_api_claude_last_error") private var claudeLastError = ""
+    @AppStorage("pf_ai_provider_selected") private var selectedAiProviderRaw = ApiProvider.openai.rawValue
+    @AppStorage("pf_ai_openai_model_selected") private var selectedOpenAiModelRaw = OpenAiModelOption.gpt52Thinking.rawValue
+    @AppStorage("pf_ai_openai_effort_selected") private var selectedOpenAiEffortRaw = OpenAiReasoningEffort.none.rawValue
     @AppStorage("pf_debug_mode_enabled") private var debugModeEnabled = false
     @State private var debugTapCount = 0
     @State private var lastDebugTapAt: Date?
@@ -2713,7 +2776,7 @@ struct ContentView: View {
     @State private var pendingImportBundle: ExportBundle?
     @State private var importStatus: String?
     @State private var importError: String?
-    @State private var apiTestingProviders: Set<ApiProvider> = []
+    @State private var apiTestingSelections: Set<String> = []
 #if DEBUG
     @State private var showDebugPanel = false
     @State private var showHomeDebugSheet = false
@@ -3678,6 +3741,17 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("API 连接")
                 .font(.headline)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("AI Provider")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("AI Provider", selection: selectedAiProviderBinding) {
+                    ForEach(ApiProvider.allCases, id: \.self) { provider in
+                        Text(provider.title).tag(provider)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
             ForEach(ApiProvider.allCases, id: \.self) { provider in
                 apiConnectivityRow(provider)
             }
@@ -3685,18 +3759,48 @@ struct ContentView: View {
     }
 
     private func apiConnectivityRow(_ provider: ApiProvider) -> some View {
-        let lastTestText = apiLastTestAt(for: provider).map(formatApiTestTime) ?? "—"
-        let lastErrorText = apiLastError(for: provider)
-        let isTesting = apiTestingProviders.contains(provider)
+        let selection = apiSelection(for: provider)
+        let lastTestText = apiLastTestAt(for: selection).map(formatApiTestTime) ?? "—"
+        let lastErrorText = apiLastError(for: selection)
+        let isTesting = apiTestingSelections.contains(apiSelectionKey(selection))
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(provider.title)
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Spacer()
-                Text(apiBadgeText(for: provider))
+                Text(apiBadgeText(for: selection))
                     .font(.caption)
-                    .foregroundStyle(apiBadgeColor(for: provider))
+                    .foregroundStyle(apiBadgeColor(for: selection))
+            }
+            if provider == .openai {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Model")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Picker("Model", selection: openAiModelBinding) {
+                        ForEach(OpenAiModelOption.allCases, id: \.self) { option in
+                            Text(option.title).tag(option)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    if selectedOpenAiModel.supportsEffort {
+                        Text("Reasoning effort")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Picker("Reasoning effort", selection: openAiEffortBinding) {
+                            ForEach(OpenAiReasoningEffort.allCases, id: \.self) { effort in
+                                Text(effort.title).tag(effort)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    } else {
+                        Text("Reasoning effort: none")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             TextField("\(provider.title) API Key", text: apiKeyBinding(for: provider))
                 .textInputAutocapitalization(.never)
@@ -3704,7 +3808,7 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
             HStack(spacing: 8) {
                 Button("测试连接") {
-                    runApiConnectivityTest(provider, triggeredByAuto: false)
+                    runApiConnectivityTest(selection, triggeredByAuto: false)
                 }
                 .buttonStyle(.bordered)
                 .disabled(isTesting)
@@ -4333,6 +4437,70 @@ struct ContentView: View {
         return String(first)
     }
 
+    private var selectedAiProvider: ApiProvider {
+        ApiProvider(rawValue: selectedAiProviderRaw) ?? .openai
+    }
+
+    private var selectedOpenAiModel: OpenAiModelOption {
+        OpenAiModelOption(rawValue: selectedOpenAiModelRaw) ?? .gpt52Thinking
+    }
+
+    private var selectedOpenAiEffort: OpenAiReasoningEffort {
+        OpenAiReasoningEffort(rawValue: selectedOpenAiEffortRaw) ?? .none
+    }
+
+    private var effectiveOpenAiEffort: OpenAiReasoningEffort {
+        selectedOpenAiModel.supportsEffort ? selectedOpenAiEffort : .none
+    }
+
+    private var selectedAiProviderBinding: Binding<ApiProvider> {
+        Binding(
+            get: { selectedAiProvider },
+            set: { selectedAiProviderRaw = $0.rawValue }
+        )
+    }
+
+    private var openAiModelBinding: Binding<OpenAiModelOption> {
+        Binding(
+            get: { selectedOpenAiModel },
+            set: { newValue in
+                selectedOpenAiModelRaw = newValue.rawValue
+                if !newValue.supportsEffort {
+                    selectedOpenAiEffortRaw = OpenAiReasoningEffort.none.rawValue
+                }
+            }
+        )
+    }
+
+    private var openAiEffortBinding: Binding<OpenAiReasoningEffort> {
+        Binding(
+            get: { selectedOpenAiEffort },
+            set: { selectedOpenAiEffortRaw = $0.rawValue }
+        )
+    }
+
+    private var claudeModelId: String {
+        "claude-3-5-sonnet-20240620"
+    }
+
+    private func apiSelection(for provider: ApiProvider) -> ApiSelection {
+        switch provider {
+        case .openai:
+            return ApiSelection(provider: provider, model: selectedOpenAiModel.modelId, effort: effectiveOpenAiEffort)
+        case .claude:
+            return ApiSelection(provider: provider, model: claudeModelId, effort: .none)
+        }
+    }
+
+    private func apiSelectionKey(_ selection: ApiSelection) -> String {
+        let modelKey = selection.model.replacingOccurrences(of: "|", with: "_")
+        return "\(selection.provider.rawValue)|\(modelKey)|\(selection.effort.rawValue)"
+    }
+
+    private func apiTestKey(_ selection: ApiSelection, suffix: String) -> String {
+        "pf_api_test|\(apiSelectionKey(selection))|\(suffix)"
+    }
+
     private func apiKey(for provider: ApiProvider) -> String {
         switch provider {
         case .openai:
@@ -4358,110 +4526,82 @@ struct ContentView: View {
         )
     }
 
-    private func apiLastTestOk(for provider: ApiProvider) -> Bool {
-        switch provider {
-        case .openai:
-            return openaiLastTestOk
-        case .claude:
-            return claudeLastTestOk
-        }
+    private func apiLastTestOk(for selection: ApiSelection) -> Bool {
+        UserDefaults.standard.bool(forKey: apiTestKey(selection, suffix: "ok"))
     }
 
-    private func setApiLastTestOk(_ value: Bool, for provider: ApiProvider) {
-        switch provider {
-        case .openai:
-            openaiLastTestOk = value
-        case .claude:
-            claudeLastTestOk = value
-        }
+    private func setApiLastTestOk(_ value: Bool, for selection: ApiSelection) {
+        UserDefaults.standard.set(value, forKey: apiTestKey(selection, suffix: "ok"))
     }
 
-    private func apiLastTestAt(for provider: ApiProvider) -> Date? {
-        let timestamp: Double
-        switch provider {
-        case .openai:
-            timestamp = openaiLastTestAt
-        case .claude:
-            timestamp = claudeLastTestAt
-        }
+    private func apiLastTestAt(for selection: ApiSelection) -> Date? {
+        let timestamp = UserDefaults.standard.double(forKey: apiTestKey(selection, suffix: "at"))
         guard timestamp > 0 else { return nil }
         return Date(timeIntervalSince1970: timestamp)
     }
 
-    private func setApiLastTestAt(_ date: Date, for provider: ApiProvider) {
-        let timestamp = date.timeIntervalSince1970
-        switch provider {
-        case .openai:
-            openaiLastTestAt = timestamp
-        case .claude:
-            claudeLastTestAt = timestamp
-        }
+    private func setApiLastTestAt(_ date: Date, for selection: ApiSelection) {
+        UserDefaults.standard.set(date.timeIntervalSince1970, forKey: apiTestKey(selection, suffix: "at"))
     }
 
-    private func apiLastError(for provider: ApiProvider) -> String {
-        switch provider {
-        case .openai:
-            return openaiLastError
-        case .claude:
-            return claudeLastError
-        }
+    private func apiLastError(for selection: ApiSelection) -> String {
+        UserDefaults.standard.string(forKey: apiTestKey(selection, suffix: "err")) ?? ""
     }
 
-    private func setApiLastError(_ value: String, for provider: ApiProvider) {
-        switch provider {
-        case .openai:
-            openaiLastError = value
-        case .claude:
-            claudeLastError = value
-        }
+    private func setApiLastError(_ value: String, for selection: ApiSelection) {
+        UserDefaults.standard.set(value, forKey: apiTestKey(selection, suffix: "err"))
     }
 
-    private func apiBadgeText(for provider: ApiProvider) -> String {
-        guard apiLastTestAt(for: provider) != nil else { return "⚠️ 未测试" }
-        return apiLastTestOk(for: provider) ? "✅ 连接已测试" : "❌ 测试失败"
+    private func apiBadgeText(for selection: ApiSelection) -> String {
+        guard apiLastTestAt(for: selection) != nil else { return "⚠️ 未测试" }
+        return apiLastTestOk(for: selection) ? "✅ 连接已测试" : "❌ 测试失败"
     }
 
-    private func apiBadgeColor(for provider: ApiProvider) -> Color {
-        guard apiLastTestAt(for: provider) != nil else { return .orange }
-        return apiLastTestOk(for: provider) ? .green : .red
+    private func apiBadgeColor(for selection: ApiSelection) -> Color {
+        guard apiLastTestAt(for: selection) != nil else { return .orange }
+        return apiLastTestOk(for: selection) ? .green : .red
     }
 
     private func autoTestApiConnectivityIfNeeded() {
         let now = Date()
         for provider in ApiProvider.allCases {
-            guard !apiTestingProviders.contains(provider) else { continue }
+            let selection = apiSelection(for: provider)
+            let selectionKey = apiSelectionKey(selection)
+            guard !apiTestingSelections.contains(selectionKey) else { continue }
             let key = apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !key.isEmpty else { continue }
-            if let lastAt = apiLastTestAt(for: provider) {
+            if let lastAt = apiLastTestAt(for: selection) {
                 guard now.timeIntervalSince(lastAt) > 6 * 3600 else { continue }
             }
-            runApiConnectivityTest(provider, triggeredByAuto: true)
+            runApiConnectivityTest(selection, triggeredByAuto: true)
         }
     }
 
-    private func runApiConnectivityTest(_ provider: ApiProvider, triggeredByAuto: Bool) {
-        guard !apiTestingProviders.contains(provider) else { return }
+    private func runApiConnectivityTest(_ selection: ApiSelection, triggeredByAuto: Bool) {
+        let selectionKey = apiSelectionKey(selection)
+        guard !apiTestingSelections.contains(selectionKey) else { return }
+        let provider = selection.provider
         let key = apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else {
             if !triggeredByAuto {
-                setApiTestResult(provider, ok: false, error: "缺少 API Key")
+                setApiTestResult(selection, ok: false, error: "缺少 API Key")
             }
             return
         }
-        apiTestingProviders.insert(provider)
+        apiTestingSelections.insert(selectionKey)
         Task {
             let result = await performApiHealthCheck(provider, apiKey: key)
             await MainActor.run {
-                apiTestingProviders.remove(provider)
-                setApiTestResult(provider, ok: result.ok, error: result.error)
+                apiTestingSelections.remove(selectionKey)
+                setApiTestResult(selection, ok: result.ok, error: result.error)
             }
         }
     }
 
-    private func setApiTestResult(_ provider: ApiProvider, ok: Bool, error: String?) {
-        setApiLastTestAt(Date(), for: provider)
-        setApiLastTestOk(ok, for: provider)
-        setApiLastError(ok ? "" : (error ?? "unknown error"), for: provider)
+    private func setApiTestResult(_ selection: ApiSelection, ok: Bool, error: String?) {
+        setApiLastTestAt(Date(), for: selection)
+        setApiLastTestOk(ok, for: selection)
+        setApiLastError(ok ? "" : (error ?? "unknown error"), for: selection)
     }
 
     private func performApiHealthCheck(_ provider: ApiProvider, apiKey: String) async -> (ok: Bool, error: String?) {
@@ -4580,22 +4720,13 @@ struct ContentView: View {
         """
     }
 
-    private func preferredAiProvider() -> ApiProvider? {
-        if openaiLastTestOk, !openaiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return .openai
-        }
-        if claudeLastTestOk, !claudeApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return .claude
-        }
-        return nil
-    }
-
-    private func aiModel(for provider: ApiProvider) -> String {
-        switch provider {
+    private func aiSelectionLabel(_ selection: ApiSelection) -> String {
+        switch selection.provider {
         case .openai:
-            return "gpt-4o-mini"
+            let modelTitle = OpenAiModelOption.allCases.first(where: { $0.modelId == selection.model })?.title ?? selection.model
+            return "OpenAI \(modelTitle) · effort \(selection.effort.rawValue)"
         case .claude:
-            return "claude-3-5-sonnet-20240620"
+            return "Claude"
         }
     }
 
@@ -4613,12 +4744,20 @@ struct ContentView: View {
         pickRateText: String
     ) {
         guard !isAiReviewRunning else { return }
-        guard let provider = preferredAiProvider() else {
-            aiReviewError = "请先在设置页测试连接"
+        let provider = selectedAiProvider
+        let apiKey = apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else {
+            aiReviewError = "缺少 API Key"
+            activeAlert = .validation("缺少 API Key")
+            return
+        }
+        let selection = apiSelection(for: provider)
+        guard apiLastTestAt(for: selection) != nil, apiLastTestOk(for: selection) else {
+            let label = aiSelectionLabel(selection)
+            aiReviewError = "请先在设置页测试连接（\(label)）"
             activeAlert = .validation("请先在设置页测试连接")
             return
         }
-        let apiKey = apiKey(for: provider)
         let prompt = aiPromptText(
             facts: facts,
             decision: decision,
@@ -4634,7 +4773,11 @@ struct ContentView: View {
         aiReviewError = nil
         isAiReviewRunning = true
         Task {
-            let result = await performAiReview(provider: provider, apiKey: apiKey, prompt: prompt)
+            let result = await performAiReview(
+                selection: selection,
+                apiKey: apiKey,
+                prompt: prompt
+            )
             await MainActor.run {
                 isAiReviewRunning = false
                 switch result {
@@ -4663,12 +4806,13 @@ struct ContentView: View {
     }
 
     private func performAiReview(
-        provider: ApiProvider,
+        selection: ApiSelection,
         apiKey: String,
         prompt: String
     ) async -> Result<SessionAIReview, AiReviewError> {
         let systemPrompt = "你是复盘质量校验助手，输出严格 JSON。"
-        let model = aiModel(for: provider)
+        let provider = selection.provider
+        let model = selection.model
         var request: URLRequest
         switch provider {
         case .openai:
@@ -4677,7 +4821,7 @@ struct ContentView: View {
             request.timeoutInterval = 15
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body: [String: Any] = [
+            var body: [String: Any] = [
                 "model": model,
                 "temperature": 0.2,
                 "response_format": ["type": "json_object"],
@@ -4686,6 +4830,9 @@ struct ContentView: View {
                     ["role": "user", "content": prompt]
                 ]
             ]
+            if model == OpenAiModelOption.gpt52Thinking.modelId || model == OpenAiModelOption.gpt52Pro.modelId {
+                body["reasoning"] = ["effort": selection.effort.rawValue]
+            }
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         case .claude:
             request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
