@@ -3783,18 +3783,18 @@ struct ContentView: View {
                     }
                     .pickerStyle(.menu)
 
-                    if selectedOpenAiModel.supportsEffort {
+                    if openAiSupportsReasoning(model: selectedOpenAiModel.modelId) {
                         Text("Reasoning effort")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         Picker("Reasoning effort", selection: openAiEffortBinding) {
-                            ForEach(OpenAiReasoningEffort.allCases, id: \.self) { effort in
+                            ForEach(allowedEfforts(for: selectedOpenAiModel.modelId), id: \.self) { effort in
                                 Text(effort.title).tag(effort)
                             }
                         }
                         .pickerStyle(.menu)
                     } else {
-                        Text("Reasoning effort: none")
+                        Text("Reasoning effort: unsupported")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -3827,6 +3827,17 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+#if DEBUG
+            if provider == .openai {
+                let willSendReasoning = openAiUsesResponsesApi(model: selection.model) &&
+                    openAiSupportsReasoning(model: selection.model) &&
+                    selection.effort != .none
+                let willSendTemperature = openAiSupportsTemperature(model: selection.model, effort: selection.effort)
+                Text("debug: model \(selection.model) · effort \(selection.effort.rawValue) · reasoning \(willSendReasoning) · temperature \(willSendTemperature)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+#endif
         }
         .padding(8)
         .background(Color.secondary.opacity(0.06))
@@ -4448,7 +4459,8 @@ struct ContentView: View {
     }
 
     private var effectiveOpenAiEffort: OpenAiReasoningEffort {
-        selectedOpenAiModel.supportsEffort ? selectedOpenAiEffort : .none
+        guard openAiSupportsReasoning(model: selectedOpenAiModel.modelId) else { return .none }
+        return normalizeEffort(selectedOpenAiEffort, for: selectedOpenAiModel.modelId)
     }
 
     private var selectedAiProviderBinding: Binding<ApiProvider> {
@@ -4463,9 +4475,8 @@ struct ContentView: View {
             get: { selectedOpenAiModel },
             set: { newValue in
                 selectedOpenAiModelRaw = newValue.rawValue
-                if !newValue.supportsEffort {
-                    selectedOpenAiEffortRaw = OpenAiReasoningEffort.none.rawValue
-                }
+                let normalized = normalizeEffort(selectedOpenAiEffort, for: newValue.modelId)
+                selectedOpenAiEffortRaw = normalized.rawValue
             }
         )
     }
@@ -4473,12 +4484,34 @@ struct ContentView: View {
     private var openAiEffortBinding: Binding<OpenAiReasoningEffort> {
         Binding(
             get: { selectedOpenAiEffort },
-            set: { selectedOpenAiEffortRaw = $0.rawValue }
+            set: { newValue in
+                let normalized = normalizeEffort(newValue, for: selectedOpenAiModel.modelId)
+                selectedOpenAiEffortRaw = normalized.rawValue
+            }
         )
     }
 
     private var claudeModelId: String {
         "claude-3-5-sonnet-20240620"
+    }
+
+    private func allowedEfforts(for modelId: String) -> [OpenAiReasoningEffort] {
+        let lower = modelId.lowercased()
+        if lower.hasPrefix("gpt-5.2-pro") {
+            return [.medium, .high, .xhigh]
+        }
+        if openAiSupportsReasoning(model: modelId) {
+            return OpenAiReasoningEffort.allCases
+        }
+        return [.none]
+    }
+
+    private func normalizeEffort(_ effort: OpenAiReasoningEffort, for modelId: String) -> OpenAiReasoningEffort {
+        let allowed = allowedEfforts(for: modelId)
+        if allowed.contains(effort) {
+            return effort
+        }
+        return allowed.first ?? .none
     }
 
     private func apiSelection(for provider: ApiProvider) -> ApiSelection {
@@ -4496,6 +4529,20 @@ struct ContentView: View {
 
     private func openAiUsesResponsesApi(model: String) -> Bool {
         openAiSupportsReasoning(model: model)
+    }
+
+    private func openAiSupportsTemperature(model: String, effort: OpenAiReasoningEffort) -> Bool {
+        let lower = model.lowercased()
+        if lower.hasPrefix("gpt-5.2-pro") {
+            return false
+        }
+        if lower.hasPrefix("gpt-5.2") {
+            return effort == .none
+        }
+        if lower.hasPrefix("gpt-5") {
+            return effort == .none
+        }
+        return true
     }
 
     private func apiSelectionKey(_ selection: ApiSelection) -> String {
@@ -4828,16 +4875,20 @@ struct ContentView: View {
                 request.timeoutInterval = 15
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                let sendReasoning = openAiSupportsReasoning(model: model) && selection.effort != .none
+                let sendTemperature = openAiSupportsTemperature(model: model, effort: selection.effort)
                 var body: [String: Any] = [
                     "model": model,
-                    "temperature": 0.2,
                     "input": [
                         ["role": "system", "content": systemPrompt],
                         ["role": "user", "content": prompt]
                     ]
                 ]
-                if openAiSupportsReasoning(model: model) {
+                if sendReasoning {
                     body["reasoning"] = ["effort": selection.effort.rawValue]
+                }
+                if sendTemperature {
+                    body["temperature"] = 0.2
                 }
                 request.httpBody = try? JSONSerialization.data(withJSONObject: body)
             } else {
@@ -4846,15 +4897,18 @@ struct ContentView: View {
                 request.timeoutInterval = 15
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                let body: [String: Any] = [
+                let sendTemperature = openAiSupportsTemperature(model: model, effort: selection.effort)
+                var body: [String: Any] = [
                     "model": model,
-                    "temperature": 0.2,
                     "response_format": ["type": "json_object"],
                     "messages": [
                         ["role": "system", "content": systemPrompt],
                         ["role": "user", "content": prompt]
                     ]
                 ]
+                if sendTemperature {
+                    body["temperature"] = 0.2
+                }
                 request.httpBody = try? JSONSerialization.data(withJSONObject: body)
             }
         case .claude:
