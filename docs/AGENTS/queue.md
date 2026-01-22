@@ -1157,3 +1157,39 @@ StopCondition:
 - CI green
 - exec.md 更新（若有）
 - STOP
+## ACTIVE — TC-IOS-AI-REWRITE-FAIL-V1
+Priority: P0
+Goal:
+- 对每个 FAIL 段落提供“一键重写”
+- 重写结果写入草稿区，不覆盖原文；你改两词后再确认写入
+
+Scope:
+- 位置：编辑指标 sheet 的 5 槽位复盘区（Facts/Decision/Rationale/Outcome(人工)/NextDecision）
+- 前置：必须先跑过“AI 校验”拿到 perFieldPass
+- 对每个 FAIL 字段显示按钮：
+  - [AI 重写]（仅 FAIL 字段显示）
+- 行为：
+  1) 点击 AI 重写：调用 AI 仅重写该字段（带上该字段原文 + 其他字段作为上下文 + 自动指标快照）
+  2) 返回后显示草稿区（draftText），原字段不变
+  3) 草稿区按钮：
+     - [接受]：把草稿复制进字段（覆盖该字段文本），并保存
+     - [取消]：关闭草稿但保留草稿内容（可选）
+     - [清空草稿]：删除草稿
+- 存储（不改模型）：
+  - 将 drafts 写入 PF_DECLOG_V1 JSON 内：drafts.{facts|decision|rationale|outcomeVerdict|nextDecision} = "..."
+  - 记录 draftMeta：model/effort/updatedAt
+- 兼容：
+  - 若当前 model/effort 未测试或 lastTestOk=false，按钮点击提示先去 Settings 测试连接
+  - 复用你现有的参数门控（reasoning/temperature），不得再出现 400
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 先 AI 校验后，FAIL 字段出现 “AI重写” 按钮
+B AI重写生成草稿，原文字段不变
+C 点击“接受”才写入字段并保存；重启后仍在
+D 草稿可清空；不影响原文
+E 不再出现 reasoning/temperature 400
