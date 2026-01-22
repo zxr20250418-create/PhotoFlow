@@ -2486,7 +2486,22 @@ struct ContentView: View {
         var outcomeVerdict: String?
         var nextDecision: String?
         var rawNote: String?
+        var aiReview: SessionAIReview?
         var updatedAt: Double?
+    }
+
+    private struct SessionAIReview: Codable, Equatable {
+        var score: Int?
+        var perFieldPass: [String: Bool]?
+        var rewriteInstructions: [String: String]?
+        var blindspot: String?
+        var provider: String?
+        var model: String?
+        var updatedAt: Double?
+    }
+
+    private struct AiReviewError: Error {
+        let message: String
     }
 
     private struct SessionDecisionDraft: Equatable {
@@ -2651,6 +2666,10 @@ struct ContentView: View {
     @State private var reviewDraftRawNoteLastSaved = ""
     @State private var reviewDraftSessionId: String?
     @State private var reviewDraftWasStructured = false
+    @State private var reviewDraftAiReview: SessionAIReview?
+    @State private var reviewDraftAiLastSaved: SessionAIReview?
+    @State private var aiReviewError: String?
+    @State private var isAiReviewRunning = false
     @State private var reviewExpanded = false
     @State private var dutyLoadState: DutyLoadState = .loading
     @State private var latestOpenShift: CloudDataStore.ShiftRecordSnapshot?
@@ -2856,6 +2875,13 @@ struct ContentView: View {
                                     title: "NextDecision",
                                     placeholder: "下一步/复用策略…",
                                     text: $reviewDraft.nextDecision
+                                )
+                                aiReviewPanel(
+                                    sessionId: session.id,
+                                    amountCents: amountCents,
+                                    shotCount: shot,
+                                    selectedCount: selected,
+                                    durations: durations
                                 )
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3107,6 +3133,34 @@ struct ContentView: View {
         return normalizedReviewText(note)
     }
 
+    private func buildDecisionLog(aiReview: SessionAIReview?) -> SessionDecisionLogV1 {
+        SessionDecisionLogV1(
+            facts: normalizedReviewText(reviewDraft.facts),
+            decision: normalizedReviewText(reviewDraft.decision),
+            rationale: normalizedReviewText(reviewDraft.rationale),
+            outcomeVerdict: normalizedReviewText(reviewDraft.outcomeVerdict),
+            nextDecision: normalizedReviewText(reviewDraft.nextDecision),
+            rawNote: normalizedReviewText(draftReviewNote),
+            aiReview: aiReview,
+            updatedAt: Date().timeIntervalSince1970
+        )
+    }
+
+    private func buildDecisionLogNote(aiReview: SessionAIReview?) -> String? {
+        let log = buildDecisionLog(aiReview: aiReview)
+        let hasContent = [
+            log.facts,
+            log.decision,
+            log.rationale,
+            log.outcomeVerdict,
+            log.nextDecision,
+            log.rawNote
+        ].contains { normalizedReviewText($0) != nil }
+        let hasAi = aiReview != nil
+        guard hasContent || hasAi else { return nil }
+        return encodeDecisionLog(log)
+    }
+
     private func loadReviewDraft(for sessionId: String, note: String?, force: Bool = false) {
         guard force || reviewDraftSessionId != sessionId else { return }
         if let log = decodeDecisionLog(from: note) {
@@ -3119,6 +3173,7 @@ struct ContentView: View {
             )
             draftReviewNote = normalizedReviewText(log.rawNote) ?? ""
             reviewDraftWasStructured = true
+            reviewDraftAiReview = log.aiReview
         } else {
             let fallback = normalizedReviewText(note) ?? ""
             reviewDraft = SessionDecisionDraft(
@@ -3130,10 +3185,13 @@ struct ContentView: View {
             )
             draftReviewNote = fallback
             reviewDraftWasStructured = false
+            reviewDraftAiReview = nil
         }
         reviewDraftLastSaved = reviewDraft
         reviewDraftRawNoteLastSaved = draftReviewNote
+        reviewDraftAiLastSaved = reviewDraftAiReview
         reviewDraftSessionId = sessionId
+        aiReviewError = nil
     }
 
     private func dayKey(for summary: SessionSummary) -> String? {
@@ -4443,6 +4501,304 @@ struct ContentView: View {
         return "HTTP \(statusCode) · \(snippet)"
     }
 
+    private func aiFieldLabel(for key: String) -> String {
+        switch key {
+        case "facts":
+            return "Facts"
+        case "decision":
+            return "Decision"
+        case "rationale":
+            return "Rationale"
+        case "outcomeVerdict":
+            return "Outcome"
+        case "nextDecision":
+            return "NextDecision"
+        default:
+            return key
+        }
+    }
+
+    private func aiFieldOrder() -> [String] {
+        ["facts", "decision", "rationale", "outcomeVerdict", "nextDecision"]
+    }
+
+    private func normalizedAiFieldKey(_ key: String) -> String {
+        let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "facts":
+            return "facts"
+        case "decision":
+            return "decision"
+        case "rationale":
+            return "rationale"
+        case "outcome", "outcomeverdict", "outcome_verdict":
+            return "outcomeVerdict"
+        case "nextdecision", "next_decision":
+            return "nextDecision"
+        default:
+            return normalized
+        }
+    }
+
+    private func aiPromptText(
+        facts: String,
+        decision: String,
+        rationale: String,
+        outcomeVerdict: String,
+        nextDecision: String,
+        incomeText: String,
+        shootingSeconds: TimeInterval,
+        selectingSeconds: TimeInterval,
+        rphText: String,
+        pickRateText: String
+    ) -> String {
+        let shootingLine = String(format: "%.0f", shootingSeconds)
+        let selectingLine = String(format: "%.0f", selectingSeconds)
+        return """
+        请基于以下 5 槽位复盘与指标进行质量校验，并输出 JSON：
+        Facts: \(facts)
+        Decision: \(decision)
+        Rationale: \(rationale)
+        OutcomeVerdict: \(outcomeVerdict)
+        NextDecision: \(nextDecision)
+
+        指标快照：
+        收入: \(incomeText)
+        拍摄时长(秒): \(shootingLine)
+        选片时长(秒): \(selectingLine)
+        RPH(拍+选): \(rphText)
+        选片率: \(pickRateText)
+
+        JSON schema：
+        {
+          "score": 0-10,
+          "perFieldPass": { "facts": true|false, "decision": true|false, "rationale": true|false, "outcomeVerdict": true|false, "nextDecision": true|false },
+          "rewriteInstructions": { "facts": "只在不合格字段给一句重写要求", ... },
+          "blindspot": "可选一句话"
+        }
+        只返回 JSON，不要输出其它文字。
+        """
+    }
+
+    private func preferredAiProvider() -> ApiProvider? {
+        if openaiLastTestOk, !openaiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .openai
+        }
+        if claudeLastTestOk, !claudeApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .claude
+        }
+        return nil
+    }
+
+    private func aiModel(for provider: ApiProvider) -> String {
+        switch provider {
+        case .openai:
+            return "gpt-4o-mini"
+        case .claude:
+            return "claude-3-5-sonnet-20240620"
+        }
+    }
+
+    private func runAiReview(
+        sessionId: String,
+        facts: String,
+        decision: String,
+        rationale: String,
+        outcomeVerdict: String,
+        nextDecision: String,
+        incomeText: String,
+        shootingSeconds: TimeInterval,
+        selectingSeconds: TimeInterval,
+        rphText: String,
+        pickRateText: String
+    ) {
+        guard !isAiReviewRunning else { return }
+        guard let provider = preferredAiProvider() else {
+            aiReviewError = "请先在设置页测试连接"
+            activeAlert = .validation("请先在设置页测试连接")
+            return
+        }
+        let apiKey = apiKey(for: provider)
+        let prompt = aiPromptText(
+            facts: facts,
+            decision: decision,
+            rationale: rationale,
+            outcomeVerdict: outcomeVerdict,
+            nextDecision: nextDecision,
+            incomeText: incomeText,
+            shootingSeconds: shootingSeconds,
+            selectingSeconds: selectingSeconds,
+            rphText: rphText,
+            pickRateText: pickRateText
+        )
+        aiReviewError = nil
+        isAiReviewRunning = true
+        Task {
+            let result = await performAiReview(provider: provider, apiKey: apiKey, prompt: prompt)
+            await MainActor.run {
+                isAiReviewRunning = false
+                switch result {
+                case .success(let review):
+                    reviewDraftAiReview = review
+                    reviewDraftAiLastSaved = review
+                    persistAiReview(for: sessionId, aiReview: review)
+                case .failure(let error):
+                    aiReviewError = error.message
+                }
+            }
+        }
+    }
+
+    private func persistAiReview(for sessionId: String, aiReview: SessionAIReview) {
+        let existingMeta = metaStore.meta(for: sessionId)
+        let reviewNote = buildDecisionLogNote(aiReview: aiReview)
+        var updated = existingMeta
+        updated.reviewNote = reviewNote
+        metaStore.update(updated, for: sessionId)
+        reviewDraftLastSaved = reviewDraft
+        reviewDraftRawNoteLastSaved = draftReviewNote
+        reviewDraftAiLastSaved = aiReview
+        reviewDraftWasStructured = isStructuredReviewNote(reviewNote)
+        reviewDraftSessionId = sessionId
+    }
+
+    private func performAiReview(
+        provider: ApiProvider,
+        apiKey: String,
+        prompt: String
+    ) async -> Result<SessionAIReview, AiReviewError> {
+        let systemPrompt = "你是复盘质量校验助手，输出严格 JSON。"
+        let model = aiModel(for: provider)
+        var request: URLRequest
+        switch provider {
+        case .openai:
+            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 15
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let body: [String: Any] = [
+                "model": model,
+                "temperature": 0.2,
+                "response_format": ["type": "json_object"],
+                "messages": [
+                    ["role": "system", "content": systemPrompt],
+                    ["role": "user", "content": prompt]
+                ]
+            ]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        case .claude:
+            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 15
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let body: [String: Any] = [
+                "model": model,
+                "max_tokens": 600,
+                "temperature": 0.2,
+                "system": systemPrompt,
+                "messages": [
+                    ["role": "user", "content": prompt]
+                ]
+            ]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(AiReviewError(message: "无效响应"))
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8)
+                return .failure(AiReviewError(message: apiErrorSummary(statusCode: http.statusCode, body: body)))
+            }
+            guard let contentText = extractAiContent(from: data, provider: provider) else {
+                return .failure(AiReviewError(message: "无法解析返回内容"))
+            }
+            guard let parsed = parseAiReview(from: contentText, provider: provider, model: model) else {
+                return .failure(AiReviewError(message: "输出格式不符合 JSON 结构"))
+            }
+            return .success(parsed)
+        } catch {
+            return .failure(AiReviewError(message: error.localizedDescription))
+        }
+    }
+
+    private func extractAiContent(from data: Data, provider: ApiProvider) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        switch provider {
+        case .openai:
+            guard let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let content = message["content"] as? String else { return nil }
+            return content
+        case .claude:
+            guard let content = json["content"] as? [[String: Any]],
+                  let first = content.first,
+                  let text = first["text"] as? String else { return nil }
+            return text
+        }
+    }
+
+    private func parseAiReview(from text: String, provider: ApiProvider, model: String) -> SessionAIReview? {
+        guard let jsonText = extractFirstJsonObject(from: text),
+              let data = jsonText.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let scoreValue = raw["score"]
+        let score: Int? = {
+            if let int = scoreValue as? Int { return int }
+            if let double = scoreValue as? Double { return Int(double.rounded()) }
+            if let string = scoreValue as? String, let double = Double(string) { return Int(double.rounded()) }
+            return nil
+        }()
+        let perFieldRaw = raw["perFieldPass"] as? [String: Any]
+        var perField: [String: Bool] = [:]
+        perFieldRaw?.forEach { key, value in
+            let normalizedKey = normalizedAiFieldKey(key)
+            if let bool = value as? Bool {
+                perField[normalizedKey] = bool
+            } else if let string = value as? String {
+                perField[normalizedKey] = string.lowercased().contains("pass")
+            }
+        }
+        let rewriteRaw = raw["rewriteInstructions"] as? [String: Any]
+        var rewrite: [String: String] = [:]
+        rewriteRaw?.forEach { key, value in
+            let normalizedKey = normalizedAiFieldKey(key)
+            if let string = value as? String, !string.isEmpty {
+                rewrite[normalizedKey] = string
+            }
+        }
+        for key in aiFieldOrder() {
+            if perField[key] == false, rewrite[key] == nil {
+                rewrite[key] = "请补充具体要点"
+            }
+        }
+        let blindspot = raw["blindspot"] as? String
+        return SessionAIReview(
+            score: score,
+            perFieldPass: perField.isEmpty ? nil : perField,
+            rewriteInstructions: rewrite.isEmpty ? nil : rewrite,
+            blindspot: normalizedReviewText(blindspot),
+            provider: provider.rawValue,
+            model: model,
+            updatedAt: Date().timeIntervalSince1970
+        )
+    }
+
+    private func extractFirstJsonObject(from text: String) -> String? {
+        guard let start = text.firstIndex(of: "{"),
+              let end = text.lastIndex(of: "}") else { return nil }
+        guard start < end else { return nil }
+        return String(text[start...end])
+    }
+
     private var memoEditor: some View {
         let dayKey = dailyMemoStore.dayKey(for: now)
         let placeholder = "客户/卡点/今天只做一件事…"
@@ -4517,6 +4873,122 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             Text(text)
                 .font(.caption)
+        }
+    }
+
+    private func aiReviewPanel(
+        sessionId: String,
+        amountCents: Int?,
+        shotCount: Int?,
+        selectedCount: Int?,
+        durations: (shooting: TimeInterval, selecting: TimeInterval?, total: TimeInterval)
+    ) -> some View {
+        let meta = metaStore.meta(for: sessionId)
+        let resolvedAmount = amountCents ?? meta.amountCents
+        let resolvedShot = shotCount ?? meta.shotCount
+        let resolvedSelected = selectedCount ?? meta.selectedCount
+        let workSeconds = durations.shooting + (durations.selecting ?? 0)
+        let incomeText = resolvedAmount.map { formatAmount(cents: $0) } ?? "--"
+        let rphText: String = {
+            guard let cents = resolvedAmount, workSeconds > 0 else { return "--" }
+            let revenue = Double(cents) / 100
+            let hours = workSeconds / 3600
+            return String(format: "¥%.0f/小时", revenue / hours)
+        }()
+        let pickRateText: String = {
+            guard let shot = resolvedShot, shot > 0, let selected = resolvedSelected else { return "--" }
+            if selected > shot { return "--" }
+            let rate = Int((Double(selected) / Double(shot) * 100).rounded())
+            return "\(rate)%"
+        }()
+        let aiReview = reviewDraftAiReview
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("AI 校验")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("AI 校验") {
+                    runAiReview(
+                        sessionId: sessionId,
+                        facts: reviewDraft.facts,
+                        decision: reviewDraft.decision,
+                        rationale: reviewDraft.rationale,
+                        outcomeVerdict: reviewDraft.outcomeVerdict,
+                        nextDecision: reviewDraft.nextDecision,
+                        incomeText: incomeText,
+                        shootingSeconds: durations.shooting,
+                        selectingSeconds: durations.selecting ?? 0,
+                        rphText: rphText,
+                        pickRateText: pickRateText
+                    )
+                }
+                .buttonStyle(.bordered)
+                .disabled(isAiReviewRunning)
+            }
+            if isAiReviewRunning {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("AI 校验中…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let aiReview {
+                aiReviewResultView(aiReview)
+            }
+            if let aiReviewError, !aiReviewError.isEmpty {
+                Text(aiReviewError)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func aiReviewResultView(_ review: SessionAIReview) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            let scoreText = review.score.map(String.init) ?? "--"
+            Text("score: \(scoreText)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            ForEach(aiFieldOrder(), id: \.self) { key in
+                let pass = review.perFieldPass?[key]
+                let label = aiFieldLabel(for: key)
+                let status: String = {
+                    if pass == true { return "PASS" }
+                    if pass == false { return "FAIL" }
+                    return "--"
+                }()
+                let statusColor: Color = {
+                    if pass == true { return .green }
+                    if pass == false { return .red }
+                    return .secondary
+                }()
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(label)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(status)
+                            .font(.caption2)
+                            .foregroundStyle(statusColor)
+                    }
+                    if pass == false, let instruction = review.rewriteInstructions?[key], !instruction.isEmpty {
+                        Text(instruction)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if let blindspot = review.blindspot, !blindspot.isEmpty {
+                Text("blindspot: \(blindspot)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -6934,27 +7406,10 @@ struct ContentView: View {
         let reviewChanged = reviewDraft != reviewDraftLastSaved
         let rawNoteNormalized = normalizedReviewText(draftReviewNote)
         let rawChanged = normalizedReviewText(reviewDraftRawNoteLastSaved) != rawNoteNormalized
+        let aiChanged = reviewDraftAiReview != reviewDraftAiLastSaved
         let reviewNote: String? = {
-            guard reviewChanged || rawChanged else { return existingNote }
-            let now = Date()
-            let log = SessionDecisionLogV1(
-                facts: normalizedReviewText(reviewDraft.facts),
-                decision: normalizedReviewText(reviewDraft.decision),
-                rationale: normalizedReviewText(reviewDraft.rationale),
-                outcomeVerdict: normalizedReviewText(reviewDraft.outcomeVerdict),
-                nextDecision: normalizedReviewText(reviewDraft.nextDecision),
-                rawNote: rawNoteNormalized,
-                updatedAt: now.timeIntervalSince1970
-            )
-            let hasContent = [
-                log.facts,
-                log.decision,
-                log.rationale,
-                log.outcomeVerdict,
-                log.nextDecision,
-                log.rawNote
-            ].contains { normalizedReviewText($0) != nil }
-            return hasContent ? encodeDecisionLog(log) : nil
+            guard reviewChanged || rawChanged || aiChanged else { return existingNote }
+            return buildDecisionLogNote(aiReview: reviewDraftAiReview)
         }()
         let meta = SessionMeta(
             amountCents: parseAmountCents(from: draftAmount),
@@ -6963,11 +7418,12 @@ struct ContentView: View {
             reviewNote: reviewNote
         )
         metaStore.update(meta, for: sessionId)
-        if reviewChanged || rawChanged {
+        if reviewChanged || rawChanged || aiChanged {
             reviewDraftLastSaved = reviewDraft
             reviewDraftRawNoteLastSaved = rawNoteNormalized ?? ""
             reviewDraftWasStructured = isStructuredReviewNote(reviewNote)
             reviewDraftSessionId = sessionId
+            reviewDraftAiLastSaved = reviewDraftAiReview
         }
     }
 
