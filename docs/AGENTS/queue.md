@@ -1,4 +1,32 @@
-## ACTIVE — TC-IOS-AI-REVIEW-CHECKER-V1
+## ACTIVE — TC-IOS-AI-MODEL-PICKER-V1
+Priority: P0
+Goal:
+- Settings 增加 provider+model+reasoning.effort 选择
+- “连接已测试”按 (provider, model, effort) 维度记录
+- AI 校验请求使用当前选中的 model/effort
+
+Scope:
+- OpenAI models:
+  - GPT-5.2 Thinking -> gpt-5.2
+  - GPT-5.2 Instant -> gpt-5.2-chat-latest
+  - GPT-5.2 Pro -> gpt-5.2-pro
+- Reasoning effort (OpenAI only): none/low/medium/high/xhigh
+- Claude: 维持现状（无 effort）
+- 连接测试与 AI 校验必须绑定同一个 key（provider, model, effort）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A Settings 可选择 model 与 effort，重启后仍保留
+B 连接测试状态按 (provider,model,effort) 缓存，切换模型后状态正确变化
+C AI 校验使用当前 model/effort；未测试时明确提示先测试
+D ios_safe PASS；0 配置改动
+
+## DONE — TC-IOS-AI-REVIEW-CHECKER-V1
+Status: DONE (merged in PR #188)
 Priority: P0
 Goal:
 - AI 校验 5 槽位是否合格 指出哪段不合格 给重写指令
