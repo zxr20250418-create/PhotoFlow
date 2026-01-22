@@ -2643,12 +2643,7 @@ struct ContentView: View {
         }
 
         var supportsEffort: Bool {
-            switch self {
-            case .gpt52Thinking, .gpt52Pro:
-                return true
-            case .gpt52Instant:
-                return false
-            }
+            modelId.lowercased().hasPrefix("gpt-5")
         }
     }
 
