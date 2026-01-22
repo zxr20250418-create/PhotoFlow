@@ -1237,7 +1237,8 @@ B 一键生成 Markdown：可复制到剪贴板；可保存到 Files
 C AI 生成总结：手动触发，成功后可查看并可选“应用建议”；不强行覆盖用户手写
 D ios_safe PASS；0 配置改动
 
-## ACTIVE — TC-IOS-WEEKLY-REVIEW-SUN-V1
+## DONE — TC-IOS-WEEKLY-REVIEW-SUN-V1
+Status: DONE (merged in PR #198)
 Priority: P0
 Goal:
 - Stats 顶部周日晚上出现“生成本周复盘”
