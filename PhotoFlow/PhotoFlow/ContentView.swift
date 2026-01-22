@@ -2479,6 +2479,33 @@ struct ContentView: View {
 
     private static let reviewLogPrefix = "PF_DECLOG_V1:"
 
+    private struct SessionDecisionDrafts: Codable, Equatable {
+        var facts: String?
+        var decision: String?
+        var rationale: String?
+        var outcomeVerdict: String?
+        var nextDecision: String?
+
+        static let empty = SessionDecisionDrafts(
+            facts: "",
+            decision: "",
+            rationale: "",
+            outcomeVerdict: "",
+            nextDecision: ""
+        )
+
+        var isEmpty: Bool {
+            let values = [facts, decision, rationale, outcomeVerdict, nextDecision]
+            return values.allSatisfy { ($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+    }
+
+    private struct SessionDraftMeta: Codable, Equatable {
+        var model: String?
+        var effort: String?
+        var updatedAt: Double?
+    }
+
     private struct SessionDecisionLogV1: Codable, Equatable {
         var facts: String?
         var decision: String?
@@ -2487,6 +2514,8 @@ struct ContentView: View {
         var nextDecision: String?
         var rawNote: String?
         var aiReview: SessionAIReview?
+        var drafts: SessionDecisionDrafts?
+        var draftMeta: SessionDraftMeta?
         var updatedAt: Double?
     }
 
@@ -2679,6 +2708,14 @@ struct ContentView: View {
         let effort: OpenAiReasoningEffort
     }
 
+    private enum ReviewFieldKey: String, CaseIterable {
+        case facts
+        case decision
+        case rationale
+        case outcomeVerdict
+        case nextDecision
+    }
+
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
@@ -2732,6 +2769,13 @@ struct ContentView: View {
     @State private var reviewDraftWasStructured = false
     @State private var reviewDraftAiReview: SessionAIReview?
     @State private var reviewDraftAiLastSaved: SessionAIReview?
+    @State private var reviewDrafts = SessionDecisionDrafts.empty
+    @State private var reviewDraftsLastSaved = SessionDecisionDrafts.empty
+    @State private var reviewDraftMeta: SessionDraftMeta?
+    @State private var reviewDraftMetaLastSaved: SessionDraftMeta?
+    @State private var reviewDraftHidden: Set<ReviewFieldKey> = []
+    @State private var aiRewriteRunning: Set<ReviewFieldKey> = []
+    @State private var aiRewriteError: [ReviewFieldKey: String] = [:]
     @State private var aiReviewError: String?
     @State private var isAiReviewRunning = false
     @State private var reviewExpanded = false
@@ -2874,20 +2918,38 @@ struct ContentView: View {
 
                         GroupBox("复盘（5槽位）") {
                             VStack(alignment: .leading, spacing: 12) {
-                                reviewFieldEditor(
+                                reviewFieldWithRewrite(
+                                    key: .facts,
                                     title: "Facts",
                                     placeholder: "关键信息/背景…",
-                                    text: $reviewDraft.facts
+                                    sessionId: session.id,
+                                    incomeText: amountText,
+                                    shootingSeconds: durations.shooting,
+                                    selectingSeconds: durations.selecting ?? 0,
+                                    rphText: rphWorkText,
+                                    pickRateText: pickRateText
                                 )
-                                reviewFieldEditor(
+                                reviewFieldWithRewrite(
+                                    key: .decision,
                                     title: "Decision",
                                     placeholder: "这次做了什么决定…",
-                                    text: $reviewDraft.decision
+                                    sessionId: session.id,
+                                    incomeText: amountText,
+                                    shootingSeconds: durations.shooting,
+                                    selectingSeconds: durations.selecting ?? 0,
+                                    rphText: rphWorkText,
+                                    pickRateText: pickRateText
                                 )
-                                reviewFieldEditor(
+                                reviewFieldWithRewrite(
+                                    key: .rationale,
                                     title: "Rationale",
                                     placeholder: "为什么这么做…",
-                                    text: $reviewDraft.rationale
+                                    sessionId: session.id,
+                                    incomeText: amountText,
+                                    shootingSeconds: durations.shooting,
+                                    selectingSeconds: durations.selecting ?? 0,
+                                    rphText: rphWorkText,
+                                    pickRateText: pickRateText
                                 )
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("Outcome（自动）")
@@ -2927,15 +2989,27 @@ struct ContentView: View {
                                     }
                                     .font(.footnote)
                                 }
-                                reviewFieldEditor(
+                                reviewFieldWithRewrite(
+                                    key: .outcomeVerdict,
                                     title: "Outcome（人工）",
                                     placeholder: "结果=好/一般/差；主因=…；证据=…",
-                                    text: $reviewDraft.outcomeVerdict
+                                    sessionId: session.id,
+                                    incomeText: amountText,
+                                    shootingSeconds: durations.shooting,
+                                    selectingSeconds: durations.selecting ?? 0,
+                                    rphText: rphWorkText,
+                                    pickRateText: pickRateText
                                 )
-                                reviewFieldEditor(
+                                reviewFieldWithRewrite(
+                                    key: .nextDecision,
                                     title: "NextDecision",
                                     placeholder: "下一步/复用策略…",
-                                    text: $reviewDraft.nextDecision
+                                    sessionId: session.id,
+                                    incomeText: amountText,
+                                    shootingSeconds: durations.shooting,
+                                    selectingSeconds: durations.selecting ?? 0,
+                                    rphText: rphWorkText,
+                                    pickRateText: pickRateText
                                 )
                                 aiReviewPanel(
                                     sessionId: session.id,
@@ -3194,8 +3268,105 @@ struct ContentView: View {
         return normalizedReviewText(note)
     }
 
+    private func reviewFieldBinding(for key: ReviewFieldKey) -> Binding<String> {
+        switch key {
+        case .facts:
+            return $reviewDraft.facts
+        case .decision:
+            return $reviewDraft.decision
+        case .rationale:
+            return $reviewDraft.rationale
+        case .outcomeVerdict:
+            return $reviewDraft.outcomeVerdict
+        case .nextDecision:
+            return $reviewDraft.nextDecision
+        }
+    }
+
+    private func draftBinding(for key: ReviewFieldKey) -> Binding<String> {
+        Binding(
+            get: {
+                switch key {
+                case .facts:
+                    return reviewDrafts.facts ?? ""
+                case .decision:
+                    return reviewDrafts.decision ?? ""
+                case .rationale:
+                    return reviewDrafts.rationale ?? ""
+                case .outcomeVerdict:
+                    return reviewDrafts.outcomeVerdict ?? ""
+                case .nextDecision:
+                    return reviewDrafts.nextDecision ?? ""
+                }
+            },
+            set: { newValue in
+                switch key {
+                case .facts:
+                    reviewDrafts.facts = newValue
+                case .decision:
+                    reviewDrafts.decision = newValue
+                case .rationale:
+                    reviewDrafts.rationale = newValue
+                case .outcomeVerdict:
+                    reviewDrafts.outcomeVerdict = newValue
+                case .nextDecision:
+                    reviewDrafts.nextDecision = newValue
+                }
+            }
+        )
+    }
+
+    private func setDraftValue(_ value: String, for key: ReviewFieldKey) {
+        switch key {
+        case .facts:
+            reviewDrafts.facts = value
+        case .decision:
+            reviewDrafts.decision = value
+        case .rationale:
+            reviewDrafts.rationale = value
+        case .outcomeVerdict:
+            reviewDrafts.outcomeVerdict = value
+        case .nextDecision:
+            reviewDrafts.nextDecision = value
+        }
+    }
+
+    private func setReviewFieldValue(_ value: String, for key: ReviewFieldKey) {
+        switch key {
+        case .facts:
+            reviewDraft.facts = value
+        case .decision:
+            reviewDraft.decision = value
+        case .rationale:
+            reviewDraft.rationale = value
+        case .outcomeVerdict:
+            reviewDraft.outcomeVerdict = value
+        case .nextDecision:
+            reviewDraft.nextDecision = value
+        }
+    }
+
+    private func normalizedDrafts(_ drafts: SessionDecisionDrafts) -> SessionDecisionDrafts? {
+        let normalized = SessionDecisionDrafts(
+            facts: normalizedReviewText(drafts.facts),
+            decision: normalizedReviewText(drafts.decision),
+            rationale: normalizedReviewText(drafts.rationale),
+            outcomeVerdict: normalizedReviewText(drafts.outcomeVerdict),
+            nextDecision: normalizedReviewText(drafts.nextDecision)
+        )
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func normalizedDraftMeta(_ meta: SessionDraftMeta?, drafts: SessionDecisionDrafts) -> SessionDraftMeta? {
+        guard let meta, let normalized = normalizedDrafts(drafts) else { return nil }
+        guard !normalized.isEmpty else { return nil }
+        return meta
+    }
+
     private func buildDecisionLog(aiReview: SessionAIReview?) -> SessionDecisionLogV1 {
-        SessionDecisionLogV1(
+        let drafts = normalizedDrafts(reviewDrafts)
+        let draftMeta = normalizedDraftMeta(reviewDraftMeta, drafts: reviewDrafts)
+        return SessionDecisionLogV1(
             facts: normalizedReviewText(reviewDraft.facts),
             decision: normalizedReviewText(reviewDraft.decision),
             rationale: normalizedReviewText(reviewDraft.rationale),
@@ -3203,6 +3374,8 @@ struct ContentView: View {
             nextDecision: normalizedReviewText(reviewDraft.nextDecision),
             rawNote: normalizedReviewText(draftReviewNote),
             aiReview: aiReview,
+            drafts: drafts,
+            draftMeta: draftMeta,
             updatedAt: Date().timeIntervalSince1970
         )
     }
@@ -3218,7 +3391,8 @@ struct ContentView: View {
             log.rawNote
         ].contains { normalizedReviewText($0) != nil }
         let hasAi = aiReview != nil
-        guard hasContent || hasAi else { return nil }
+        let hasDrafts = log.drafts != nil
+        guard hasContent || hasAi || hasDrafts else { return nil }
         return encodeDecisionLog(log)
     }
 
@@ -3235,6 +3409,8 @@ struct ContentView: View {
             draftReviewNote = normalizedReviewText(log.rawNote) ?? ""
             reviewDraftWasStructured = true
             reviewDraftAiReview = log.aiReview
+            reviewDrafts = log.drafts ?? .empty
+            reviewDraftMeta = log.draftMeta
         } else {
             let fallback = normalizedReviewText(note) ?? ""
             reviewDraft = SessionDecisionDraft(
@@ -3247,12 +3423,19 @@ struct ContentView: View {
             draftReviewNote = fallback
             reviewDraftWasStructured = false
             reviewDraftAiReview = nil
+            reviewDrafts = .empty
+            reviewDraftMeta = nil
         }
         reviewDraftLastSaved = reviewDraft
         reviewDraftRawNoteLastSaved = draftReviewNote
         reviewDraftAiLastSaved = reviewDraftAiReview
+        reviewDraftsLastSaved = reviewDrafts
+        reviewDraftMetaLastSaved = reviewDraftMeta
         reviewDraftSessionId = sessionId
         aiReviewError = nil
+        aiRewriteError = [:]
+        aiRewriteRunning = []
+        reviewDraftHidden = []
     }
 
     private func dayKey(for summary: SessionSummary) -> String? {
@@ -5111,6 +5294,114 @@ struct ContentView: View {
         }
     }
 
+    private func reviewFieldWithRewrite(
+        key: ReviewFieldKey,
+        title: String,
+        placeholder: String,
+        sessionId: String,
+        incomeText: String,
+        shootingSeconds: TimeInterval,
+        selectingSeconds: TimeInterval,
+        rphText: String,
+        pickRateText: String
+    ) -> some View {
+        let pass = reviewDraftAiReview?.perFieldPass?[key.rawValue]
+        let showRewrite = pass == false
+        let draft = draftBinding(for: key)
+        let draftText = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasDraft = !draftText.isEmpty
+        let isHidden = reviewDraftHidden.contains(key)
+        let isRunning = aiRewriteRunning.contains(key)
+        let errorText = aiRewriteError[key] ?? ""
+        let rewriteHint = reviewDraftAiReview?.rewriteInstructions?[key.rawValue] ?? ""
+        return VStack(alignment: .leading, spacing: 8) {
+            reviewFieldEditor(title: title, placeholder: placeholder, text: reviewFieldBinding(for: key))
+            if showRewrite {
+                HStack(spacing: 8) {
+                    Button("AI 重写") {
+                        runAiRewrite(
+                            field: key,
+                            sessionId: sessionId,
+                            incomeText: incomeText,
+                            shootingSeconds: shootingSeconds,
+                            selectingSeconds: selectingSeconds,
+                            rphText: rphText,
+                            pickRateText: pickRateText
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isRunning)
+                    if isRunning {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("重写中…")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !rewriteHint.isEmpty {
+                    Text("提示：\(rewriteHint)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                if !errorText.isEmpty {
+                    Text(errorText)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
+            }
+            if hasDraft {
+                if isHidden {
+                    HStack {
+                        Text("草稿已隐藏")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Button("显示草稿") {
+                            reviewDraftHidden.remove(key)
+                        }
+                        .font(.caption2)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("草稿")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        ZStack(alignment: .topLeading) {
+                            if draftText.isEmpty {
+                                Text("AI 草稿…")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 8)
+                                    .padding(.leading, 6)
+                            }
+                            TextEditor(text: limitedTextBinding(draft, limit: 120))
+                                .font(.footnote)
+                                .frame(height: 72)
+                                .scrollContentBackground(.hidden)
+                        }
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        HStack(spacing: 8) {
+                            Button("接受") {
+                                acceptRewriteDraft(key, sessionId: sessionId)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Button("取消") {
+                                reviewDraftHidden.insert(key)
+                            }
+                            .buttonStyle(.bordered)
+                            Button("清空草稿") {
+                                clearRewriteDraft(key, sessionId: sessionId)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func reviewFieldReadOnly(title: String, value: String?) -> some View {
         let text = normalizedReviewText(value) ?? "—"
         return VStack(alignment: .leading, spacing: 2) {
@@ -5192,6 +5483,229 @@ struct ContentView: View {
         .padding(8)
         .background(Color.secondary.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func acceptRewriteDraft(_ field: ReviewFieldKey, sessionId: String) {
+        let draftValue = draftBinding(for: field).wrappedValue
+        let trimmed = draftValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        setReviewFieldValue(trimmed, for: field)
+        setDraftValue("", for: field)
+        reviewDraftHidden.remove(field)
+        if reviewDrafts.isEmpty {
+            reviewDraftMeta = nil
+        }
+        saveMeta(for: sessionId)
+    }
+
+    private func clearRewriteDraft(_ field: ReviewFieldKey, sessionId: String) {
+        setDraftValue("", for: field)
+        reviewDraftHidden.remove(field)
+        if reviewDrafts.isEmpty {
+            reviewDraftMeta = nil
+        }
+        saveMeta(for: sessionId)
+    }
+
+    private func aiRewritePrompt(
+        field: ReviewFieldKey,
+        instruction: String?,
+        facts: String,
+        decision: String,
+        rationale: String,
+        outcomeVerdict: String,
+        nextDecision: String,
+        incomeText: String,
+        shootingSeconds: TimeInterval,
+        selectingSeconds: TimeInterval,
+        rphText: String,
+        pickRateText: String
+    ) -> String {
+        let fieldLabel = aiFieldLabel(for: field.rawValue)
+        let baseInstruction = instruction?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hintLine = baseInstruction.isEmpty ? "" : "校验提示: \(baseInstruction)\n"
+        return """
+        请只重写「\(fieldLabel)」字段内容，保持简洁可执行，120 字以内。
+        只输出重写后的文本，不要 JSON，不要加引号或前缀。
+        \(hintLine)
+        Facts: \(facts)
+        Decision: \(decision)
+        Rationale: \(rationale)
+        OutcomeVerdict: \(outcomeVerdict)
+        NextDecision: \(nextDecision)
+
+        指标快照：
+        收入: \(incomeText)
+        拍摄时长(秒): \(String(format: "%.0f", shootingSeconds))
+        选片时长(秒): \(String(format: "%.0f", selectingSeconds))
+        RPH(拍+选): \(rphText)
+        选片率: \(pickRateText)
+        """
+    }
+
+    private func runAiRewrite(
+        field: ReviewFieldKey,
+        sessionId: String,
+        incomeText: String,
+        shootingSeconds: TimeInterval,
+        selectingSeconds: TimeInterval,
+        rphText: String,
+        pickRateText: String
+    ) {
+        guard !aiRewriteRunning.contains(field) else { return }
+        let provider = selectedAiProvider
+        let apiKey = apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else {
+            aiRewriteError[field] = "缺少 API Key"
+            activeAlert = .validation("缺少 API Key")
+            return
+        }
+        let selection = apiSelection(for: provider)
+        guard apiLastTestAt(for: selection) != nil, apiLastTestOk(for: selection) else {
+            let label = aiSelectionLabel(selection)
+            aiRewriteError[field] = "请先在设置页测试连接（\(label)）"
+            activeAlert = .validation("请先在设置页测试连接")
+            return
+        }
+        let instruction = reviewDraftAiReview?.rewriteInstructions?[field.rawValue]
+        let prompt = aiRewritePrompt(
+            field: field,
+            instruction: instruction,
+            facts: reviewDraft.facts,
+            decision: reviewDraft.decision,
+            rationale: reviewDraft.rationale,
+            outcomeVerdict: reviewDraft.outcomeVerdict,
+            nextDecision: reviewDraft.nextDecision,
+            incomeText: incomeText,
+            shootingSeconds: shootingSeconds,
+            selectingSeconds: selectingSeconds,
+            rphText: rphText,
+            pickRateText: pickRateText
+        )
+        aiRewriteError[field] = nil
+        aiRewriteRunning.insert(field)
+        Task {
+            let result = await performAiRewrite(selection: selection, apiKey: apiKey, prompt: prompt)
+            await MainActor.run {
+                aiRewriteRunning.remove(field)
+                switch result {
+                case .success(let text):
+                    let cleaned = sanitizeAiRewriteText(text)
+                    guard !cleaned.isEmpty else {
+                        aiRewriteError[field] = "AI 返回空内容"
+                        return
+                    }
+                    setDraftValue(cleaned, for: field)
+                    reviewDraftHidden.remove(field)
+                    reviewDraftMeta = SessionDraftMeta(
+                        model: selection.model,
+                        effort: selection.effort.rawValue,
+                        updatedAt: Date().timeIntervalSince1970
+                    )
+                    saveMeta(for: sessionId)
+                case .failure(let error):
+                    aiRewriteError[field] = error.message
+                }
+            }
+        }
+    }
+
+    private func sanitizeAiRewriteText(_ text: String) -> String {
+        var cleaned = text
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasPrefix("\""), cleaned.hasSuffix("\""), cleaned.count >= 2 {
+            cleaned = String(cleaned.dropFirst().dropLast())
+        }
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func performAiRewrite(
+        selection: ApiSelection,
+        apiKey: String,
+        prompt: String
+    ) async -> Result<String, AiReviewError> {
+        let systemPrompt = "你是复盘助手，只输出重写后的字段文本。"
+        let provider = selection.provider
+        let model = selection.model
+        var request: URLRequest
+        switch provider {
+        case .openai:
+            if openAiUsesResponsesApi(model: model) {
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 15
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                let sendReasoning = openAiSupportsReasoning(model: model) && selection.effort != .none
+                let sendTemperature = openAiSupportsTemperature(model: model, effort: selection.effort)
+                var body: [String: Any] = [
+                    "model": model,
+                    "input": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": prompt]
+                    ]
+                ]
+                if sendReasoning {
+                    body["reasoning"] = ["effort": selection.effort.rawValue]
+                }
+                if sendTemperature {
+                    body["temperature"] = 0.2
+                }
+                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            } else {
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 15
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                let sendTemperature = openAiSupportsTemperature(model: model, effort: selection.effort)
+                var body: [String: Any] = [
+                    "model": model,
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": prompt]
+                    ]
+                ]
+                if sendTemperature {
+                    body["temperature"] = 0.2
+                }
+                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            }
+        case .claude:
+            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 15
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let body: [String: Any] = [
+                "model": model,
+                "max_tokens": 600,
+                "temperature": 0.2,
+                "system": systemPrompt,
+                "messages": [
+                    ["role": "user", "content": prompt]
+                ]
+            ]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(AiReviewError(message: "无效响应"))
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8)
+                return .failure(AiReviewError(message: apiErrorSummary(statusCode: http.statusCode, body: body)))
+            }
+            guard let contentText = extractAiContent(from: data, provider: provider) else {
+                return .failure(AiReviewError(message: "无法解析返回内容"))
+            }
+            return .success(contentText)
+        } catch {
+            return .failure(AiReviewError(message: error.localizedDescription))
+        }
     }
 
     private func aiReviewResultView(_ review: SessionAIReview) -> some View {
@@ -7653,8 +8167,10 @@ struct ContentView: View {
         let rawNoteNormalized = normalizedReviewText(draftReviewNote)
         let rawChanged = normalizedReviewText(reviewDraftRawNoteLastSaved) != rawNoteNormalized
         let aiChanged = reviewDraftAiReview != reviewDraftAiLastSaved
+        let draftsChanged = reviewDrafts != reviewDraftsLastSaved
+        let draftsMetaChanged = reviewDraftMeta != reviewDraftMetaLastSaved
         let reviewNote: String? = {
-            guard reviewChanged || rawChanged || aiChanged else { return existingNote }
+            guard reviewChanged || rawChanged || aiChanged || draftsChanged || draftsMetaChanged else { return existingNote }
             return buildDecisionLogNote(aiReview: reviewDraftAiReview)
         }()
         let meta = SessionMeta(
@@ -7664,12 +8180,14 @@ struct ContentView: View {
             reviewNote: reviewNote
         )
         metaStore.update(meta, for: sessionId)
-        if reviewChanged || rawChanged || aiChanged {
+        if reviewChanged || rawChanged || aiChanged || draftsChanged || draftsMetaChanged {
             reviewDraftLastSaved = reviewDraft
             reviewDraftRawNoteLastSaved = rawNoteNormalized ?? ""
             reviewDraftWasStructured = isStructuredReviewNote(reviewNote)
             reviewDraftSessionId = sessionId
             reviewDraftAiLastSaved = reviewDraftAiReview
+            reviewDraftsLastSaved = reviewDrafts
+            reviewDraftMetaLastSaved = reviewDraftMeta
         }
     }
 
