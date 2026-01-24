@@ -1279,3 +1279,28 @@ B 周日晚上 Stats 顶部出现入口且可生成周复盘
 C 周复盘详情页自动区正确，手填区可保存
 D Markdown 可复制与保存到 Files
 E ios_safe PASS；0 配置改动
+## ACTIVE — TC-IOS-STATS-ADD-YEAR-V1
+Priority: P1
+Goal:
+- Stats 范围从 今日/本周/本月 增加 本年（自然年）
+
+Scope:
+- UI：分段控件增加 “本年”
+- 数据口径：按 shootingStart 归属过滤
+  - 今日：dayKey=today
+  - 本周：ISO 8601 周（周一为周开始）
+  - 本月：当月 1 日起
+  - 本年：当年 1/1 00:00 起（自然年）
+- 汇总项全部复用现有：
+  今日/本周/本月已有的：单数、总/拍/选时长、收入、客单价、拍/选张数、选片率、RPH(拍+选)、平均选片率（按单/按张）、Top3、Bottom1（如已存在）
+- N=0 统一显示 --（不显示 0% 这种误导）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 分段含“本年”，切换后指标随范围变化
+B 本年范围正确（自然年），且 Top3/Bottom1 也随之变化
+C ios_safe PASS；0 配置改动
