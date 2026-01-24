@@ -2876,6 +2876,7 @@ struct ContentView: View {
         case today
         case week
         case month
+        case year
 
         var title: String {
             switch self {
@@ -2885,6 +2886,8 @@ struct ContentView: View {
                 return "本周"
             case .month:
                 return "本月"
+            case .year:
+                return "本年"
             }
         }
     }
@@ -3891,6 +3894,9 @@ struct ContentView: View {
                 return interval.contains(shootingStart)
             case .month:
                 guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
+                return interval.contains(shootingStart)
+            case .year:
+                guard let interval = isoCal.dateInterval(of: .year, for: now) else { return false }
                 return interval.contains(shootingStart)
             }
         }
@@ -6850,6 +6856,9 @@ struct ContentView: View {
                 return interval.contains(shootingStart)
             case .month:
                 guard let interval = isoCal.dateInterval(of: .month, for: now) else { return false }
+                return interval.contains(shootingStart)
+            case .year:
+                guard let interval = isoCal.dateInterval(of: .year, for: now) else { return false }
                 return interval.contains(shootingStart)
             }
         }
