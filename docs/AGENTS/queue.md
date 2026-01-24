@@ -1279,7 +1279,8 @@ B 周日晚上 Stats 顶部出现入口且可生成周复盘
 C 周复盘详情页自动区正确，手填区可保存
 D Markdown 可复制与保存到 Files
 E ios_safe PASS；0 配置改动
-## ACTIVE — TC-IOS-STATS-ADD-YEAR-V1
+## DONE — TC-IOS-STATS-ADD-YEAR-V1
+Status: DONE (merged in PR #201)
 Priority: P1
 Goal:
 - Stats 范围从 今日/本周/本月 增加 本年（自然年）
