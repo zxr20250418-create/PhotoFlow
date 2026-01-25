@@ -2947,6 +2947,22 @@ struct ContentView: View {
         }
     }
 
+    private struct ClaudeModelOption: Hashable {
+        let title: String
+        let modelId: String
+
+        var label: String {
+            "\(title) · \(modelId)"
+        }
+    }
+
+    private static let claudeModelOptions: [ClaudeModelOption] = [
+        ClaudeModelOption(title: "Opus 4.5", modelId: "claude-opus-4-5"),
+        ClaudeModelOption(title: "Sonnet 4.0", modelId: "claude-sonnet-4-0"),
+        ClaudeModelOption(title: "Sonnet 3.7", modelId: "claude-3-7-sonnet-latest"),
+        ClaudeModelOption(title: "Haiku 3.5", modelId: "claude-3-5-haiku-latest")
+    ]
+
     private enum OpenAiReasoningEffort: String, CaseIterable {
         case none
         case minimal
@@ -3087,6 +3103,7 @@ struct ContentView: View {
     @AppStorage("pf_claude_api_key") private var claudeApiKey = ""
     @AppStorage("pf_ai_provider_selected") private var selectedAiProviderRaw = ApiProvider.openai.rawValue
     @AppStorage("pf_ai_openai_model_selected") private var selectedOpenAiModelRaw = OpenAiModelOption.gpt52Thinking.rawValue
+    @AppStorage("pf_ai_claude_model_selected") private var selectedClaudeModelRaw = "claude-opus-4-5"
     @AppStorage("pf_ai_openai_effort_selected") private var selectedOpenAiEffortRaw = OpenAiReasoningEffort.none.rawValue
     @AppStorage("pf_debug_mode_enabled") private var debugModeEnabled = false
     @State private var debugTapCount = 0
@@ -4287,6 +4304,21 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+            } else if provider == .claude {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Model")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Picker("Model", selection: claudeModelBinding) {
+                        ForEach(Self.claudeModelOptions, id: \.modelId) { option in
+                            Text(option.label).tag(option.modelId)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    Text("当前模型：\(claudeModelLabel(for: selection.model))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             TextField("\(provider.title) API Key", text: apiKeyBinding(for: provider))
                 .textInputAutocapitalization(.never)
@@ -4322,6 +4354,10 @@ struct ContentView: View {
                     selection.effort != .none
                 let willSendTemperature = openAiSupportsTemperature(model: selection.model, effort: selection.effort)
                 Text("debug: model \(selection.model) · effort \(selection.effort.rawValue) · reasoning \(willSendReasoning) · temperature \(willSendTemperature)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if provider == .claude {
+                Text("debug: model \(selection.model)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -4947,6 +4983,14 @@ struct ContentView: View {
         OpenAiModelOption(rawValue: selectedOpenAiModelRaw) ?? .gpt52Thinking
     }
 
+    private var selectedClaudeModelId: String {
+        let ids = Self.claudeModelOptions.map(\.modelId)
+        if ids.contains(selectedClaudeModelRaw) {
+            return selectedClaudeModelRaw
+        }
+        return Self.claudeModelOptions.first?.modelId ?? "claude-opus-4-5"
+    }
+
     private var selectedOpenAiEffort: OpenAiReasoningEffort {
         OpenAiReasoningEffort(rawValue: selectedOpenAiEffortRaw) ?? .none
     }
@@ -4974,6 +5018,13 @@ struct ContentView: View {
         )
     }
 
+    private var claudeModelBinding: Binding<String> {
+        Binding(
+            get: { selectedClaudeModelId },
+            set: { selectedClaudeModelRaw = $0 }
+        )
+    }
+
     private var openAiEffortBinding: Binding<OpenAiReasoningEffort> {
         Binding(
             get: { selectedOpenAiEffort },
@@ -4985,7 +5036,11 @@ struct ContentView: View {
     }
 
     private var claudeModelId: String {
-        "claude-3-5-sonnet-20240620"
+        selectedClaudeModelId
+    }
+
+    private func claudeModelLabel(for modelId: String) -> String {
+        Self.claudeModelOptions.first(where: { $0.modelId == modelId })?.label ?? modelId
     }
 
     private func allowedEfforts(for modelId: String) -> [OpenAiReasoningEffort] {
@@ -5272,7 +5327,7 @@ struct ContentView: View {
             let modelTitle = OpenAiModelOption.allCases.first(where: { $0.modelId == selection.model })?.title ?? selection.model
             return "OpenAI \(modelTitle) · effort \(selection.effort.rawValue)"
         case .claude:
-            return "Claude"
+            return "Claude \(claudeModelLabel(for: selection.model))"
         }
     }
 
