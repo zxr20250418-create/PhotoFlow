@@ -1305,3 +1305,18 @@ Acceptance:
 A 分段含“本年”，切换后指标随范围变化
 B 本年范围正确（自然年），且 Top3/Bottom1 也随之变化
 C ios_safe PASS；0 配置改动
+## DONE — TC-IOS-CLAUDE-MODEL-PICKER-V1
+Status: DONE (merged in PR #203)
+Priority: P1
+Goal:
+- Claude 模型选择（alias）+ 连接测试按模型记录
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A Claude 模型切换后测试状态按模型记住
+B 默认模型为 claude-opus-4-5
+C ios_safe PASS；0 配置改动
