@@ -26,6 +26,29 @@ B 连接测试状态按 (provider,model,effort) 缓存，切换模型后状态�
 C AI 校验使用当前 model/effort；未测试时明确提示先测试
 D ios_safe PASS；0 配置改动
 
+## DONE — TC-IOS-TRAITS-REVENUE-SHARE-V1
+Status: DONE (merged in PR #209)
+Priority: P1
+Goal:
+- 客户画像特征 Stats 增加“收入占比”口径，并支持与会话占比切换
+
+Scope:
+- StatsTraitsBreakdownView 增加“会话占比 / 收入占比”切换
+- 收入占比按 primaryTrait 口径统计
+- 显示金额已填/未填与未标注收入提示
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 切换会话/收入占比后数值同步变化
+B 收入占比加总≈100%（四舍五入误差允许）
+C revenueTotal=0 显示 --，不崩
+D 显示金额已填/未填提示正确
+E ios_safe PASS；0 配置改动
+
 ## DONE — TC-IOS-AI-REVIEW-CHECKER-V1
 Status: DONE (merged in PR #188)
 Priority: P0
