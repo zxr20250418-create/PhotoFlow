@@ -3051,6 +3051,7 @@ struct ContentView: View {
     @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
     @State private var selectedTraitGroup: String = TraitDefinition.defaultGroupName
+    @State private var traitBreakdownMode: TraitBreakdownMode = .sessions
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
     @State private var reviewDraft = SessionDecisionDraft.empty
@@ -6950,41 +6951,102 @@ struct ContentView: View {
 
     private func traitBreakdownRows(
         sessions: [SessionSummary],
-        group: String,
-        totalSessions: Int
-    ) -> (rows: [TraitBreakdownRow], taggedSessions: Int, untaggedSessions: Int) {
+        group: String
+    ) -> TraitBreakdownSummary {
+        let totalSessions = sessions.count
         let trimmedGroup = group.trimmingCharacters(in: .whitespacesAndNewlines)
         let targetGroup = trimmedGroup.isEmpty ? TraitDefinition.defaultGroupName : trimmedGroup
-        let traitMap = Dictionary(uniqueKeysWithValues: traitsStore.traits.map { ($0.id, $0) })
+        let traitsInGroup = traitsStore.traits(in: targetGroup, includeInactive: true)
+        let traitMap = Dictionary(uniqueKeysWithValues: traitsInGroup.map { ($0.id, $0) })
         var counts: [String: Int] = [:]
+        var revenueByTrait: [String: Int] = [:]
         var taggedSessions = 0
+        var untaggedSessions = 0
+        var amountFilledSessions = 0
+        var revenueTotalCents = 0
+        var untaggedRevenueCents = 0
+
         for summary in sessions {
-            let note = metaStore.meta(for: summary.id).reviewNote
-            guard let log = decodeDecisionLog(from: note) else { continue }
+            let meta = metaStore.meta(for: summary.id)
+            let amount = meta.amountCents
+            if let amount {
+                amountFilledSessions += 1
+                revenueTotalCents += amount
+            }
+            let note = meta.reviewNote
+            guard let log = decodeDecisionLog(from: note) else {
+                untaggedSessions += 1
+                if let amount {
+                    untaggedRevenueCents += amount
+                }
+                continue
+            }
             let ids = Set(log.traitIds ?? [])
-            if ids.isEmpty { continue }
+            if ids.isEmpty {
+                untaggedSessions += 1
+                if let amount {
+                    untaggedRevenueCents += amount
+                }
+                continue
+            }
+            let traits = ids.compactMap { traitMap[$0] }
+            guard let primaryTrait = traits.min(by: {
+                if $0.sortIndex != $1.sortIndex {
+                    return $0.sortIndex < $1.sortIndex
+                }
+                return $0.name < $1.name
+            }) else {
+                untaggedSessions += 1
+                if let amount {
+                    untaggedRevenueCents += amount
+                }
+                continue
+            }
             taggedSessions += 1
-            for id in ids {
-                guard let trait = traitMap[id], trait.group == targetGroup else { continue }
-                counts[id, default: 0] += 1
+            counts[primaryTrait.id, default: 0] += 1
+            if let amount {
+                revenueByTrait[primaryTrait.id, default: 0] += amount
             }
         }
-        let traitsInGroup = traitsStore.traits(in: targetGroup, includeInactive: true)
+        let amountMissingSessions = max(0, totalSessions - amountFilledSessions)
+        let revenueAvailable = revenueTotalCents > 0
         let rows = traitsInGroup.map { trait in
             let count = counts[trait.id] ?? 0
-            let percentText = totalSessions > 0
+            let sessionPercentText = totalSessions > 0
                 ? "\(Int((Double(count) / Double(totalSessions) * 100).rounded()))%"
+                : "--"
+            let revenueCents = revenueByTrait[trait.id] ?? 0
+            let revenueText = revenueAvailable ? formatAmount(cents: revenueCents) : "--"
+            let revenuePercentText = revenueAvailable
+                ? "\(Int((Double(revenueCents) / Double(revenueTotalCents) * 100).rounded()))%"
                 : "--"
             return TraitBreakdownRow(
                 id: trait.id,
                 name: trait.name,
-                count: count,
-                percentText: percentText,
+                sessionCount: count,
+                sessionPercentText: sessionPercentText,
+                revenueText: revenueText,
+                revenuePercentText: revenuePercentText,
                 isActive: trait.isActive
             )
         }
-        let untaggedSessions = max(0, totalSessions - taggedSessions)
-        return (rows, taggedSessions, untaggedSessions)
+        let untaggedRevenueText = revenueAvailable ? formatAmount(cents: untaggedRevenueCents) : "--"
+        let untaggedRevenuePercentText = revenueAvailable
+            ? "\(Int((Double(untaggedRevenueCents) / Double(revenueTotalCents) * 100).rounded()))%"
+            : "--"
+        let showUntaggedRevenue = revenueAvailable && untaggedRevenueCents > 0
+        return TraitBreakdownSummary(
+            totalSessions: totalSessions,
+            taggedSessions: taggedSessions,
+            untaggedSessions: untaggedSessions,
+            amountFilledSessions: amountFilledSessions,
+            amountMissingSessions: amountMissingSessions,
+            revenueAvailable: revenueAvailable,
+            untaggedRevenueText: untaggedRevenueText,
+            untaggedRevenuePercentText: untaggedRevenuePercentText,
+            showUntaggedRevenue: showUntaggedRevenue,
+            rows: rows
+        )
     }
 
     private var statsView: some View {
@@ -7138,8 +7200,7 @@ struct ContentView: View {
         let traitGroup = effectiveTraitGroup(from: traitGroups)
         let traitBreakdown = traitBreakdownRows(
             sessions: filteredSessions,
-            group: traitGroup,
-            totalSessions: count
+            group: traitGroup
         )
         let traitGroupBinding = Binding(
             get: { effectiveTraitGroup(from: traitGroups) },
@@ -7377,10 +7438,8 @@ struct ContentView: View {
             StatsTraitsBreakdownView(
                 groups: traitGroups,
                 selectedGroup: traitGroupBinding,
-                rows: traitBreakdown.rows,
-                totalSessions: count,
-                taggedSessions: traitBreakdown.taggedSessions,
-                untaggedSessions: traitBreakdown.untaggedSessions
+                mode: $traitBreakdownMode,
+                summary: traitBreakdown
             )
             Divider()
             Text("Top 3")
