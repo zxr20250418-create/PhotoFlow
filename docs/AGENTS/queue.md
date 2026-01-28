@@ -1320,7 +1320,8 @@ Acceptance:
 A Claude 模型切换后测试状态按模型记住
 B 默认模型为 claude-opus-4-5
 C ios_safe PASS；0 配置改动
-## ACTIVE — TC-IOS-CUSTOMER-TRAITS-V1
+## DONE — TC-IOS-CUSTOMER-TRAITS-V1
+Status: DONE (merged in PR #207)
 Priority: P0
 Goal:
 - 自定义客户画像特征库（可分组）
