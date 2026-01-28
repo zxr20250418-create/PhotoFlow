@@ -1378,3 +1378,27 @@ A 特征库可管理（新增/编辑/分组/排序/停用）
 B 每单可快速点选特征并持久化
 C Stats 按范围显示分组占比，切换范围同步变化
 D ios_safe PASS；0 配置改动
+## ACTIVE — TC-IOS-HOME-REVENUE-PRIVACY-EYE-V1
+Priority: P1
+Goal:
+- Home 顶部“今日收入”加隐私眼睛按钮，默认隐藏金额
+- App 进后台/回前台后恢复隐藏
+
+Scope:
+- UI：今日收入卡加入 eye/eye.slash 切换
+- hidden=true 显示固定占位：¥•••
+- 仅隐藏“今日收入金额”，不改列表每单金额
+- 存储：AppStorage key = privacy.hideTodayRevenue，default=true
+- scenePhase 进入 background/inactive 强制隐藏，active 不自动展开
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 冷启动 Home：今日收入默认隐藏（¥•••），eye.slash
+B 点击眼睛显示真实金额，图标变 eye
+C 再点恢复隐藏
+D App 切后台再回前台：恢复隐藏
+E ios_safe PASS；0 配置改动
