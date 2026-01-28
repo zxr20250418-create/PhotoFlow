@@ -3052,6 +3052,7 @@ struct ContentView: View {
     @State private var statsRange: StatsRange = .today
     @State private var selectedTraitGroup: String = TraitDefinition.defaultGroupName
     @State private var traitBreakdownMode: TraitBreakdownMode = .sessions
+    @AppStorage("privacy.hideTodayRevenue") private var hideTodayRevenue: Bool = true
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
     @State private var reviewDraft = SessionDecisionDraft.empty
@@ -3422,7 +3423,10 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
+            guard phase == .active else {
+                hideTodayRevenue = true
+                return
+            }
             cloudStore.refreshFromStore()
             refreshDutyState()
             updateTodayDayKey()
@@ -6907,36 +6911,48 @@ struct ContentView: View {
         }
         let count = todaySessions.count
         let amountText = metaTotals.hasAmount ? formatAmount(cents: metaTotals.amountCents) : "--"
+        let displayAmount = hideTodayRevenue ? "¥•••" : amountText
         let rateText = (metaTotals.hasShot && metaTotals.hasSelected && metaTotals.shot > 0)
             ? "\(Int((Double(metaTotals.selected) / Double(metaTotals.shot) * 100).rounded()))%"
             : "--"
-        return Button(action: { selectedTab = .stats }) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("今日收入")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    Text(amountText)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("今日收入")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                    Text(displayAmount)
                         .font(.title2)
                         .fontWeight(.bold)
                         .monospacedDigit()
+                        .frame(width: 72, alignment: .trailing)
+                    Button {
+                        hideTodayRevenue.toggle()
+                    } label: {
+                        Image(systemName: hideTodayRevenue ? "eye.slash" : "eye")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-                Text("\(count)单 · 总 \(format(totals.total))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                Text("拍 \(format(totals.shooting)) · 选 \(format(totals.selecting)) · 拍 \(metaTotals.hasShot ? "\(metaTotals.shot)张" : "--") · 选 \(metaTotals.hasSelected ? "\(metaTotals.selected)张" : "--") · 选片率 \(rateText)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.thinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            Text("\(count)单 · 总 \(format(totals.total))")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Text("拍 \(format(totals.shooting)) · 选 \(format(totals.selecting)) · 拍 \(metaTotals.hasShot ? "\(metaTotals.shot)张" : "--") · 选 \(metaTotals.hasSelected ? "\(metaTotals.selected)张" : "--") · 选片率 \(rateText)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
         }
-        .buttonStyle(.plain)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .onTapGesture {
+            selectedTab = .stats
+        }
     }
 
     private func effectiveTraitGroup(from groups: [String]) -> String {
