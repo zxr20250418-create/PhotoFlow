@@ -2778,6 +2778,7 @@ struct ContentView: View {
         var outcomeVerdict: String?
         var nextDecision: String?
         var rawNote: String?
+        var traitIds: [String]?
         var aiReview: SessionAIReview?
         var drafts: SessionDecisionDrafts?
         var draftMeta: SessionDraftMeta?
@@ -3022,6 +3023,7 @@ struct ContentView: View {
     @StateObject private var shiftRecordStore: ShiftRecordStore
     @StateObject private var dailyMemoStore: DailyMemoStore
     @StateObject private var sessionVisibilityStore: SessionVisibilityStore
+    @StateObject private var traitsStore: TraitsStore
     @State private var editingSession: EditingSession?
     @State private var timeEditingSession: TimeEditingSession?
     @State private var swipeDeleteCandidateId: String?
@@ -3040,6 +3042,7 @@ struct ContentView: View {
     @State private var draftManualSelectedCount = ""
     @State private var draftManualReviewNote = ""
     @State private var isManualSessionPresented = false
+    @State private var isTraitsManagerPresented = false
     @State private var draftOverrideShootingStart = Date()
     @State private var draftOverrideSelectingStart = Date()
     @State private var draftOverrideEndedAt = Date()
@@ -3047,6 +3050,7 @@ struct ContentView: View {
     @State private var draftOverrideEndedEnabled = false
     @State private var lastPromptedSessionId: String?
     @State private var statsRange: StatsRange = .today
+    @State private var selectedTraitGroup: String = TraitDefinition.defaultGroupName
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
     @State private var reviewDraft = SessionDecisionDraft.empty
@@ -3060,6 +3064,8 @@ struct ContentView: View {
     @State private var reviewDraftsLastSaved = SessionDecisionDrafts.empty
     @State private var reviewDraftMeta: SessionDraftMeta?
     @State private var reviewDraftMetaLastSaved: SessionDraftMeta?
+    @State private var reviewDraftTraitIds: Set<String> = []
+    @State private var reviewDraftTraitIdsLastSaved: Set<String> = []
     @State private var reviewDraftHidden: Set<ReviewFieldKey> = []
     @State private var aiRewriteRunning: Set<ReviewFieldKey> = []
     @State private var aiRewriteError: [ReviewFieldKey: String] = [:]
@@ -3142,6 +3148,7 @@ struct ContentView: View {
         _shiftRecordStore = StateObject(wrappedValue: shiftStore)
         _dailyMemoStore = StateObject(wrappedValue: DailyMemoStore(cloudStore: cloud))
         _sessionVisibilityStore = StateObject(wrappedValue: SessionVisibilityStore(cloudStore: cloud))
+        _traitsStore = StateObject(wrappedValue: TraitsStore())
         let defaults = UserDefaults.standard
         let start = defaults.object(forKey: "pf_shift_start") as? Date
         let end = defaults.object(forKey: "pf_shift_end") as? Date
@@ -3204,6 +3211,21 @@ struct ContentView: View {
                                 TextField("选片张数", text: $draftSelected)
                                     .keyboardType(.numberPad)
                                     .textFieldStyle(.roundedBorder)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        let traitGroups = traitsStore.groupedTraits(
+                            includeInactive: false,
+                            includeSelectedIds: reviewDraftTraitIds
+                        )
+                        GroupBox("客户画像特征") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                TraitChipsView(groups: traitGroups, selectedIds: $reviewDraftTraitIds)
+                                Button("管理特征") {
+                                    isTraitsManagerPresented = true
+                                }
+                                .buttonStyle(.bordered)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -3363,6 +3385,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isManualSessionPresented) {
             manualSessionEditor
+        }
+        .sheet(isPresented: $isTraitsManagerPresented) {
+            TraitsManagerView(store: traitsStore)
         }
         .sheet(isPresented: $isDailyReviewPresented) {
             dailyReviewSheet
@@ -3678,9 +3703,18 @@ struct ContentView: View {
         return meta
     }
 
+    private func normalizedTraitIds(_ ids: Set<String>) -> [String]? {
+        let filtered = ids
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .sorted()
+        return filtered.isEmpty ? nil : filtered
+    }
+
     private func buildDecisionLog(aiReview: SessionAIReview?) -> SessionDecisionLogV1 {
         let drafts = normalizedDrafts(reviewDrafts)
         let draftMeta = normalizedDraftMeta(reviewDraftMeta, drafts: reviewDrafts)
+        let traitIds = normalizedTraitIds(reviewDraftTraitIds)
         return SessionDecisionLogV1(
             facts: normalizedReviewText(reviewDraft.facts),
             decision: normalizedReviewText(reviewDraft.decision),
@@ -3689,6 +3723,7 @@ struct ContentView: View {
             outcomeVerdict: normalizedReviewText(reviewDraft.outcomeVerdict),
             nextDecision: normalizedReviewText(reviewDraft.nextDecision),
             rawNote: normalizedReviewText(draftReviewNote),
+            traitIds: traitIds,
             aiReview: aiReview,
             drafts: drafts,
             draftMeta: draftMeta,
@@ -3709,7 +3744,8 @@ struct ContentView: View {
         ].contains { normalizedReviewText($0) != nil }
         let hasAi = aiReview != nil
         let hasDrafts = log.drafts != nil
-        guard hasContent || hasAi || hasDrafts else { return nil }
+        let hasTraits = !(log.traitIds ?? []).isEmpty
+        guard hasContent || hasAi || hasDrafts || hasTraits else { return nil }
         return encodeDecisionLog(log)
     }
 
@@ -3729,6 +3765,7 @@ struct ContentView: View {
             reviewDraftAiReview = log.aiReview
             reviewDrafts = log.drafts ?? .empty
             reviewDraftMeta = log.draftMeta
+            reviewDraftTraitIds = Set(log.traitIds ?? [])
         } else {
             let fallback = normalizedReviewText(note) ?? ""
             reviewDraft = SessionDecisionDraft(
@@ -3744,12 +3781,14 @@ struct ContentView: View {
             reviewDraftAiReview = nil
             reviewDrafts = .empty
             reviewDraftMeta = nil
+            reviewDraftTraitIds = []
         }
         reviewDraftLastSaved = reviewDraft
         reviewDraftRawNoteLastSaved = draftReviewNote
         reviewDraftAiLastSaved = reviewDraftAiReview
         reviewDraftsLastSaved = reviewDrafts
         reviewDraftMetaLastSaved = reviewDraftMeta
+        reviewDraftTraitIdsLastSaved = reviewDraftTraitIds
         reviewDraftSessionId = sessionId
         aiReviewError = nil
         aiRewriteError = [:]
@@ -5402,6 +5441,7 @@ struct ContentView: View {
         reviewDraftLastSaved = reviewDraft
         reviewDraftRawNoteLastSaved = draftReviewNote
         reviewDraftAiLastSaved = aiReview
+        reviewDraftTraitIdsLastSaved = reviewDraftTraitIds
         reviewDraftWasStructured = isStructuredReviewNote(reviewNote)
         reviewDraftSessionId = sessionId
     }
@@ -6898,6 +6938,55 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    private func effectiveTraitGroup(from groups: [String]) -> String {
+        if groups.contains(selectedTraitGroup) {
+            return selectedTraitGroup
+        }
+        if groups.contains(TraitDefinition.defaultGroupName) {
+            return TraitDefinition.defaultGroupName
+        }
+        return groups.first ?? TraitDefinition.defaultGroupName
+    }
+
+    private func traitBreakdownRows(
+        sessions: [SessionSummary],
+        group: String,
+        totalSessions: Int
+    ) -> (rows: [TraitBreakdownRow], taggedSessions: Int, untaggedSessions: Int) {
+        let trimmedGroup = group.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetGroup = trimmedGroup.isEmpty ? TraitDefinition.defaultGroupName : trimmedGroup
+        let traitMap = Dictionary(uniqueKeysWithValues: traitsStore.traits.map { ($0.id, $0) })
+        var counts: [String: Int] = [:]
+        var taggedSessions = 0
+        for summary in sessions {
+            let note = metaStore.meta(for: summary.id).reviewNote
+            guard let log = decodeDecisionLog(from: note) else { continue }
+            let ids = Set(log.traitIds ?? [])
+            if ids.isEmpty { continue }
+            taggedSessions += 1
+            for id in ids {
+                guard let trait = traitMap[id], trait.group == targetGroup else { continue }
+                counts[id, default: 0] += 1
+            }
+        }
+        let traitsInGroup = traitsStore.traits(in: targetGroup, includeInactive: true)
+        let rows = traitsInGroup.map { trait in
+            let count = counts[trait.id] ?? 0
+            let percentText = totalSessions > 0
+                ? "\(Int((Double(count) / Double(totalSessions) * 100).rounded()))%"
+                : "--"
+            return TraitBreakdownRow(
+                id: trait.id,
+                name: trait.name,
+                count: count,
+                percentText: percentText,
+                isActive: trait.isActive
+            )
+        }
+        let untaggedSessions = max(0, totalSessions - taggedSessions)
+        return (rows, taggedSessions, untaggedSessions)
+    }
+
     private var statsView: some View {
         let isoCal = Calendar(identifier: .iso8601)
         let todayKey = Self.dayKey(for: now)
@@ -7045,6 +7134,17 @@ struct ContentView: View {
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
         let dataQuality = dataQualityReport(for: filteredSessions, sessionLabel: sessionLabel)
+        let traitGroups = traitsStore.groupsSorted(includeInactive: true)
+        let traitGroup = effectiveTraitGroup(from: traitGroups)
+        let traitBreakdown = traitBreakdownRows(
+            sessions: filteredSessions,
+            group: traitGroup,
+            totalSessions: count
+        )
+        let traitGroupBinding = Binding(
+            get: { effectiveTraitGroup(from: traitGroups) },
+            set: { selectedTraitGroup = $0 }
+        )
         let shiftWindow: (start: Date, end: Date)? = {
             guard let start = shiftStart else { return nil }
             let end = shiftEnd ?? (effectiveOnDuty ? now : nil)
@@ -7273,6 +7373,15 @@ struct ContentView: View {
             Text("RPH \(rphText)")
             Text("平均选片率（按单） \(avgSelectRateText)（全要 \(allTakeShareText)）")
             Text("选片率（按张） \(weightedPickRateText)")
+            Divider()
+            StatsTraitsBreakdownView(
+                groups: traitGroups,
+                selectedGroup: traitGroupBinding,
+                rows: traitBreakdown.rows,
+                totalSessions: count,
+                taggedSessions: traitBreakdown.taggedSessions,
+                untaggedSessions: traitBreakdown.untaggedSessions
+            )
             Divider()
             Text("Top 3")
                 .font(.headline)
@@ -8575,8 +8684,11 @@ struct ContentView: View {
         let aiChanged = reviewDraftAiReview != reviewDraftAiLastSaved
         let draftsChanged = reviewDrafts != reviewDraftsLastSaved
         let draftsMetaChanged = reviewDraftMeta != reviewDraftMetaLastSaved
+        let traitsChanged = reviewDraftTraitIds != reviewDraftTraitIdsLastSaved
         let reviewNote: String? = {
-            guard reviewChanged || rawChanged || aiChanged || draftsChanged || draftsMetaChanged else { return existingNote }
+            guard reviewChanged || rawChanged || aiChanged || draftsChanged || draftsMetaChanged || traitsChanged else {
+                return existingNote
+            }
             return buildDecisionLogNote(aiReview: reviewDraftAiReview)
         }()
         let meta = SessionMeta(
@@ -8586,7 +8698,7 @@ struct ContentView: View {
             reviewNote: reviewNote
         )
         metaStore.update(meta, for: sessionId)
-        if reviewChanged || rawChanged || aiChanged || draftsChanged || draftsMetaChanged {
+        if reviewChanged || rawChanged || aiChanged || draftsChanged || draftsMetaChanged || traitsChanged {
             reviewDraftLastSaved = reviewDraft
             reviewDraftRawNoteLastSaved = rawNoteNormalized ?? ""
             reviewDraftWasStructured = isStructuredReviewNote(reviewNote)
@@ -8594,6 +8706,7 @@ struct ContentView: View {
             reviewDraftAiLastSaved = reviewDraftAiReview
             reviewDraftsLastSaved = reviewDrafts
             reviewDraftMetaLastSaved = reviewDraftMeta
+            reviewDraftTraitIdsLastSaved = reviewDraftTraitIds
         }
     }
 
