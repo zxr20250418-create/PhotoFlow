@@ -1320,3 +1320,37 @@ Acceptance:
 A Claude 模型切换后测试状态按模型记住
 B 默认模型为 claude-opus-4-5
 C ios_safe PASS；0 配置改动
+## ACTIVE — TC-IOS-CUSTOMER-TRAITS-V1
+Priority: P0
+Goal:
+- 自定义客户画像特征库（可分组）
+- 每单一键点选已保存的特征
+- Stats 按分组统计客户群体占比百分比
+
+Scope:
+1) Traits Library（本地）
+- TraitDefinition: id, name, group, sortIndex, isActive
+- 管理页：新增/改名/改组/排序/停用（不删除历史）
+
+2) Session 选择（编辑指标页第一页）
+- 多选 chips：点选/取消
+- 入口“管理特征”
+- 存储：traitIds 写入 PF_DECLOG_V1 JSON（reviewNote 内 traitIds: [String]），不改模型
+
+3) Stats 占比
+- 新增区块：客户群体占比
+- group picker（默认“客群”，不存在则用第一个 group）
+- 计算：按会话数占比 percent=count/totalSessionsInRange
+- 显示：特征名 + 数量 + 百分比
+- 同时显示未标注数量（traitIds 为空的会话数）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 特征库可管理（新增/编辑/分组/排序/停用）
+B 每单可快速点选特征并持久化
+C Stats 按范围显示分组占比，切换范围同步变化
+D ios_safe PASS；0 配置改动
