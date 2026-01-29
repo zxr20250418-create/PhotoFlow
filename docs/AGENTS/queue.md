@@ -1403,3 +1403,27 @@ B 点击眼睛显示真实金额，图标变 eye
 C 再点恢复隐藏
 D App 切后台再回前台：恢复隐藏
 E ios_safe PASS；0 配置改动
+## ACTIVE — TC-IOS-IPAD-RECORDING-MIRROR-V1
+Priority: P0
+Goal:
+- iPad 端具备与 iPhone 同等记录闭环：阶段推进 + 今日会话列表 + 单子详情/编辑
+- CloudKit 自动同步（离线可用，联网后合并）
+
+Scope:
+- 复用现有 recording 动作与 store，不新造状态机
+- iPad SplitView：左今日会话列表；右单子详情（复用 iPhone 详情/编辑）
+- 阶段推进区块：拍摄/选片/结束
+- 编辑指标：金额/拍摄张数/选片张数/客户画像特征/复盘 5 槽位
+- “显示全部”仅在 Settings->Debug 或长按菜单开启，默认仅显示今日
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A iPad 推进阶段后，iPhone 60 秒内同步出现
+B iPad 编辑金额/张数/特征/复盘，iPhone 60 秒内同步可见
+C iPhone 编辑同字段，iPad 60 秒内同步可见
+D iPad 离线记录，联网后自动同步
+E ios_safe PASS；0 配置改动
