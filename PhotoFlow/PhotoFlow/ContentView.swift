@@ -3938,40 +3938,99 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ipadDutyToolbarButton
+                }
+            }
             .safeAreaInset(edge: .top) {
-                ipadStageControls
+                ipadStageControls(selectedSummary: selectedItem?.summary)
             }
         }
     }
 
-    private var ipadStageControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(effectiveOnDuty ? "阶段：\(stageLabel.isEmpty ? "进行中" : stageLabel)" : "未上班")
-                    .font(.headline)
-                Spacer(minLength: 8)
-                if effectiveOnDuty {
-                    Button("下班", role: .destructive) {
-                        setDuty(false)
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Button("上班") {
-                        setDuty(true)
-                    }
-                    .buttonStyle(.borderedProminent)
+    private var ipadDutyToolbarButton: some View {
+        Group {
+            if effectiveOnDuty {
+                Button("下班", role: .destructive) {
+                    setDuty(false)
+                }
+            } else {
+                Button("上班") {
+                    setDuty(true)
                 }
             }
+        }
+        .disabled(isReadOnlyDevice)
+    }
+
+    private func deriveStage(for summary: SessionSummary?) -> Stage {
+        guard let summary else { return .idle }
+        let times = effectiveTimes(for: summary)
+        if times.endedAt != nil {
+            return .ended
+        }
+        if times.selectingStart != nil {
+            return .selecting
+        }
+        if times.shootingStart != nil {
+            return .shooting
+        }
+        return .idle
+    }
+
+    private func canStartShooting(for stage: Stage) -> Bool {
+        stage == .idle || stage == .ended
+    }
+
+    private func canStartSelecting(for stage: Stage) -> Bool {
+        stage == .shooting
+    }
+
+    private func canEndSession(for stage: Stage) -> Bool {
+        stage == .shooting || stage == .selecting
+    }
+
+    @ViewBuilder
+    private func ipadStageButton(
+        _ title: String,
+        isCurrent: Bool,
+        disabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        if isCurrent {
+            Button(title, action: action)
+                .buttonStyle(.borderedProminent)
+                .disabled(disabled)
+        } else {
+            Button(title, action: action)
+                .buttonStyle(.bordered)
+                .disabled(disabled)
+        }
+    }
+
+    private func ipadStageControls(selectedSummary: SessionSummary?) -> some View {
+        let derivedStage = deriveStage(for: selectedSummary)
+        let stageText = stageLabel(for: derivedStage)
+        let canShoot = canStartShooting(for: derivedStage)
+        let canSelect = canStartSelecting(for: derivedStage)
+        let canEnd = canEndSession(for: derivedStage)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(effectiveOnDuty ? "阶段：\(stageText.isEmpty ? "进行中" : stageText)" : "未上班")
+                    .font(.headline)
+                Spacer(minLength: 8)
+            }
             HStack(spacing: 8) {
-                Button("拍摄") { performStageAction(.shooting) }
-                    .buttonStyle(.bordered)
-                    .disabled(!canStartShooting || !effectiveOnDuty)
-                Button("选片") { performStageAction(.selecting) }
-                    .buttonStyle(.bordered)
-                    .disabled(!canStartSelecting || !effectiveOnDuty)
-                Button("结束") { performStageAction(.ended) }
-                    .buttonStyle(.bordered)
-                    .disabled(!canEndSession || !effectiveOnDuty)
+                ipadStageButton("拍摄", isCurrent: derivedStage == .shooting, disabled: !canShoot || !effectiveOnDuty) {
+                    performStageAction(.shooting)
+                }
+                ipadStageButton("选片", isCurrent: derivedStage == .selecting, disabled: !canSelect || !effectiveOnDuty) {
+                    performStageAction(.selecting)
+                }
+                ipadStageButton("结束", isCurrent: derivedStage == .ended, disabled: !canEnd || !effectiveOnDuty) {
+                    performStageAction(.ended)
+                }
             }
             .font(.subheadline)
         }
@@ -7738,6 +7797,10 @@ struct ContentView: View {
     }
 
     private var stageLabel: String {
+        stageLabel(for: stage)
+    }
+
+    private func stageLabel(for stage: Stage) -> String {
         switch stage {
         case .idle:
             return ""
