@@ -1427,7 +1427,8 @@ B iPad 编辑金额/张数/特征/复盘，iPhone 60 秒内同步可见
 C iPhone 编辑同字段，iPad 60 秒内同步可见
 D iPad 离线记录，联网后自动同步
 E ios_safe PASS；0 配置改动
-## ACTIVE — TC-IOS-HISTORY-SESSION-EDIT-V1
+## DONE — TC-IOS-HISTORY-SESSION-EDIT-V1
+Status: DONE (merged in PR #217)
 Priority: P1
 Goal:
 - 查看历史任意日期会话列表，并可编辑每单详情（金额/拍摄张数/选片张数/客户画像特征/复盘5槽位/decisionTag）
