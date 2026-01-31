@@ -1403,7 +1403,8 @@ B 点击眼睛显示真实金额，图标变 eye
 C 再点恢复隐藏
 D App 切后台再回前台：恢复隐藏
 E ios_safe PASS；0 配置改动
-## ACTIVE — TC-IOS-IPAD-RECORDING-MIRROR-V1
+## DONE — TC-IOS-IPAD-RECORDING-MIRROR-V1
+Status: DONE (merged in PR #215)
 Priority: P0
 Goal:
 - iPad 端具备与 iPhone 同等记录闭环：阶段推进 + 今日会话列表 + 单子详情/编辑
