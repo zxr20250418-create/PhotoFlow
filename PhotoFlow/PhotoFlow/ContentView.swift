@@ -3100,6 +3100,8 @@ struct ContentView: View {
     @State private var isShiftCalendarPresented = false
     @State private var isHistorySessionsPresented = false
     @State private var historySessionsDate = Date()
+    @State private var historyHiddenIds: Set<String> = []
+    @State private var pendingHistoryDeleteId: String?
     @State private var selectedIpadSessionId: String?
     @State private var ipadRecordingSelectionId: String?
     @State private var ipadDashboardSnapshot = IpadDashboardSnapshot.empty
@@ -7854,6 +7856,7 @@ struct ContentView: View {
                 let right = effectiveSessionStartTime(for: rhs) ?? Date.distantPast
                 return left < right
             }
+            .filter { !historyHiddenIds.contains($0.id) }
         return NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
                 DatePicker("日期", selection: $historySessionsDate, displayedComponents: .date)
