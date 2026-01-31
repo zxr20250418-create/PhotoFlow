@@ -3098,6 +3098,8 @@ struct ContentView: View {
     @State private var weeklyReviewDraftWeekKey: String?
     @State private var isDataQualityPresented = false
     @State private var isShiftCalendarPresented = false
+    @State private var isHistorySessionsPresented = false
+    @State private var historySessionsDate = Date()
     @State private var selectedIpadSessionId: String?
     @State private var ipadDashboardSnapshot = IpadDashboardSnapshot.empty
     @State private var ipadDashboardRange: StatsRange = .today
@@ -7287,8 +7289,13 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
-            Button("记录（月历）") {
-                isShiftCalendarPresented = true
+            HStack(spacing: 12) {
+                Button("历史会话") {
+                    isHistorySessionsPresented = true
+                }
+                Button("记录（月历）") {
+                    isShiftCalendarPresented = true
+                }
             }
             .buttonStyle(.bordered)
 
@@ -7525,6 +7532,9 @@ struct ContentView: View {
         .sheet(isPresented: $isShiftCalendarPresented) {
             shiftCalendarView
         }
+        .sheet(isPresented: $isHistorySessionsPresented) {
+            historySessionsSheet
+        }
     }
 
     private var bottomBar: some View {
@@ -7587,6 +7597,74 @@ struct ContentView: View {
 
     private var isReadOnlyDevice: Bool {
         UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    private var historySessionsSheet: some View {
+        let selectedDayKey = Self.dayKey(for: historySessionsDate)
+        let sessions = effectiveSessionSummaries
+            .filter { summary in
+                guard let shootingStart = effectiveTimes(for: summary).shootingStart else { return false }
+                return Self.dayKey(for: shootingStart) == selectedDayKey
+            }
+            .sorted { (lhs, rhs) in
+                let left = effectiveSessionStartTime(for: lhs) ?? Date.distantPast
+                let right = effectiveSessionStartTime(for: rhs) ?? Date.distantPast
+                return left < right
+            }
+        return NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                DatePicker("日期", selection: $historySessionsDate, displayedComponents: .date)
+                    .datePickerStyle(.compact)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                if sessions.isEmpty {
+                    Text("暂无会话")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal)
+                    Spacer(minLength: 0)
+                } else {
+                    List {
+                        ForEach(Array(sessions.enumerated()), id: \.element.id) { index, summary in
+                            let timeText = effectiveSessionStartTime(for: summary).map(formatSessionTime) ?? "--"
+                            let amountText = amountText(for: summary)
+                            let metaText = metaSummary(for: summary.id)
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("第\(index + 1)单 · \(timeText)")
+                                        .font(.subheadline)
+                                    if let metaText {
+                                        Text(metaText)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                                Text(amountText)
+                                    .font(.subheadline)
+                                    .monospacedDigit()
+                                Button {
+                                    editingSession = EditingSession(id: summary.id)
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("历史会话")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        isHistorySessionsPresented = false
+                    }
+                }
+            }
+        }
     }
 
     private var isDebugBuild: Bool {
