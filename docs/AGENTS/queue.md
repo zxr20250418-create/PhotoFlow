@@ -1427,3 +1427,30 @@ B iPad 编辑金额/张数/特征/复盘，iPhone 60 秒内同步可见
 C iPhone 编辑同字段，iPad 60 秒内同步可见
 D iPad 离线记录，联网后自动同步
 E ios_safe PASS；0 配置改动
+## DONE — TC-IOS-HISTORY-SESSION-EDIT-V1
+Status: DONE (merged in PR #217)
+Priority: P1
+Goal:
+- 查看历史任意日期会话列表，并可编辑每单详情（金额/拍摄张数/选片张数/客户画像特征/复盘5槽位/decisionTag）
+- Home 仍只显示今天
+
+Scope:
+1) Stats 顶部新增入口按钮「历史会话」
+2) History Sessions 页面
+- DatePicker 选日（默认今天）
+- 列表显示该日会话（按时间排序）
+- 每行铅笔按钮进入编辑指标页（复用现有编辑页）
+3) 数据与同步
+- 过滤口径：shootingStart dayKey
+- 编辑后 bump revision 与 updatedAt（复用现有逻辑）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A Stats 点击“历史会话”，选择过去日期显示当天会话
+B 铅笔进入编辑页可修改并保存
+C 保存后列表立即更新，重启后仍保留
+D iPad 端同步可见（允许延迟）
