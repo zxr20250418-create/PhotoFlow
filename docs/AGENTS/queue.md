@@ -1455,3 +1455,32 @@ A Stats 点击“历史会话”，选择过去日期显示当天会话
 B 铅笔进入编辑页可修改并保存
 C 保存后列表立即更新，重启后仍保留
 D iPad 端同步可见（允许延迟）
+## ACTIVE — TC-IOS-HISTORY-SESSION-DELETE-V1
+Priority: P0
+Goal:
+- 历史会话列表支持作废/删除（不会复活），并跨设备同步消失
+- Home today-only 语义不变
+
+Scope:
+1) 历史会话列表 swipeActions
+- 作废（isVoided）
+- 删除（isDeleted，需二次确认）
+- 删除/作废后行立刻隐藏（乐观）
+2) tombstone + 自证成功
+- 删除/作废：对同 sessionId 的所有记录写 isDeleted/isVoided=true、updatedAt=now、revision=nowMillis+10_000
+- 保存后立即 refetch winner；若 winnerDeleted/winnerVoided 不成立：提示失败并回滚隐藏
+3) 全局过滤保持一致
+- sessionSummaries / Stats / Top3 / Bottom1 / 列表默认过滤 isDeleted/isVoided
+- 按 sessionId 分组取 revision 最大 winner；winner deleted/voided 则整组不显示
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 历史会话列表：铅笔编辑任意历史单并保存
+B 左滑删除：行立刻隐藏；Home/Stats/Top3/Bottom1 不再出现；重启不复活
+C 删除后 iPad/iPhone 另一端 60 秒内也消失
+D 删除失败会提示并回滚隐藏
+E ios_safe PASS；0 配置改动
