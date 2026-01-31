@@ -3101,6 +3101,7 @@ struct ContentView: View {
     @State private var isHistorySessionsPresented = false
     @State private var historySessionsDate = Date()
     @State private var selectedIpadSessionId: String?
+    @State private var ipadRecordingSelectionId: String?
     @State private var ipadDashboardSnapshot = IpadDashboardSnapshot.empty
     @State private var ipadDashboardRange: StatsRange = .today
     @State private var ipadMemoSelectedKey = ""
@@ -3109,6 +3110,7 @@ struct ContentView: View {
     @State private var ipadMemoConflictNotice: String?
     @State private var ipadMemoLastRevision: Int64 = 0
     @State private var ipadMemoLastSource = ""
+    @AppStorage("pf_ipad_show_all_sessions") private var ipadShowAllSessions = false
     @AppStorage("pf_openai_api_key") private var openaiApiKey = ""
     @AppStorage("pf_claude_api_key") private var claudeApiKey = ""
     @AppStorage("pf_ai_provider_selected") private var selectedAiProviderRaw = ApiProvider.openai.rawValue
@@ -3164,8 +3166,8 @@ struct ContentView: View {
     }
 
     var body: some View {
-        if isReadOnlyDevice {
-            ipadSyncView
+        if isPadDevice {
+            ipadRecordingView
         } else {
         ZStack {
             if selectedTab == .home {
@@ -3854,6 +3856,239 @@ struct ContentView: View {
 
     private func effectiveSessionSortKey(for summary: SessionSummary) -> Date {
         effectiveSessionStartTime(for: summary) ?? Date.distantPast
+    }
+
+    private struct IpadRecordingItem: Identifiable {
+        let id: String
+        let summary: SessionSummary
+        let order: Int
+        let isActive: Bool
+    }
+
+    private func ipadRecordingItems() -> [IpadRecordingItem] {
+        let base: [SessionSummary]
+        if ipadShowAllSessions {
+            base = effectiveSessionSummaries.sorted { effectiveSessionSortKey(for: $0) > effectiveSessionSortKey(for: $1) }
+        } else {
+            base = homeTimelineDisplaySessions()
+        }
+        let activeId = activeTimelineSessionId(from: effectiveSessionSummaries)
+        return base.enumerated().map { index, summary in
+            IpadRecordingItem(
+                id: summary.id,
+                summary: summary,
+                order: base.count - index,
+                isActive: summary.id == activeId
+            )
+        }
+    }
+
+    private var ipadRecordingView: some View {
+        let items = ipadRecordingItems()
+        let selectedItem = items.first { $0.id == ipadRecordingSelectionId } ?? items.first
+        let headerTitle = ipadShowAllSessions ? "全部会话（Debug）" : "今日会话"
+        return NavigationSplitView {
+            List {
+                Section(header: Text(headerTitle).font(.headline).textCase(nil)) {
+                    if items.isEmpty {
+                        Text("暂无记录")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(items) { item in
+                            let isSelected = ipadRecordingSelectionId == item.id
+                            Button {
+                                ipadRecordingSelectionId = item.id
+                            } label: {
+                                ipadRecordingRow(item: item)
+                                    .padding(6)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(isSelected ? Color.primary.opacity(0.08) : Color.clear)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .navigationTitle("记录")
+            .contextMenu {
+                Button(ipadShowAllSessions ? "仅显示今日" : "显示全部") {
+                    ipadShowAllSessions.toggle()
+                }
+            }
+            .onAppear {
+                if ipadRecordingSelectionId == nil {
+                    ipadRecordingSelectionId = items.first?.id
+                }
+            }
+            .onChange(of: items.map(\.id)) { _, newIds in
+                guard let selected = ipadRecordingSelectionId, newIds.contains(selected) else {
+                    ipadRecordingSelectionId = newIds.first
+                    return
+                }
+            }
+        } detail: {
+            NavigationStack {
+                if let item = selectedItem {
+                    sessionDetailView(summary: item.summary, order: item.order)
+                } else {
+                    Text("请选择会话")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ipadDutyToolbarButton
+                }
+            }
+            .safeAreaInset(edge: .top) {
+                ipadStageControls(selectedSummary: selectedItem?.summary)
+            }
+        }
+    }
+
+    private var ipadDutyToolbarButton: some View {
+        Group {
+            if effectiveOnDuty {
+                Button("下班", role: .destructive) {
+                    setDuty(false)
+                }
+            } else {
+                Button("上班") {
+                    setDuty(true)
+                }
+            }
+        }
+        .disabled(isReadOnlyDevice)
+    }
+
+    private func deriveStage(for summary: SessionSummary?) -> Stage {
+        guard let summary else { return .idle }
+        let times = effectiveTimes(for: summary)
+        if times.endedAt != nil {
+            return .ended
+        }
+        if times.selectingStart != nil {
+            return .selecting
+        }
+        if times.shootingStart != nil {
+            return .shooting
+        }
+        return .idle
+    }
+
+    private func canStartShooting(for stage: Stage) -> Bool {
+        stage == .idle || stage == .ended
+    }
+
+    private func canStartSelecting(for stage: Stage) -> Bool {
+        stage == .shooting
+    }
+
+    private func canEndSession(for stage: Stage) -> Bool {
+        stage == .shooting || stage == .selecting
+    }
+
+    @ViewBuilder
+    private func ipadStageButton(
+        _ title: String,
+        isCurrent: Bool,
+        disabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        if isCurrent {
+            Button(title, action: action)
+                .buttonStyle(.borderedProminent)
+                .disabled(disabled)
+        } else {
+            Button(title, action: action)
+                .buttonStyle(.bordered)
+                .disabled(disabled)
+        }
+    }
+
+    private func ipadStageControls(selectedSummary: SessionSummary?) -> some View {
+        let derivedStage = deriveStage(for: selectedSummary)
+        let stageText = stageLabel(for: derivedStage)
+        let canShoot = canStartShooting(for: derivedStage)
+        let canSelect = canStartSelecting(for: derivedStage)
+        let canEnd = canEndSession(for: derivedStage)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(effectiveOnDuty ? "阶段：\(stageText.isEmpty ? "进行中" : stageText)" : "未上班")
+                    .font(.headline)
+                Spacer(minLength: 8)
+            }
+            HStack(spacing: 8) {
+                ipadStageButton("拍摄", isCurrent: derivedStage == .shooting, disabled: !canShoot || !effectiveOnDuty) {
+                    performStageAction(.shooting)
+                }
+                ipadStageButton("选片", isCurrent: derivedStage == .selecting, disabled: !canSelect || !effectiveOnDuty) {
+                    performStageAction(.selecting)
+                }
+                ipadStageButton("结束", isCurrent: derivedStage == .ended, disabled: !canEnd || !effectiveOnDuty) {
+                    performStageAction(.ended)
+                }
+            }
+            .font(.subheadline)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal)
+        .padding(.top, 8)
+    }
+
+    private func ipadRecordingRow(item: IpadRecordingItem) -> some View {
+        let summary = item.summary
+        let timeText = effectiveSessionStartTime(for: summary).map(formatSessionTime) ?? "--"
+        let amount = amountText(for: summary)
+        let rph = rphText(for: summary)
+        let metaText = metaSummary(for: summary.id)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                HStack(spacing: 6) {
+                    Text("第\(item.order)单")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    if item.isActive {
+                        Text("进行中")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.15))
+                            .clipShape(Capsule())
+                    }
+                    Text(timeText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(amount)
+                        .font(.headline)
+                        .monospacedDigit()
+                    Text(rph)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            if let metaText {
+                Text(metaText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var ipadSyncView: some View {
@@ -7572,6 +7807,10 @@ struct ContentView: View {
     }
 
     private var stageLabel: String {
+        stageLabel(for: stage)
+    }
+
+    private func stageLabel(for stage: Stage) -> String {
         switch stage {
         case .idle:
             return ""
@@ -7595,8 +7834,12 @@ struct ContentView: View {
         }
     }
 
-    private var isReadOnlyDevice: Bool {
+    private var isPadDevice: Bool {
         UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    private var isReadOnlyDevice: Bool {
+        false
     }
 
     private var historySessionsSheet: some View {
