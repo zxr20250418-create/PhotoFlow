@@ -1477,7 +1477,7 @@ final class CloudDataStore: ObservableObject {
     private func refreshAll(logBoot: Bool = false) {
         guard bootState.isBootReady else { return }
         if logBoot {
-            logBootStage("refreshStart")
+            logBootStage("refresh start")
         }
         sessionRecords = fetchSessionRecords()
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
@@ -1487,7 +1487,7 @@ final class CloudDataStore: ObservableObject {
         updateRevisionSnapshot()
         updateDeletedSnapshot()
         if logBoot {
-            logBootStage("refreshEnd")
+            logBootStage("refresh end")
         }
     }
 
@@ -2280,8 +2280,8 @@ final class CloudDataStore: ObservableObject {
     private func startBootSequence(forceLocal: Bool) {
         bootTask?.cancel()
         bootTimeline.removeAll()
-        logBootStage("boot init")
-        logBootStage("loadStart")
+        logBootStage("boot begin")
+        logBootStage("data stack start")
         bootState = .loading
         bootTask = Task { [weak self] in
             guard let self else { return }
@@ -2313,7 +2313,7 @@ final class CloudDataStore: ObservableObject {
             let cloudContainer = Self.buildContainer(model: model, cloudEnabled: true)
             let cloudLoad = await Self.loadStoresAsync(container: cloudContainer)
             if cloudLoad.success {
-                logBootStage("loadSuccess")
+                logBootStage("data stack ok")
                 applyContainer(cloudContainer, cloudEnabled: true, storeCloudEnabled: true)
                 bootState = .ready
                 storeLoadError = nil
@@ -2330,13 +2330,13 @@ final class CloudDataStore: ObservableObject {
             storeLoadError = detail
             lastCloudError = detail
             setBootError(detail)
-            logBootStage("loadFail")
+            logBootStage("data stack fail")
         }
 
         let localContainer = Self.buildContainer(model: model, cloudEnabled: false)
         let localLoad = await Self.loadStoresAsync(container: localContainer)
         if localLoad.success {
-            logBootStage("loadSuccess")
+            logBootStage("data stack ok")
             applyContainer(localContainer, cloudEnabled: false, storeCloudEnabled: false)
             bootState = .degradedLocal
             if cloudError == nil {
@@ -2351,7 +2351,7 @@ final class CloudDataStore: ObservableObject {
         lastCloudError = localDetail
         setBootError(localDetail)
         bootState = .safeMode(localDetail)
-        logBootStage("loadFail")
+        logBootStage("data stack fail")
     }
 
     private static func storeURL() -> URL {
