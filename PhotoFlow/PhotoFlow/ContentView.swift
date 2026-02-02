@@ -3100,6 +3100,8 @@ struct ContentView: View {
     @State private var isShiftCalendarPresented = false
     @State private var isHistorySessionsPresented = false
     @State private var historySessionsDate = Date()
+    @State private var historyHiddenIds: Set<String> = []
+    @State private var pendingHistoryDeleteId: String?
     @State private var selectedIpadSessionId: String?
     @State private var ipadRecordingSelectionId: String?
     @State private var ipadDashboardSnapshot = IpadDashboardSnapshot.empty
@@ -6531,7 +6533,8 @@ struct ContentView: View {
         Int64(date.timeIntervalSince1970 * 1000) + 10_000
     }
 
-    private func performSwipeVoid(id: String) {
+    @discardableResult
+    private func performSwipeVoid(id: String) -> Bool {
         let now = Date()
         let revision = forcedVisibilityRevision(at: now)
         sessionSummaries.removeAll { $0.id == id }
@@ -6540,7 +6543,9 @@ struct ContentView: View {
         if !debug.winnerVoided {
             activeAlert = .validation("作废失败：未持久化")
             syncSessionSummaries(from: cloudStore.sessionRecords)
+            return false
         }
+        return true
     }
 
     @discardableResult
@@ -7854,6 +7859,7 @@ struct ContentView: View {
                 let right = effectiveSessionStartTime(for: rhs) ?? Date.distantPast
                 return left < right
             }
+            .filter { !historyHiddenIds.contains($0.id) }
         return NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
                 DatePicker("日期", selection: $historySessionsDate, displayedComponents: .date)
@@ -7894,6 +7900,24 @@ struct ContentView: View {
                                 }
                                 .buttonStyle(.bordered)
                             }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button {
+                                    historyHiddenIds.insert(summary.id)
+                                    let ok = performSwipeVoid(id: summary.id)
+                                    if !ok {
+                                        historyHiddenIds.remove(summary.id)
+                                    }
+                                } label: {
+                                    Text("作废")
+                                }
+                                .tint(.orange)
+
+                                Button(role: .destructive) {
+                                    pendingHistoryDeleteId = summary.id
+                                } label: {
+                                    Text("删除")
+                                }
+                            }
                         }
                     }
                     .listStyle(.plain)
@@ -7906,6 +7930,29 @@ struct ContentView: View {
                         isHistorySessionsPresented = false
                     }
                 }
+            }
+            .confirmationDialog("确认删除？", isPresented: Binding(
+                get: { pendingHistoryDeleteId != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingHistoryDeleteId = nil
+                    }
+                }
+            )) {
+                Button("删除", role: .destructive) {
+                    guard let id = pendingHistoryDeleteId else { return }
+                    historyHiddenIds.insert(id)
+                    let ok = deleteSession(id: id, showPending: true)
+                    if !ok {
+                        historyHiddenIds.remove(id)
+                    }
+                    pendingHistoryDeleteId = nil
+                }
+                Button("取消", role: .cancel) {
+                    pendingHistoryDeleteId = nil
+                }
+            } message: {
+                Text("删除后不可恢复")
             }
         }
     }
