@@ -861,6 +861,12 @@ final class CloudDataStore: ObservableObject {
         startBootSequence(forceLocal: isCloudSyncDisabled)
     }
 
+    func boot() async {
+        if bootTask == nil {
+            startBootSequence(forceLocal: isCloudSyncDisabled)
+        }
+    }
+
     func sessionRecord(for sessionId: String) -> SessionRecord? {
         sessionRecords.first { $0.id == sessionId }
     }
@@ -3568,46 +3574,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        Group {
-            if cloudStore.bootState.isSafeMode {
-                safeModeView
-            } else {
-                if isPadDevice {
-                    ipadRecordingView
-                        .overlay(alignment: .top) {
-                            if shouldShowCloudDegradedBanner {
-                                cloudDegradedBanner
-                            }
-                        }
-                        .overlay {
-                            if cloudStore.bootState == .loading {
-                                bootLoadingOverlay
-                            }
-                        }
-                } else {
-                    ZStack {
-                        if selectedTab == .home {
-                            homeView
-                        } else {
-                            statsView
-                        }
-                    }
-                    .safeAreaInset(edge: .bottom) {
-                        bottomBar
-                    }
-                    .overlay(alignment: .top) {
-                        if shouldShowCloudDegradedBanner {
-                            cloudDegradedBanner
-                        }
-                    }
-                    .overlay {
-                        if cloudStore.bootState == .loading {
-                            bootLoadingOverlay
-                        }
-                    }
-                }
-            }
-        }
+        bootGateView
         .alert(item: $activeAlert) { alert in
             Alert(title: Text(alert.message))
         }
@@ -3878,6 +3845,7 @@ struct ContentView: View {
             }
         }
         .task {
+            await cloudStore.boot()
             refreshDutyState()
         }
     }
@@ -6955,6 +6923,85 @@ struct ContentView: View {
     }
 #endif
 
+    private var bootGateView: some View {
+        ZStack(alignment: .top) {
+            if cloudStore.bootState.isSafeMode {
+                safeModeView
+            } else if cloudStore.bootState == .loading {
+                loadingView
+            } else {
+                normalRootView
+            }
+#if DEBUG
+            bootDebugLine
+#endif
+        }
+    }
+
+    private var normalRootView: some View {
+        Group {
+            if isPadDevice {
+                ipadRecordingView
+                    .overlay(alignment: .top) {
+                        if shouldShowCloudDegradedBanner {
+                            cloudDegradedBanner
+                        }
+                    }
+            } else {
+                ZStack {
+                    if selectedTab == .home {
+                        homeView
+                    } else {
+                        statsView
+                    }
+                }
+                .safeAreaInset(edge: .bottom) {
+                    bottomBar
+                }
+                .overlay(alignment: .top) {
+                    if shouldShowCloudDegradedBanner {
+                        cloudDegradedBanner
+                    }
+                }
+            }
+        }
+    }
+
+    private var loadingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Loading...")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground))
+    }
+
+    private var lastBootErrorShort: String {
+        let error = cloudStore.lastBootError ?? "--"
+        let sanitized = error.replacingOccurrences(of: "\n", with: " ")
+        if sanitized.count > 80 {
+            return String(sanitized.prefix(80)) + "…"
+        }
+        return sanitized
+    }
+
+#if DEBUG
+    private var bootDebugLine: some View {
+        Text("\(buildFingerprintText) · \(cloudStore.bootStateLabel) · \(lastBootErrorShort)")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.thinMaterial)
+            .clipShape(Capsule())
+            .padding(.top, 6)
+    }
+#endif
+
     private var shouldShowCloudDegradedBanner: Bool {
         cloudStore.bootState == .degradedLocal || cloudStore.isCloudSyncDisabled
     }
@@ -6996,10 +7043,17 @@ struct ContentView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     GroupBox("lastBootError") {
-                        Text(errorText)
-                            .font(.caption2)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(errorText)
+                                .font(.caption2)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button("复制错误") {
+                                UIPasteboard.general.string = errorText
+                                activeAlert = .validation("错误已复制")
+                            }
+                            .buttonStyle(.bordered)
+                        }
                     }
                     GroupBox("Actions") {
                         VStack(alignment: .leading, spacing: 12) {
