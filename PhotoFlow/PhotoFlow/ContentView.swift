@@ -671,6 +671,42 @@ final class CloudDataStore: ObservableObject {
         let sourceDevice: String
     }
 
+    enum BootState: Equatable {
+        case loading
+        case ready
+        case degradedLocal
+        case safeMode(String)
+
+        var isBootReady: Bool {
+            switch self {
+            case .ready, .degradedLocal:
+                return true
+            case .loading, .safeMode:
+                return false
+            }
+        }
+
+        var isSafeMode: Bool {
+            if case .safeMode = self {
+                return true
+            }
+            return false
+        }
+
+        var errorText: String? {
+            if case let .safeMode(error) = self {
+                return error
+            }
+            return nil
+        }
+    }
+
+    struct BootStage: Equatable, Identifiable {
+        let id = UUID()
+        let name: String
+        let timestamp: Date
+    }
+
     @Published private(set) var sessionRecords: [SessionRecord] = []
     @Published private(set) var shiftRecords: [String: ShiftRecordSnapshot] = [:]
     @Published private(set) var dayMemos: [String: DayMemoSnapshot] = [:]
@@ -690,6 +726,9 @@ final class CloudDataStore: ObservableObject {
     @Published private(set) var cloudTestMemoCount: Int?
     @Published private(set) var cloudTestSessionCount: Int?
     @Published private(set) var isCloudEnabled: Bool = true
+    @Published private(set) var bootState: BootState = .loading
+    @Published private(set) var bootTimeline: [BootStage] = []
+    @Published private(set) var lastBootError: String?
 
     private enum EntityName {
         static let session = "SessionRecord"
@@ -702,6 +741,8 @@ final class CloudDataStore: ObservableObject {
     static let cloudContainerIdentifier = "iCloud.com.zhengxinrong.PhotoFlow"
     static let cloudTestMemoPrefix = "cloud-test-memo-"
     static let cloudTestSessionPrefix = "cloud-test-session-"
+    private static let cloudSyncDisabledKey = "pf_cloud_sync_disabled"
+    private static let lastBootErrorKey = "pf_last_boot_error"
 
     private static let defaultStage = "stopped"
 
@@ -778,11 +819,13 @@ final class CloudDataStore: ObservableObject {
     }
 
     let localSourceDevice: String
-    private let container: NSPersistentCloudKitContainer
-    private let context: NSManagedObjectContext
+    private var container: NSPersistentCloudKitContainer
+    private var context: NSManagedObjectContext
     private var cancellables: Set<AnyCancellable> = []
     private var activeCloudEvents: Set<UUID> = []
     private var blockedSessionIds: Set<String> = []
+    private var bootTask: Task<Void, Never>?
+    private let model: NSManagedObjectModel
 
     struct TombstoneDebugInfo: Equatable {
         let recordsFound: Int
@@ -800,21 +843,17 @@ final class CloudDataStore: ObservableObject {
 
     init() {
         localSourceDevice = CloudDataStore.deviceSource()
-        let setup = Self.makeContainer()
-        container = setup.container
+        model = Self.makeModel()
+        lastBootError = UserDefaults.standard.string(forKey: Self.lastBootErrorKey)
+        container = Self.buildContainer(model: model, cloudEnabled: false)
         context = container.viewContext
-        isCloudEnabled = setup.cloudEnabled
-        storeCloudEnabled = setup.storeCloudEnabled
-        if let error = setup.loadError {
-            let detail = Self.formatError(error)
-            storeLoadError = detail
-            lastCloudError = detail
-        }
-        context.automaticallyMergesChangesFromParent = true
-        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        isCloudEnabled = !Self.isCloudSyncDisabled
+        storeCloudEnabled = false
+        bootState = .loading
+        configureContext()
         observeRemoteChanges()
         observeCloudEvents()
-        refreshAll()
+        startBootSequence(forceLocal: isCloudSyncDisabled)
     }
 
     func sessionRecord(for sessionId: String) -> SessionRecord? {
@@ -1435,7 +1474,11 @@ final class CloudDataStore: ObservableObject {
         refreshAll()
     }
 
-    private func refreshAll() {
+    private func refreshAll(logBoot: Bool = false) {
+        guard bootState.isBootReady else { return }
+        if logBoot {
+            logBootStage("refreshStart")
+        }
         sessionRecords = fetchSessionRecords()
         shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
         dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
@@ -1443,6 +1486,9 @@ final class CloudDataStore: ObservableObject {
         weeklyReviews = Dictionary(uniqueKeysWithValues: fetchWeeklyReviews().map { ($0.weekKey, $0) })
         updateRevisionSnapshot()
         updateDeletedSnapshot()
+        if logBoot {
+            logBootStage("refreshEnd")
+        }
     }
 
     private func updateDeletedSnapshot() {
@@ -1566,7 +1612,8 @@ final class CloudDataStore: ObservableObject {
         if result.success {
             lastRefreshStatus = "reset-success"
             lastRefreshError = nil
-            storeCloudEnabled = true
+            storeCloudEnabled = !isCloudSyncDisabled
+            isCloudEnabled = !isCloudSyncDisabled
             storeLoadError = nil
             lastCloudError = nil
         } else {
@@ -1600,7 +1647,7 @@ final class CloudDataStore: ObservableObject {
                 }
             }
         }
-        let load = Self.loadStores(container: container)
+        let load = Self.loadStoresBlocking(container: container)
         return ResetResult(success: load.success, error: load.error)
     }
 
@@ -1712,6 +1759,43 @@ final class CloudDataStore: ObservableObject {
             components.append("userInfo: " + userInfoPairs.joined(separator: ", "))
         }
         return components.joined(separator: " | ")
+    }
+
+    func bootDiagnosticsText() -> String {
+        var lines: [String] = []
+        lines.append("bootState=\(bootStateLabel)")
+        if let lastBootError {
+            lines.append("lastBootError=\(lastBootError)")
+        }
+        if let storeLoadError {
+            lines.append("storeLoadError=\(storeLoadError)")
+        }
+        if let lastCloudError {
+            lines.append("lastCloudError=\(lastCloudError)")
+        }
+        lines.append("storeCloudEnabled=\(storeCloudEnabled)")
+        lines.append("cloudAccountStatus=\(cloudAccountStatus)")
+        lines.append("cloudSyncDisabled=\(isCloudSyncDisabled)")
+        if !bootTimeline.isEmpty {
+            lines.append("bootTimeline:")
+            for stage in bootTimeline {
+                lines.append("  \(stage.name) @ \(stage.timestamp)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    var bootStateLabel: String {
+        switch bootState {
+        case .loading:
+            return "loading"
+        case .ready:
+            return "ready"
+        case .degradedLocal:
+            return "degradedLocal"
+        case .safeMode:
+            return "safeMode"
+        }
     }
 
     private static func formatNSError(_ error: NSError) -> String {
@@ -2157,6 +2241,119 @@ final class CloudDataStore: ObservableObject {
         UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "phone"
     }
 
+    private static var isCloudSyncDisabled: Bool {
+        UserDefaults.standard.bool(forKey: cloudSyncDisabledKey)
+    }
+
+    var isCloudSyncDisabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.cloudSyncDisabledKey)
+    }
+
+    func setCloudSyncDisabled(_ disabled: Bool) {
+        UserDefaults.standard.set(disabled, forKey: Self.cloudSyncDisabledKey)
+        isCloudEnabled = !disabled
+        if disabled {
+            storeCloudEnabled = false
+            cloudAccountStatus = "disabled"
+        }
+        startBootSequence(forceLocal: disabled)
+    }
+
+    func retryBoot() {
+        startBootSequence(forceLocal: isCloudSyncDisabled)
+    }
+
+    private func configureContext() {
+        context.automaticallyMergesChangesFromParent = true
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+    }
+
+    private func logBootStage(_ name: String) {
+        bootTimeline.append(BootStage(name: name, timestamp: Date()))
+    }
+
+    private func setBootError(_ error: String?) {
+        lastBootError = error
+        UserDefaults.standard.set(error, forKey: Self.lastBootErrorKey)
+    }
+
+    private func startBootSequence(forceLocal: Bool) {
+        bootTask?.cancel()
+        bootTimeline.removeAll()
+        logBootStage("boot init")
+        logBootStage("loadStart")
+        bootState = .loading
+        bootTask = Task { [weak self] in
+            guard let self else { return }
+            await self.bootstrapStores(forceLocal: forceLocal)
+        }
+    }
+
+    private func applyContainer(
+        _ container: NSPersistentCloudKitContainer,
+        cloudEnabled: Bool,
+        storeCloudEnabled: Bool
+    ) {
+        self.container = container
+        context = container.viewContext
+        isCloudEnabled = cloudEnabled
+        self.storeCloudEnabled = storeCloudEnabled
+        activeCloudEvents.removeAll()
+        pendingCount = 0
+        configureContext()
+        cancellables.removeAll()
+        observeRemoteChanges()
+        observeCloudEvents()
+    }
+
+    private func bootstrapStores(forceLocal: Bool) async {
+        let useLocalOnly = forceLocal || isCloudSyncDisabled
+        var cloudError: Error?
+        if !useLocalOnly {
+            let cloudContainer = Self.buildContainer(model: model, cloudEnabled: true)
+            let cloudLoad = await Self.loadStoresAsync(container: cloudContainer)
+            if cloudLoad.success {
+                logBootStage("loadSuccess")
+                applyContainer(cloudContainer, cloudEnabled: true, storeCloudEnabled: true)
+                bootState = .ready
+                storeLoadError = nil
+                lastCloudError = nil
+                setBootError(nil)
+                refreshAll(logBoot: true)
+                return
+            }
+            cloudError = cloudLoad.error
+        }
+
+        if let cloudError {
+            let detail = Self.formatError(cloudError)
+            storeLoadError = detail
+            lastCloudError = detail
+            setBootError(detail)
+            logBootStage("loadFail")
+        }
+
+        let localContainer = Self.buildContainer(model: model, cloudEnabled: false)
+        let localLoad = await Self.loadStoresAsync(container: localContainer)
+        if localLoad.success {
+            logBootStage("loadSuccess")
+            applyContainer(localContainer, cloudEnabled: false, storeCloudEnabled: false)
+            bootState = .degradedLocal
+            if cloudError == nil {
+                storeLoadError = nil
+            }
+            refreshAll(logBoot: true)
+            return
+        }
+
+        let localDetail = localLoad.error.map { Self.formatError($0) } ?? "local store load failed"
+        storeLoadError = localDetail
+        lastCloudError = localDetail
+        setBootError(localDetail)
+        bootState = .safeMode(localDetail)
+        logBootStage("loadFail")
+    }
+
     private static func storeURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         let root = base?.appendingPathComponent("PhotoFlow", isDirectory: true) ?? URL(fileURLWithPath: NSTemporaryDirectory())
@@ -2164,51 +2361,73 @@ final class CloudDataStore: ObservableObject {
         return root.appendingPathComponent("PhotoFlowCloud.sqlite")
     }
 
-    private static func makeContainer() -> (
-        container: NSPersistentCloudKitContainer,
-        cloudEnabled: Bool,
-        storeCloudEnabled: Bool,
-        loadError: Error?
-    ) {
-        let model = makeModel()
+    private static func buildContainer(
+        model: NSManagedObjectModel,
+        cloudEnabled: Bool
+    ) -> NSPersistentCloudKitContainer {
         let container = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
         let description = NSPersistentStoreDescription(url: storeURL())
-        description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
-            containerIdentifier: cloudContainerIdentifier
-        )
+        if cloudEnabled {
+            description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
+                containerIdentifier: cloudContainerIdentifier
+            )
+        } else {
+            description.cloudKitContainerOptions = nil
+        }
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
         description.shouldMigrateStoreAutomatically = true
         description.shouldInferMappingModelAutomatically = true
         container.persistentStoreDescriptions = [description]
-        let cloudLoad = loadStores(container: container)
-        if cloudLoad.success {
-            return (container, true, true, cloudLoad.error)
-        }
-        let fallback = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
-        let fallbackDescription = NSPersistentStoreDescription(url: storeURL())
-        fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
-        fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
-        fallbackDescription.shouldMigrateStoreAutomatically = true
-        fallbackDescription.shouldInferMappingModelAutomatically = true
-        fallback.persistentStoreDescriptions = [fallbackDescription]
-        let fallbackLoad = loadStores(container: fallback)
-        if !fallbackLoad.success {
-            print("CloudDataStore fallback load failed.")
-        }
-        return (fallback, false, false, cloudLoad.error ?? fallbackLoad.error)
+        return container
     }
 
-    private static func loadStores(container: NSPersistentCloudKitContainer) -> (success: Bool, error: Error?) {
-        let semaphore = DispatchSemaphore(value: 0)
-        var loadError: Error?
-        DispatchQueue.global(qos: .userInitiated).async {
+    private static func loadStoresAsync(
+        container: NSPersistentCloudKitContainer,
+        timeout: TimeInterval = 15
+    ) async -> (success: Bool, error: Error?) {
+        await withCheckedContinuation { continuation in
+            let lock = NSLock()
+            var finished = false
+            func finish(success: Bool, error: Error?) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !finished else { return }
+                finished = true
+                continuation.resume(returning: (success, error))
+            }
             container.loadPersistentStores { _, error in
-                loadError = error
-                semaphore.signal()
+                if let error {
+                    print("CloudDataStore load failed: \(error.localizedDescription)")
+                    finish(success: false, error: error)
+                } else {
+                    finish(success: true, error: nil)
+                }
+            }
+            Task.detached {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                let timeoutError = NSError(
+                    domain: "CloudDataStore",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "load timed out"]
+                )
+                print("CloudDataStore load timed out.")
+                finish(success: false, error: timeoutError)
             }
         }
-        let result = semaphore.wait(timeout: .now() + 30)
+    }
+
+    private static func loadStoresBlocking(
+        container: NSPersistentCloudKitContainer,
+        timeout: TimeInterval = 30
+    ) -> (success: Bool, error: Error?) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var loadError: Error?
+        container.loadPersistentStores { _, error in
+            loadError = error
+            semaphore.signal()
+        }
+        let result = semaphore.wait(timeout: .now() + timeout)
         if result == .timedOut {
             let timeoutError = NSError(
                 domain: "CloudDataStore",
@@ -3007,6 +3226,8 @@ struct ContentView: View {
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
+    @State private var showSafeModeResetConfirm = false
+    @State private var showSafeModeResetFinalConfirm = false
     @State private var now = Date()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
@@ -3168,18 +3389,45 @@ struct ContentView: View {
     }
 
     var body: some View {
-        if isPadDevice {
-            ipadRecordingView
-        } else {
-        ZStack {
-            if selectedTab == .home {
-                homeView
+        Group {
+            if cloudStore.bootState.isSafeMode {
+                safeModeView
             } else {
-                statsView
+                if isPadDevice {
+                    ipadRecordingView
+                        .overlay(alignment: .top) {
+                            if shouldShowCloudDegradedBanner {
+                                cloudDegradedBanner
+                            }
+                        }
+                        .overlay {
+                            if cloudStore.bootState == .loading {
+                                bootLoadingOverlay
+                            }
+                        }
+                } else {
+                    ZStack {
+                        if selectedTab == .home {
+                            homeView
+                        } else {
+                            statsView
+                        }
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        bottomBar
+                    }
+                    .overlay(alignment: .top) {
+                        if shouldShowCloudDegradedBanner {
+                            cloudDegradedBanner
+                        }
+                    }
+                    .overlay {
+                        if cloudStore.bootState == .loading {
+                            bootLoadingOverlay
+                        }
+                    }
+                }
             }
-        }
-        .safeAreaInset(edge: .bottom) {
-            bottomBar
         }
         .alert(item: $activeAlert) { alert in
             Alert(title: Text(alert.message))
@@ -3452,7 +3700,6 @@ struct ContentView: View {
         }
         .task {
             refreshDutyState()
-        }
         }
     }
 
@@ -6487,6 +6734,21 @@ struct ContentView: View {
                     Text(syncStore.debugSessionStatus)
                         .font(.caption2)
                         .textSelection(.enabled)
+
+                    Text("bootState / lastBootError")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("\(cloudStore.bootStateLabel) · \(cloudStore.lastBootError ?? "--")")
+                        .font(.caption2)
+                        .textSelection(.enabled)
+                    if !cloudStore.bootTimeline.isEmpty {
+                        Text("bootTimeline")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(cloudStore.bootTimeline.map { "\($0.name) · \(formatDebugSyncTime($0.timestamp))" }.joined(separator: "\n"))
+                            .font(.caption2)
+                            .textSelection(.enabled)
+                    }
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -6513,6 +6775,98 @@ struct ContentView: View {
         }
     }
 #endif
+
+    private var shouldShowCloudDegradedBanner: Bool {
+        cloudStore.bootState == .degradedLocal || cloudStore.isCloudSyncDisabled
+    }
+
+    private var cloudDegradedBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "cloud.slash")
+            Text("cloud disabled/degraded")
+        }
+        .font(.caption2)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.thinMaterial)
+        .clipShape(Capsule())
+        .padding(.top, 6)
+    }
+
+    private var bootLoadingOverlay: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("数据加载中…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var safeModeView: some View {
+        let errorText = cloudStore.bootState.errorText ?? cloudStore.lastBootError ?? "unknown"
+        return NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Safe Mode")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Text("启动失败，已进入安全模式。可复制诊断信息并选择下一步操作。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    GroupBox("lastBootError") {
+                        Text(errorText)
+                            .font(.caption2)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    GroupBox("Actions") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Button("禁用云同步") {
+                                cloudStore.setCloudSyncDisabled(true)
+                                activeAlert = .validation("已禁用云同步")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button("导出诊断") {
+                                UIPasteboard.general.string = cloudStore.bootDiagnosticsText()
+                                activeAlert = .validation("诊断已复制")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button(role: .destructive) {
+                                showSafeModeResetConfirm = true
+                            } label: {
+                                Text("重置本地库")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("PhotoFlow")
+            .confirmationDialog("确认重置本地库？", isPresented: $showSafeModeResetConfirm) {
+                Button("继续", role: .destructive) {
+                    showSafeModeResetFinalConfirm = true
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("该操作会删除本地数据，无法恢复")
+            }
+            .confirmationDialog("二次确认：真的要重置？", isPresented: $showSafeModeResetFinalConfirm) {
+                Button("确认重置", role: .destructive) {
+                    Task {
+                        await cloudStore.resetLocalStoreAsync()
+                        cloudStore.retryBoot()
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            }
+        }
+    }
 
     @ViewBuilder
     private var pendingDeleteBanner: some View {
