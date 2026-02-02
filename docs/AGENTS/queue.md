@@ -1455,7 +1455,8 @@ A Stats 点击“历史会话”，选择过去日期显示当天会话
 B 铅笔进入编辑页可修改并保存
 C 保存后列表立即更新，重启后仍保留
 D iPad 端同步可见（允许延迟）
-## ACTIVE — TC-IOS-HISTORY-SESSION-DELETE-V1
+## DONE — TC-IOS-HISTORY-SESSION-DELETE-V1
+Status: DONE (merged in PR #221)
 Priority: P0
 Goal:
 - 历史会话列表支持作废/删除（不会复活），并跨设备同步消失
