@@ -3121,6 +3121,9 @@ struct ContentView: View {
     @State private var selectedTraitGroup: String = TraitDefinition.defaultGroupName
     @State private var traitBreakdownMode: TraitBreakdownMode = .sessions
     @AppStorage("privacy.hideTodayRevenue") private var hideTodayRevenue: Bool = true
+    @AppStorage("pf_retouch_price_per_photo_cents") private var retouchPricePerPhotoCentsStorage: Int = -1
+    @State private var retouchPriceDraft = ""
+    @FocusState private var isRetouchPriceFieldFocused: Bool
     @State private var shiftStart: Date?
     @State private var shiftEnd: Date?
     @State private var reviewDraft = SessionDecisionDraft.empty
@@ -3346,6 +3349,7 @@ struct ContentView: View {
             ipadSyncView
         }
         .onAppear {
+            syncRetouchPriceDraftFromStorage()
             resolveMarkdownAutoExportFolderURLIfNeeded()
             observeMarkdownAutoExportChanges(
                 records: cloudStore.sessionRecords,
@@ -7381,6 +7385,9 @@ struct ContentView: View {
         let rateText = (metaTotals.hasShot && metaTotals.hasSelected && metaTotals.shot > 0)
             ? "\(Int((Double(metaTotals.selected) / Double(metaTotals.shot) * 100).rounded()))%"
             : "--"
+        let costText = retouchPricePerPhotoCents.map { unitPriceCents in
+            formatAmount(cents: metaTotals.selected * unitPriceCents)
+        } ?? "--"
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Text("今日收入")
@@ -7406,7 +7413,7 @@ struct ContentView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-            Text("拍 \(format(totals.shooting)) · 选 \(format(totals.selecting)) · 拍 \(metaTotals.hasShot ? "\(metaTotals.shot)张" : "--") · 选 \(metaTotals.hasSelected ? "\(metaTotals.selected)张" : "--") · 选片率 \(rateText)")
+            Text("拍 \(format(totals.shooting)) · 选 \(format(totals.selecting)) · 拍 \(metaTotals.hasShot ? "\(metaTotals.shot)张" : "--") · 选 \(metaTotals.hasSelected ? "\(metaTotals.selected)张" : "--") · 成本 \(costText) · 选片率 \(rateText)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
@@ -7600,6 +7607,9 @@ struct ContentView: View {
         let selectedTotal = selectRateSnapshots.reduce(0) { partial, snapshot in
             partial + (snapshot.meta.selectedCount ?? 0)
         }
+        let rangeCostText = retouchPricePerPhotoCents.map { unitPriceCents in
+            formatAmount(cents: selectedTotal * unitPriceCents)
+        } ?? "--"
         let shotTotal = selectRateSnapshots.reduce(0) { partial, snapshot in
             partial + (snapshot.meta.shotCount ?? 0)
         }
@@ -7935,10 +7945,38 @@ struct ContentView: View {
             Divider()
             Text("经营汇总")
                 .font(.headline)
+            HStack(spacing: 8) {
+                Text("修图单价(元/张)")
+                Spacer(minLength: 8)
+                TextField("未设置", text: $retouchPriceDraft)
+                    .keyboardType(.decimalPad)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 120)
+                    .focused($isRetouchPriceFieldFocused)
+                    .onSubmit {
+                        commitRetouchPriceDraft()
+                    }
+                    .onChange(of: retouchPriceDraft) { _, newValue in
+                        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty {
+                            retouchPricePerPhotoCentsStorage = -1
+                            return
+                        }
+                        guard let cents = parseAmountCents(from: trimmed), cents >= 0 else { return }
+                        retouchPricePerPhotoCentsStorage = cents
+                    }
+            }
+            .onChange(of: isRetouchPriceFieldFocused) { _, isFocused in
+                if !isFocused {
+                    commitRetouchPriceDraft()
+                }
+            }
             Text("收入合计 \(revenueText)")
             Text("平均客单价 \(avgRevenueText)")
             Text("拍摄张数合计 \(shotText)")
             Text("选片张数合计 \(selectedText)")
+            Text("成本 \(rangeCostText)")
             Text("选片率 \(selectRateText)")
             Text("RPH \(rphText)")
             Text("平均选片率（按单） \(avgSelectRateText)（全要 \(allTakeShareText)）")
@@ -10752,6 +10790,30 @@ struct ContentView: View {
 
     private func metaNotePreview(for sessionId: String) -> String? {
         reviewNoteSummaryText(metaStore.meta(for: sessionId).reviewNote)
+    }
+
+    private var retouchPricePerPhotoCents: Int? {
+        retouchPricePerPhotoCentsStorage >= 0 ? retouchPricePerPhotoCentsStorage : nil
+    }
+
+    private func syncRetouchPriceDraftFromStorage() {
+        guard !isRetouchPriceFieldFocused else { return }
+        retouchPriceDraft = retouchPricePerPhotoCents.map(amountText(from:)) ?? ""
+    }
+
+    private func commitRetouchPriceDraft() {
+        let trimmed = retouchPriceDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            retouchPricePerPhotoCentsStorage = -1
+            retouchPriceDraft = ""
+            return
+        }
+        guard let cents = parseAmountCents(from: trimmed), cents >= 0 else {
+            syncRetouchPriceDraftFromStorage()
+            return
+        }
+        retouchPricePerPhotoCentsStorage = cents
+        retouchPriceDraft = amountText(from: cents)
     }
 
     private func formatAmount(cents: Int) -> String {
