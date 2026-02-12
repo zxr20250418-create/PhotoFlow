@@ -1,4 +1,33 @@
-## ACTIVE — TC-IOS-STATS-STRICT-EXCLUDE-INCOMPLETE-V1
+## ACTIVE — TC-IOS-COST-PER-PHOTO-V1
+Priority: P1
+Goal:
+- 今日收入卡摘要里，在“选片率”前增加“成本”
+- 成本 = 选片张数合计 × 修图单价（元/张）
+- 修图单价可填写并持久化
+
+Scope:
+1) 修图单价（元/张）
+- 可填写（建议 cents Int 持久化）
+- 未设置显示为 --（不隐藏）
+
+2) 今日卡显示
+- 摘要行在选片率前插入：成本 ¥X 或 成本 --
+- X = selectedTotal × pricePerPhoto
+- selectedTotal 口径：只统计 selectedCount 存在的会话
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 设置单价后重启仍保留
+B 今日卡出现“成本”，且位置在“选片率”前
+C 单价未设时显示“成本 --”且不破版
+D ios_safe PASS；0 配置改动
+
+## DONE — TC-IOS-STATS-STRICT-EXCLUDE-INCOMPLETE-V1
+Status: DONE (merged in PR #230)
 Priority: P0
 Goal:
 - 统计口径更准确：数据不全的单，不计入对应指标的统计（避免拉歪 RPH/选片率/客单价等）
