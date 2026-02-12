@@ -7550,48 +7550,70 @@ struct ContentView: View {
                 return interval.contains(shootingStart)
             }
         }
-        let totals = filteredSessions.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, summary in
+        let sessionSnapshots = filteredSessions.map { summary in
+            let meta = metaStore.meta(for: summary.id)
             let durations = sessionDurations(for: summary)
+            let workSeconds = durations.shooting + (durations.selecting ?? 0)
+            return (summary: summary, meta: meta, durations: durations, workSeconds: workSeconds)
+        }
+        let durationSnapshots = sessionSnapshots
+        let revenueSnapshots = sessionSnapshots.filter { snapshot in
+            snapshot.meta.amountCents != nil && snapshot.workSeconds > 0
+        }
+        let selectRateSnapshots = sessionSnapshots.filter { snapshot in
+            guard let shot = snapshot.meta.shotCount, shot > 0 else { return false }
+            return snapshot.meta.selectedCount != nil
+        }
+        let totals = durationSnapshots.reduce(into: (total: TimeInterval(0), shooting: TimeInterval(0), selecting: TimeInterval(0))) { result, snapshot in
+            let durations = snapshot.durations
             result.total += durations.total
             result.shooting += durations.shooting
             if let selecting = durations.selecting {
                 result.selecting += selecting
             }
         }
-        let count = filteredSessions.count
+        let count = durationSnapshots.count
         let avgTotal = count > 0 ? totals.total / Double(count) : nil
         let selectShare = totals.total > 0 ? totals.selecting / totals.total : nil
         let prefix = statsRange.title
         let avgText = avgTotal.map { format($0) } ?? "--"
         let shareText = selectShare.map { "\(Int(($0 * 100).rounded()))%" } ?? "--"
-        let bizTotals = filteredSessions.reduce(into: (amountCents: 0, hasAmount: false, shot: 0, hasShot: false, selected: 0, hasSelected: false)) { result, summary in
-            let meta = metaStore.meta(for: summary.id)
-            if let amount = meta.amountCents {
-                result.amountCents += amount
-                result.hasAmount = true
-            }
-            if let shot = meta.shotCount {
-                result.shot += shot
-                result.hasShot = true
-            }
-            if let selected = meta.selectedCount {
-                result.selected += selected
-                result.hasSelected = true
-            }
+        let durationCoverage = (
+            included: durationSnapshots.count,
+            excluded: max(0, filteredSessions.count - durationSnapshots.count)
+        )
+        let revenueCoverage = (
+            included: revenueSnapshots.count,
+            excluded: max(0, filteredSessions.count - revenueSnapshots.count)
+        )
+        let selectRateCoverage = (
+            included: selectRateSnapshots.count,
+            excluded: max(0, filteredSessions.count - selectRateSnapshots.count)
+        )
+        let revenueTotalCents = revenueSnapshots.reduce(0) { partial, snapshot in
+            partial + (snapshot.meta.amountCents ?? 0)
         }
-        let revenueText = bizTotals.hasAmount ? formatAmount(cents: bizTotals.amountCents) : "--"
-        let avgRevenueText = (bizTotals.hasAmount && count > 0)
-            ? formatAmount(cents: Int((Double(bizTotals.amountCents) / Double(count)).rounded()))
+        let revenueText = revenueSnapshots.isEmpty ? "--" : formatAmount(cents: revenueTotalCents)
+        let avgRevenueText = !revenueSnapshots.isEmpty
+            ? formatAmount(cents: Int((Double(revenueTotalCents) / Double(revenueSnapshots.count)).rounded()))
             : "--"
-        let shotText = bizTotals.hasShot ? "\(bizTotals.shot)" : "--"
-        let selectedText = bizTotals.hasSelected ? "\(bizTotals.selected)" : "--"
-        let selectRateText = (bizTotals.hasShot && bizTotals.hasSelected && bizTotals.shot > 0)
-            ? "\(Int((Double(bizTotals.selected) / Double(bizTotals.shot) * 100).rounded()))%"
+        let selectedTotal = selectRateSnapshots.reduce(0) { partial, snapshot in
+            partial + (snapshot.meta.selectedCount ?? 0)
+        }
+        let shotTotal = selectRateSnapshots.reduce(0) { partial, snapshot in
+            partial + (snapshot.meta.shotCount ?? 0)
+        }
+        let shotText = selectRateSnapshots.isEmpty ? "--" : "\(shotTotal)"
+        let selectedText = selectRateSnapshots.isEmpty ? "--" : "\(selectedTotal)"
+        let selectRateText = shotTotal > 0
+            ? "\(Int((Double(selectedTotal) / Double(shotTotal) * 100).rounded()))%"
             : "--"
         let rphText: String = {
-            guard bizTotals.hasAmount, totals.total > 0 else { return "--" }
-            let hours = totals.total / 3600
-            let revenue = Double(bizTotals.amountCents) / 100
+            guard !revenueSnapshots.isEmpty else { return "--" }
+            let totalWorkSeconds = revenueSnapshots.reduce(0) { $0 + $1.workSeconds }
+            guard totalWorkSeconds > 0 else { return "--" }
+            let hours = totalWorkSeconds / 3600
+            let revenue = Double(revenueTotalCents) / 100
             return String(format: "¥%.0f/小时", revenue / hours)
         }()
         let (avgSelectRateText, allTakeShareText, weightedPickRateText): (String, String, String) = {
@@ -7600,10 +7622,9 @@ struct ContentView: View {
             var allTakeCount = 0
             var sumSelected = 0
             var sumShot = 0
-            for summary in filteredSessions {
-                let meta = metaStore.meta(for: summary.id)
-                guard let shot = meta.shotCount, shot > 0,
-                      let selected = meta.selectedCount else { continue }
+            for snapshot in selectRateSnapshots {
+                guard let shot = snapshot.meta.shotCount,
+                      let selected = snapshot.meta.selectedCount else { continue }
                 if selected > shot {
                     continue
                 }
@@ -7650,30 +7671,28 @@ struct ContentView: View {
             return parts.joined(separator: " ")
         }
         let revenueTop3: [(SessionSummary, Int)] = {
-            let items = filteredSessions.compactMap { summary -> (SessionSummary, Int)? in
-                let meta = metaStore.meta(for: summary.id)
-                guard let amount = meta.amountCents else { return nil }
-                return (summary, amount)
+            let items = revenueSnapshots.compactMap { snapshot -> (SessionSummary, Int)? in
+                guard let amount = snapshot.meta.amountCents else { return nil }
+                return (snapshot.summary, amount)
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
         let rphTop3: [(SessionSummary, Double)] = {
-            let items = filteredSessions.compactMap { summary -> (SessionSummary, Double)? in
-                let meta = metaStore.meta(for: summary.id)
-                guard let amount = meta.amountCents else { return nil }
-                let totalSeconds = sessionDurations(for: summary).total
+            let items = revenueSnapshots.compactMap { snapshot -> (SessionSummary, Double)? in
+                guard let amount = snapshot.meta.amountCents else { return nil }
+                let totalSeconds = snapshot.workSeconds
                 guard totalSeconds > 0 else { return nil }
                 let hours = totalSeconds / 3600
                 let revenue = Double(amount) / 100
-                return (summary, revenue / hours)
+                return (snapshot.summary, revenue / hours)
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
         let durationTop3: [(SessionSummary, TimeInterval)] = {
-            let items = filteredSessions.compactMap { summary -> (SessionSummary, TimeInterval)? in
-                let totalSeconds = sessionDurations(for: summary).total
+            let items = durationSnapshots.compactMap { snapshot -> (SessionSummary, TimeInterval)? in
+                let totalSeconds = snapshot.durations.total
                 guard totalSeconds > 0 else { return nil }
-                return (summary, totalSeconds)
+                return (snapshot.summary, totalSeconds)
             }
             return Array(items.sorted { $0.1 > $1.1 }.prefix(3))
         }()
@@ -7910,6 +7929,9 @@ struct ContentView: View {
             Text("\(prefix)选片时长 \(format(totals.selecting))")
             Text("\(prefix)平均每单总时长 \(avgText)")
             Text("\(prefix)选片占比 \(shareText)")
+            Text("Included \(durationCoverage.included) / Excluded \(durationCoverage.excluded)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Divider()
             Text("经营汇总")
                 .font(.headline)
@@ -7921,6 +7943,12 @@ struct ContentView: View {
             Text("RPH \(rphText)")
             Text("平均选片率（按单） \(avgSelectRateText)（全要 \(allTakeShareText)）")
             Text("选片率（按张） \(weightedPickRateText)")
+            Text("收入口径 Included \(revenueCoverage.included) / Excluded \(revenueCoverage.excluded)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("选片口径 Included \(selectRateCoverage.included) / Excluded \(selectRateCoverage.excluded)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Divider()
             StatsTraitsBreakdownView(
                 groups: traitGroups,
@@ -7942,6 +7970,9 @@ struct ContentView: View {
                     Text("\(sessionLabel(item.0))  \(formatAmount(cents: item.1))")
                 }
             }
+            Text("Included \(revenueCoverage.included) / Excluded \(revenueCoverage.excluded)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Text("RPH")
                 .font(.subheadline)
             if rphTop3.isEmpty {
@@ -7954,6 +7985,9 @@ struct ContentView: View {
                     Text("\(sessionLabel(item.0))  \(rphLine)")
                 }
             }
+            Text("Included \(revenueCoverage.included) / Excluded \(revenueCoverage.excluded)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Text("用时")
                 .font(.subheadline)
             if durationTop3.isEmpty {
@@ -7965,6 +7999,9 @@ struct ContentView: View {
                     Text("\(sessionLabel(item.0))  用时 \(format(item.1))")
                 }
             }
+            Text("Included \(durationCoverage.included) / Excluded \(durationCoverage.excluded)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Divider()
             Text("数据质量")
                 .font(.headline)
@@ -9444,23 +9481,30 @@ struct ContentView: View {
     private func generateDailyReview(for targetDayKey: String) {
         let sessions = effectiveSessionSummaries.filter { dayKey(for: $0) == targetDayKey }
         let ordered = sessions.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        let snapshots = ordered.map { summary in
+            let meta = metaStore.meta(for: summary.id)
+            let durations = sessionDurations(for: summary)
+            let workSeconds = durations.shooting + (durations.selecting ?? 0)
+            return (summary: summary, meta: meta, durations: durations, workSeconds: workSeconds)
+        }
         var shootingTotal: TimeInterval = 0
         var selectingTotal: TimeInterval = 0
-        var incomeTotal = 0
-        var hasIncome = false
-        for summary in ordered {
-            let durations = sessionDurations(for: summary)
+        for snapshot in snapshots {
+            let durations = snapshot.durations
             shootingTotal += durations.shooting
             if let selecting = durations.selecting {
                 selectingTotal += selecting
             }
-            if let amount = metaStore.meta(for: summary.id).amountCents {
-                incomeTotal += amount
-                hasIncome = true
-            }
         }
+        let revenueSnapshots = snapshots.filter { snapshot in
+            snapshot.meta.amountCents != nil && snapshot.workSeconds > 0
+        }
+        let incomeTotal = revenueSnapshots.reduce(0) { partial, snapshot in
+            partial + (snapshot.meta.amountCents ?? 0)
+        }
+        let hasIncome = !revenueSnapshots.isEmpty
         let incomeCents: Int64? = hasIncome ? Int64(incomeTotal) : nil
-        let workSeconds = shootingTotal + selectingTotal
+        let workSeconds = revenueSnapshots.reduce(0) { $0 + $1.workSeconds }
         let rphShoot: Double? = {
             guard let incomeCents, workSeconds > 0 else { return nil }
             let revenue = Double(incomeCents) / 100
@@ -9468,22 +9512,20 @@ struct ContentView: View {
             return revenue / hours
         }()
         let top3SessionIds: [String] = {
-            let items = ordered.compactMap { summary -> (String, Int)? in
-                guard let amount = metaStore.meta(for: summary.id).amountCents else { return nil }
-                return (summary.id, amount)
+            let items = revenueSnapshots.compactMap { snapshot -> (String, Int)? in
+                guard let amount = snapshot.meta.amountCents else { return nil }
+                return (snapshot.summary.id, amount)
             }
             return items.sorted { $0.1 > $1.1 }.prefix(3).map(\.0)
         }()
         let bottom1: (id: String, note: String?)? = {
-            let items = ordered.compactMap { summary -> (String, Double)? in
-                let meta = metaStore.meta(for: summary.id)
-                guard let amount = meta.amountCents else { return nil }
-                let durations = sessionDurations(for: summary)
-                let work = durations.shooting + (durations.selecting ?? 0)
+            let items = revenueSnapshots.compactMap { snapshot -> (String, Double)? in
+                guard let amount = snapshot.meta.amountCents else { return nil }
+                let work = snapshot.workSeconds
                 guard work > 0 else { return nil }
                 let revenue = Double(amount) / 100
                 let hours = work / 3600
-                return (summary.id, revenue / hours)
+                return (snapshot.summary.id, revenue / hours)
             }
             guard let worst = items.sorted(by: { $0.1 < $1.1 }).first else { return nil }
             let note = reviewNoteSummaryText(metaStore.meta(for: worst.0).reviewNote)
@@ -10601,23 +10643,30 @@ struct ContentView: View {
     private func generateWeeklyReview(for weekKey: String) {
         let sessions = weeklyReviewSessions(for: weekKey)
         let ordered = sessions.sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        let snapshots = ordered.map { summary in
+            let meta = metaStore.meta(for: summary.id)
+            let durations = sessionDurations(for: summary)
+            let workSeconds = durations.shooting + (durations.selecting ?? 0)
+            return (summary: summary, meta: meta, durations: durations, workSeconds: workSeconds)
+        }
         var shootingTotal: TimeInterval = 0
         var selectingTotal: TimeInterval = 0
-        var incomeTotal = 0
-        var hasIncome = false
-        for summary in ordered {
-            let durations = sessionDurations(for: summary)
+        for snapshot in snapshots {
+            let durations = snapshot.durations
             shootingTotal += durations.shooting
             if let selecting = durations.selecting {
                 selectingTotal += selecting
             }
-            if let amount = metaStore.meta(for: summary.id).amountCents {
-                incomeTotal += amount
-                hasIncome = true
-            }
         }
+        let revenueSnapshots = snapshots.filter { snapshot in
+            snapshot.meta.amountCents != nil && snapshot.workSeconds > 0
+        }
+        let incomeTotal = revenueSnapshots.reduce(0) { partial, snapshot in
+            partial + (snapshot.meta.amountCents ?? 0)
+        }
+        let hasIncome = !revenueSnapshots.isEmpty
         let incomeCents: Int64? = hasIncome ? Int64(incomeTotal) : nil
-        let workSeconds = shootingTotal + selectingTotal
+        let workSeconds = revenueSnapshots.reduce(0) { $0 + $1.workSeconds }
         let rphShoot: Double? = {
             guard let incomeCents, workSeconds > 0 else { return nil }
             let revenue = Double(incomeCents) / 100
@@ -10625,22 +10674,20 @@ struct ContentView: View {
             return revenue / hours
         }()
         let top3SessionIds: [String] = {
-            let items = ordered.compactMap { summary -> (String, Int)? in
-                guard let amount = metaStore.meta(for: summary.id).amountCents else { return nil }
-                return (summary.id, amount)
+            let items = revenueSnapshots.compactMap { snapshot -> (String, Int)? in
+                guard let amount = snapshot.meta.amountCents else { return nil }
+                return (snapshot.summary.id, amount)
             }
             return items.sorted { $0.1 > $1.1 }.prefix(3).map(\.0)
         }()
         let bottom1: String? = {
-            let items = ordered.compactMap { summary -> (String, Double)? in
-                let meta = metaStore.meta(for: summary.id)
-                guard let amount = meta.amountCents else { return nil }
-                let durations = sessionDurations(for: summary)
-                let work = durations.shooting + (durations.selecting ?? 0)
+            let items = revenueSnapshots.compactMap { snapshot -> (String, Double)? in
+                guard let amount = snapshot.meta.amountCents else { return nil }
+                let work = snapshot.workSeconds
                 guard work > 0 else { return nil }
                 let revenue = Double(amount) / 100
                 let hours = work / 3600
-                return (summary.id, revenue / hours)
+                return (snapshot.summary.id, revenue / hours)
             }
             return items.sorted(by: { $0.1 < $1.1 }).first?.0
         }()
