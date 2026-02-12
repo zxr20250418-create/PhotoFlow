@@ -1,3 +1,33 @@
+## DONE — TC-IOS-CRASH-INVESTIGATION-V1
+Status: DONE (merged in PR #234)
+Priority: P0
+Goal:
+- 彻底查清并修复“手机端用一段时间后偶发崩溃/卡死”
+- 保证启动路径不阻塞主线程，且出现异常时仍可进入 UI
+
+Scope:
+1) 证据收集
+- 获取 Thread 0 堆栈与 runtime 最后日志（持久化 ring buffer）
+- 在 PR 中给出分类结论与证据链
+
+2) 稳定性修复
+- 启动/刷新/聚合/导出路径异步化与节流
+- 移除主线程同步等待风险，增加 boot gate 与超时兜底
+
+3) Diagnostics
+- 展示最近 200 行日志并支持复制
+- Debug-only Stress Test 用于压测复现
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 冷启动/前后台切换无白屏卡死
+B Diagnostics 可查看并复制最后日志
+C ios_safe PASS；0 配置改动
+
 ## DONE — TC-IOS-COST-PER-PHOTO-V1
 Status: DONE (merged in PR #232)
 Priority: P1
