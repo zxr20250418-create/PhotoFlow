@@ -42,6 +42,11 @@ private final class AppBootGate: ObservableObject {
         state = .loading
         lastBootError = nil
         bootModeDescription = "loading"
+        let lastRunAbnormal = RuntimeExitState.markLaunchStarted()
+        runtimeLog("app", "launch", extra: [
+            "abnormal_previous_exit": lastRunAbnormal ? "true" : "false"
+        ])
+        runtimeLog("boot", "store_boot_start")
 
         bootTask = Task { [weak self] in
             guard let self else { return }
@@ -72,11 +77,18 @@ private final class AppBootGate: ObservableObject {
                 lastBootError = warning
             }
             bootModeDescription = mode.rawValue
+            runtimeLog("boot", "store_boot_ok", extra: [
+                "mode": mode.rawValue,
+                "warning": warning ?? ""
+            ])
             state = .ready(store: store)
         case .failed(let error):
             let fallback = error.isEmpty ? "启动失败，已进入安全模式。" : error
             lastBootError = fallback
             bootModeDescription = "safe-mode"
+            runtimeLog("boot", "store_boot_fail", extra: [
+                "error": fallback
+            ])
             state = .safeMode(message: "启动失败，已进入安全模式。")
         }
         bootTask = nil
@@ -88,6 +100,9 @@ private final class AppBootGate: ObservableObject {
         let timeoutMessage = "启动超过 5 秒未完成，已进入安全模式。"
         lastBootError = timeoutMessage
         bootModeDescription = "safe-mode-timeout"
+        runtimeLog("boot", "store_boot_fail", extra: [
+            "error": timeoutMessage
+        ])
         state = .safeMode(message: timeoutMessage)
         timeoutTask = nil
     }

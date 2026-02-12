@@ -17,6 +17,95 @@ import WatchConnectivity
 private let appLaunchId = UUID().uuidString
 private let dailyReviewNotePrefix = "PF_DAILY_V1:"
 
+enum RuntimeExitState {
+    static let lastRunEndedKey = "pf_runtime_last_run_ended_cleanly"
+    static let previousAbnormalForLaunchKey = "pf_runtime_previous_abnormal_for_launch"
+
+    static func markLaunchStarted() -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: lastRunEndedKey) == nil {
+            defaults.set(true, forKey: lastRunEndedKey)
+        }
+        let lastRunEnded = defaults.bool(forKey: lastRunEndedKey)
+        defaults.set(!lastRunEnded, forKey: previousAbnormalForLaunchKey)
+        defaults.set(false, forKey: lastRunEndedKey)
+        return !lastRunEnded
+    }
+
+    static func markBackgrounded() {
+        UserDefaults.standard.set(true, forKey: lastRunEndedKey)
+    }
+
+    static func lastLaunchWasAbnormal() -> Bool {
+        UserDefaults.standard.bool(forKey: previousAbnormalForLaunchKey)
+    }
+}
+
+actor PersistentRingBufferLogger {
+    static let shared = PersistentRingBufferLogger()
+    private let maxBytes = 2 * 1024 * 1024
+    private let trimTargetBytes = 1 * 1024 * 1024
+
+    private nonisolated static func logFileURL() -> URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        return base.appendingPathComponent("photoflow_runtime.ndjson", isDirectory: false)
+    }
+
+    func log(category: String, event: String, extra: [String: String] = [:]) {
+        let line: [String: Any] = [
+            "ts": Date().timeIntervalSince1970,
+            "category": category,
+            "event": event,
+            "extra": extra
+        ]
+        guard JSONSerialization.isValidJSONObject(line),
+              let payload = try? JSONSerialization.data(withJSONObject: line, options: []) else { return }
+        appendLine(payload)
+    }
+
+    func lastLines(limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        let url = Self.logFileURL()
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return "" }
+        guard let text = String(data: data, encoding: .utf8) else { return "" }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        let tail = lines.suffix(limit)
+        guard !tail.isEmpty else { return "" }
+        return tail.joined(separator: "\n")
+    }
+
+    private func appendLine(_ payload: Data) {
+        let url = Self.logFileURL()
+        let fm = FileManager.default
+        let directory = url.deletingLastPathComponent()
+        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        var current = (try? Data(contentsOf: url)) ?? Data()
+        if current.count > maxBytes {
+            current = current.suffix(trimTargetBytes)
+        }
+
+        var next = current
+        next.append(payload)
+        next.append(0x0A)
+        if next.count > maxBytes {
+            next = next.suffix(trimTargetBytes)
+        }
+        try? next.write(to: url, options: .atomic)
+    }
+}
+
+func runtimeLog(_ category: String, _ event: String, extra: [String: String] = [:]) {
+    Task.detached(priority: .utility) {
+        await PersistentRingBufferLogger.shared.log(
+            category: category,
+            event: event,
+            extra: extra
+        )
+    }
+}
+
 struct DailyReviewAiCandidate: Codable, Equatable {
     var action: String?
     var trigger: String?
@@ -591,7 +680,7 @@ struct SessionMeta: Codable, Equatable {
     }
 }
 
-struct SessionTimeOverride: Codable, Equatable {
+struct SessionTimeOverride: Codable, Equatable, Sendable {
     var shootingStart: Date
     var selectingStart: Date?
     var endedAt: Date?
@@ -600,7 +689,7 @@ struct SessionTimeOverride: Codable, Equatable {
 
 @MainActor
 final class CloudDataStore: ObservableObject {
-    struct SessionRecord: Identifiable, Equatable {
+    struct SessionRecord: Identifiable, Equatable, Sendable {
         let id: String
         let stage: String
         let shootingStart: Date?
@@ -617,7 +706,7 @@ final class CloudDataStore: ObservableObject {
         let isDeleted: Bool
     }
 
-    struct ShiftRecordSnapshot: Equatable {
+    struct ShiftRecordSnapshot: Equatable, Sendable {
         let dayKey: String
         let startAt: Date?
         let endAt: Date?
@@ -626,7 +715,7 @@ final class CloudDataStore: ObservableObject {
         let sourceDevice: String
     }
 
-    struct DayMemoSnapshot: Equatable {
+    struct DayMemoSnapshot: Equatable, Sendable {
         let dayKey: String
         let text: String?
         let actionSeed: String?
@@ -635,7 +724,7 @@ final class CloudDataStore: ObservableObject {
         let sourceDevice: String
     }
 
-    struct DailyReviewSnapshot: Equatable {
+    struct DailyReviewSnapshot: Equatable, Sendable {
         let dayKey: String
         let incomeCents: Int64?
         let shootingTotal: TimeInterval
@@ -653,7 +742,7 @@ final class CloudDataStore: ObservableObject {
         let sourceDevice: String
     }
 
-    struct WeeklyReviewSnapshot: Equatable {
+    struct WeeklyReviewSnapshot: Equatable, Sendable {
         let weekKey: String
         let incomeCents: Int64?
         let shootingTotal: TimeInterval
@@ -784,6 +873,8 @@ final class CloudDataStore: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var activeCloudEvents: Set<UUID> = []
     private var blockedSessionIds: Set<String> = []
+    private var refreshDebounceTask: Task<Void, Never>?
+    private var pendingRefreshReasons: Set<String> = []
 
     struct TombstoneDebugInfo: Equatable {
         let recordsFound: Int
@@ -809,6 +900,14 @@ final class CloudDataStore: ObservableObject {
         case failed(error: String)
     }
 
+    private struct StoreSnapshot: Sendable {
+        let sessionRecords: [SessionRecord]
+        let shiftRecords: [String: ShiftRecordSnapshot]
+        let dayMemos: [String: DayMemoSnapshot]
+        let dailyReviews: [String: DailyReviewSnapshot]
+        let weeklyReviews: [String: WeeklyReviewSnapshot]
+    }
+
     private struct ContainerSetup {
         let container: NSPersistentCloudKitContainer
         let cloudEnabled: Bool
@@ -831,7 +930,7 @@ final class CloudDataStore: ObservableObject {
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         observeRemoteChanges()
         observeCloudEvents()
-        refreshAll()
+        refreshAll(reason: "boot_init", debounceNanoseconds: 0)
     }
 
     static func bootstrapWithFallback() async -> BootResult {
@@ -1476,7 +1575,7 @@ final class CloudDataStore: ObservableObject {
         guard context.hasChanges else { return }
         do {
             try context.save()
-            refreshAll()
+            refreshAll(reason: "save_context")
         } catch {
             let detail = Self.formatError(error)
             cloudSyncError = detail
@@ -1487,15 +1586,41 @@ final class CloudDataStore: ObservableObject {
     }
 
     func refreshFromStore() {
-        refreshAll()
+        refreshAll(reason: "manual_refresh")
     }
 
-    private func refreshAll() {
-        sessionRecords = fetchSessionRecords()
-        shiftRecords = Dictionary(uniqueKeysWithValues: fetchShiftRecords().map { ($0.dayKey, $0) })
-        dayMemos = Dictionary(uniqueKeysWithValues: fetchDayMemos().map { ($0.dayKey, $0) })
-        dailyReviews = Dictionary(uniqueKeysWithValues: fetchDailyReviews().map { ($0.dayKey, $0) })
-        weeklyReviews = Dictionary(uniqueKeysWithValues: fetchWeeklyReviews().map { ($0.weekKey, $0) })
+    private func refreshAll(reason: String, debounceNanoseconds: UInt64 = 1_000_000_000) {
+        pendingRefreshReasons.insert(reason)
+        refreshDebounceTask?.cancel()
+        refreshDebounceTask = Task { [weak self] in
+            guard let self else { return }
+            if debounceNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: debounceNanoseconds)
+            }
+            guard !Task.isCancelled else { return }
+            let reasons = pendingRefreshReasons.sorted().joined(separator: ",")
+            pendingRefreshReasons.removeAll()
+            runtimeLog("cloud", "refresh_start", extra: [
+                "reasons": reasons,
+                "cloud_enabled": storeCloudEnabled ? "true" : "false"
+            ])
+            let snapshot = await Self.fetchSnapshotAsync(container: container)
+            guard !Task.isCancelled else { return }
+            applySnapshot(snapshot)
+            runtimeLog("cloud", "refresh_end", extra: [
+                "sessions": "\(sessionRecords.count)",
+                "shifts": "\(shiftRecords.count)",
+                "memos": "\(dayMemos.count)"
+            ])
+        }
+    }
+
+    private func applySnapshot(_ snapshot: StoreSnapshot) {
+        sessionRecords = snapshot.sessionRecords
+        shiftRecords = snapshot.shiftRecords
+        dayMemos = snapshot.dayMemos
+        dailyReviews = snapshot.dailyReviews
+        weeklyReviews = snapshot.weeklyReviews
         updateRevisionSnapshot()
         updateDeletedSnapshot()
     }
@@ -1513,7 +1638,7 @@ final class CloudDataStore: ObservableObject {
     }
 
     func refreshLocalCache() {
-        refreshAll()
+        refreshAll(reason: "local_cache")
     }
 
     private func updateRevisionSnapshot() {
@@ -1535,7 +1660,10 @@ final class CloudDataStore: ObservableObject {
             let timestamp = Date()
             print("CloudDataStore remote change notification received at \(timestamp)")
             self?.lastCloudSyncAt = timestamp
-            self?.refreshAll()
+            runtimeLog("cloud", "remote_change_received", extra: [
+                "ts": "\(timestamp.timeIntervalSince1970)"
+            ])
+            self?.refreshAll(reason: "remote_change")
         }
         .store(in: &cancellables)
     }
@@ -1566,6 +1694,280 @@ final class CloudDataStore: ObservableObject {
         .store(in: &cancellables)
     }
 
+    nonisolated private static func fetchSnapshotAsync(
+        container: NSPersistentCloudKitContainer
+    ) async -> StoreSnapshot {
+        await withCheckedContinuation { continuation in
+            container.performBackgroundTask { context in
+                continuation.resume(returning: fetchSnapshot(in: context))
+            }
+        }
+    }
+
+    nonisolated private static func fetchSnapshot(in context: NSManagedObjectContext) -> StoreSnapshot {
+        func int64Value(_ object: NSManagedObject?, key: String) -> Int64 {
+            guard let object else { return 0 }
+            if let value = object.value(forKey: key) as? Int64 { return value }
+            if let value = object.value(forKey: key) as? NSNumber { return value.int64Value }
+            return 0
+        }
+
+        func intValue(_ object: NSManagedObject?, key: String) -> Int? {
+            guard let object else { return nil }
+            if let value = object.value(forKey: key) as? Int { return value }
+            if let value = object.value(forKey: key) as? NSNumber { return value.intValue }
+            return nil
+        }
+
+        func doubleValue(_ object: NSManagedObject?, key: String) -> Double {
+            guard let object else { return 0 }
+            if let value = object.value(forKey: key) as? Double { return value }
+            if let value = object.value(forKey: key) as? NSNumber { return value.doubleValue }
+            return 0
+        }
+
+        func boolValue(_ object: NSManagedObject?, key: String) -> Bool {
+            guard let object else { return false }
+            if let value = object.value(forKey: key) as? Bool { return value }
+            if let value = object.value(forKey: key) as? NSNumber { return value.boolValue }
+            return false
+        }
+
+        func stringValue(_ object: NSManagedObject?, key: String, fallback: String) -> String {
+            guard let object else { return fallback }
+            return (object.value(forKey: key) as? String) ?? fallback
+        }
+
+        func sourcePriority(_ source: String) -> Int {
+            switch source {
+            case "phone":
+                return 3
+            case "ipad":
+                return 2
+            case "watch":
+                return 1
+            default:
+                return 0
+            }
+        }
+
+        func shouldApply(
+            incomingRevision: Int64,
+            incomingSource: String,
+            existingRevision: Int64,
+            existingSource: String
+        ) -> Bool {
+            if incomingRevision > existingRevision { return true }
+            if incomingRevision < existingRevision { return false }
+            return sourcePriority(incomingSource) >= sourcePriority(existingSource)
+        }
+
+        func dedupeObjects(
+            _ objects: [NSManagedObject],
+            idKey: String,
+            revisionKey: String,
+            sourceKey: String
+        ) -> [String: NSManagedObject] {
+            var winners: [String: NSManagedObject] = [:]
+            var revisions: [String: Int64] = [:]
+            var sources: [String: String] = [:]
+            for object in objects {
+                guard let id = object.value(forKey: idKey) as? String, !id.isEmpty else { continue }
+                let revision = int64Value(object, key: revisionKey)
+                let source = stringValue(object, key: sourceKey, fallback: "unknown")
+                if let existingRevision = revisions[id], let existingSource = sources[id] {
+                    if shouldApply(
+                        incomingRevision: revision,
+                        incomingSource: source,
+                        existingRevision: existingRevision,
+                        existingSource: existingSource
+                    ) {
+                        winners[id] = object
+                        revisions[id] = revision
+                        sources[id] = source
+                    }
+                } else {
+                    winners[id] = object
+                    revisions[id] = revision
+                    sources[id] = source
+                }
+            }
+            return winners
+        }
+
+        func decodeStringArray(_ value: String?) -> [String] {
+            guard let value,
+                  let data = value.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data) as? [String] else {
+                return []
+            }
+            return raw
+        }
+
+        let sessionRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.session)
+        let sessionObjects = (try? context.fetch(sessionRequest)) ?? []
+        let sessionDeduped = dedupeObjects(
+            sessionObjects,
+            idKey: SessionField.sessionId,
+            revisionKey: SessionField.revision,
+            sourceKey: SessionField.sourceDevice
+        )
+        let sessions = sessionDeduped.values.compactMap { object -> SessionRecord? in
+            guard let sessionId = object.value(forKey: SessionField.sessionId) as? String,
+                  !sessionId.isEmpty else { return nil }
+            let stage = stringValue(object, key: SessionField.stage, fallback: defaultStage)
+            let updatedAtSeconds = doubleValue(object, key: SessionField.updatedAt)
+            return SessionRecord(
+                id: sessionId,
+                stage: stage,
+                shootingStart: object.value(forKey: SessionField.shootingStart) as? Date,
+                selectingStart: object.value(forKey: SessionField.selectingStart) as? Date,
+                endedAt: object.value(forKey: SessionField.endedAt) as? Date,
+                amountCents: intValue(object, key: SessionField.amountCents),
+                shotCount: intValue(object, key: SessionField.shotCount),
+                selectedCount: intValue(object, key: SessionField.selectedCount),
+                reviewNote: object.value(forKey: SessionField.reviewNote) as? String,
+                revision: int64Value(object, key: SessionField.revision),
+                updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                sourceDevice: stringValue(object, key: SessionField.sourceDevice, fallback: "unknown"),
+                isVoided: boolValue(object, key: SessionField.isVoided),
+                isDeleted: boolValue(object, key: SessionField.isDeleted)
+            )
+        }
+
+        let shiftRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.shift)
+        let shiftObjects = (try? context.fetch(shiftRequest)) ?? []
+        let shiftDeduped = dedupeObjects(
+            shiftObjects,
+            idKey: ShiftField.dayKey,
+            revisionKey: ShiftField.revision,
+            sourceKey: ShiftField.sourceDevice
+        )
+        let shifts = Dictionary(uniqueKeysWithValues: shiftDeduped.values.compactMap { object -> (String, ShiftRecordSnapshot)? in
+            guard let dayKey = object.value(forKey: ShiftField.dayKey) as? String,
+                  !dayKey.isEmpty else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: ShiftField.updatedAt)
+            return (
+                dayKey,
+                ShiftRecordSnapshot(
+                    dayKey: dayKey,
+                    startAt: object.value(forKey: ShiftField.startAt) as? Date,
+                    endAt: object.value(forKey: ShiftField.endAt) as? Date,
+                    revision: int64Value(object, key: ShiftField.revision),
+                    updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                    sourceDevice: stringValue(object, key: ShiftField.sourceDevice, fallback: "unknown")
+                )
+            )
+        })
+
+        let memoRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.memo)
+        let memoObjects = (try? context.fetch(memoRequest)) ?? []
+        let memoDeduped = dedupeObjects(
+            memoObjects,
+            idKey: MemoField.dayKey,
+            revisionKey: MemoField.revision,
+            sourceKey: MemoField.sourceDevice
+        )
+        let memos = Dictionary(uniqueKeysWithValues: memoDeduped.values.compactMap { object -> (String, DayMemoSnapshot)? in
+            guard let dayKey = object.value(forKey: MemoField.dayKey) as? String,
+                  !dayKey.isEmpty else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: MemoField.updatedAt)
+            return (
+                dayKey,
+                DayMemoSnapshot(
+                    dayKey: dayKey,
+                    text: object.value(forKey: MemoField.text) as? String,
+                    actionSeed: object.value(forKey: MemoField.actionSeed) as? String,
+                    revision: int64Value(object, key: MemoField.revision),
+                    updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                    sourceDevice: stringValue(object, key: MemoField.sourceDevice, fallback: "unknown")
+                )
+            )
+        })
+
+        let reviewRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.review)
+        let reviewObjects = (try? context.fetch(reviewRequest)) ?? []
+        let reviewDeduped = dedupeObjects(
+            reviewObjects,
+            idKey: ReviewField.dayKey,
+            revisionKey: ReviewField.revision,
+            sourceKey: ReviewField.sourceDevice
+        )
+        let reviews = Dictionary(uniqueKeysWithValues: reviewDeduped.values.compactMap { object -> (String, DailyReviewSnapshot)? in
+            guard let dayKey = object.value(forKey: ReviewField.dayKey) as? String,
+                  !dayKey.isEmpty else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: ReviewField.updatedAt)
+            let top3Value = object.value(forKey: ReviewField.top3SessionIds) as? String
+            let rawNotes = object.value(forKey: ReviewField.notesAll) as? String
+            let parsedNotes = decodeDailyReviewNote(rawNotes)
+            return (
+                dayKey,
+                DailyReviewSnapshot(
+                    dayKey: dayKey,
+                    incomeCents: object.value(forKey: ReviewField.incomeCents) as? Int64,
+                    shootingTotal: doubleValue(object, key: ReviewField.shootingTotal),
+                    selectingTotal: doubleValue(object, key: ReviewField.selectingTotal),
+                    rphShoot: object.value(forKey: ReviewField.rphShoot) as? Double,
+                    sessionCount: Int(int64Value(object, key: ReviewField.sessionCount)),
+                    top3SessionIds: decodeStringArray(top3Value),
+                    bottom1SessionId: object.value(forKey: ReviewField.bottom1SessionId) as? String,
+                    bottom1Note: object.value(forKey: ReviewField.bottom1Note) as? String,
+                    notesAll: rawNotes,
+                    aiSummary: parsedNotes?.aiSummary,
+                    tomorrowOneAction: object.value(forKey: ReviewField.tomorrowOneAction) as? String,
+                    revision: int64Value(object, key: ReviewField.revision),
+                    updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                    sourceDevice: stringValue(object, key: ReviewField.sourceDevice, fallback: "unknown")
+                )
+            )
+        })
+
+        let weeklyRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.weeklyReview)
+        let weeklyObjects = (try? context.fetch(weeklyRequest)) ?? []
+        let weeklyDeduped = dedupeObjects(
+            weeklyObjects,
+            idKey: WeeklyReviewField.weekKey,
+            revisionKey: WeeklyReviewField.revision,
+            sourceKey: WeeklyReviewField.sourceDevice
+        )
+        let weeklies = Dictionary(uniqueKeysWithValues: weeklyDeduped.values.compactMap { object -> (String, WeeklyReviewSnapshot)? in
+            guard let weekKey = object.value(forKey: WeeklyReviewField.weekKey) as? String,
+                  !weekKey.isEmpty else { return nil }
+            let updatedAtSeconds = doubleValue(object, key: WeeklyReviewField.updatedAt)
+            let top3Value = object.value(forKey: WeeklyReviewField.top3SessionIds) as? String
+            let tagValue = object.value(forKey: WeeklyReviewField.decisionTagTop2) as? String
+            return (
+                weekKey,
+                WeeklyReviewSnapshot(
+                    weekKey: weekKey,
+                    incomeCents: object.value(forKey: WeeklyReviewField.incomeCents) as? Int64,
+                    shootingTotal: doubleValue(object, key: WeeklyReviewField.shootingTotal),
+                    selectingTotal: doubleValue(object, key: WeeklyReviewField.selectingTotal),
+                    rphShoot: object.value(forKey: WeeklyReviewField.rphShoot) as? Double,
+                    sessionCount: Int(int64Value(object, key: WeeklyReviewField.sessionCount)),
+                    top3SessionIds: decodeStringArray(top3Value),
+                    bottom1SessionId: object.value(forKey: WeeklyReviewField.bottom1SessionId) as? String,
+                    decisionTagTop2: decodeStringArray(tagValue),
+                    sopText: object.value(forKey: WeeklyReviewField.sopText) as? String,
+                    experimentAction: object.value(forKey: WeeklyReviewField.experimentAction) as? String,
+                    experimentTrigger: object.value(forKey: WeeklyReviewField.experimentTrigger) as? String,
+                    experimentSuccess: object.value(forKey: WeeklyReviewField.experimentSuccess) as? String,
+                    revision: int64Value(object, key: WeeklyReviewField.revision),
+                    updatedAt: Date(timeIntervalSince1970: updatedAtSeconds),
+                    sourceDevice: stringValue(object, key: WeeklyReviewField.sourceDevice, fallback: "unknown")
+                )
+            )
+        })
+
+        return StoreSnapshot(
+            sessionRecords: sessions,
+            shiftRecords: shifts,
+            dayMemos: memos,
+            dailyReviews: reviews,
+            weeklyReviews: weeklies
+        )
+    }
+
     func forceCloudRefreshAsync() async {
         guard !isRefreshing else { return }
         isRefreshing = true
@@ -1573,7 +1975,7 @@ final class CloudDataStore: ObservableObject {
         lastRefreshError = nil
         defer { isRefreshing = false }
         print("CloudDataStore force refresh requested")
-        refreshAll()
+        refreshAll(reason: "force_refresh", debounceNanoseconds: 0)
         var errors: [Error] = []
         if !storeCloudEnabled {
             let error = NSError(
@@ -1624,7 +2026,7 @@ final class CloudDataStore: ObservableObject {
             lastCloudError = detail
         }
         isRefreshing = false
-        refreshAll()
+        refreshAll(reason: "reset_local_store", debounceNanoseconds: 0)
     }
 
     private struct ResetResult {
@@ -2755,7 +3157,7 @@ struct ContentView: View {
         var endedAt: Date?
     }
 
-    struct SessionSummary: Identifiable {
+    struct SessionSummary: Identifiable, Sendable {
         let id: String
         var shootingStart: Date?
         var selectingStart: Date?
@@ -3207,6 +3609,14 @@ struct ContentView: View {
     @State private var markdownPendingDayKeys: Set<String> = []
     @State private var markdownDigestBySessionId: [String: MarkdownExportDigest] = [:]
     @State private var markdownDigestBootstrapped = false
+    @State private var sessionSummaryDebounceTask: Task<Void, Never>?
+    @State private var pendingSessionSummaryRecords: [CloudDataStore.SessionRecord] = []
+    @State private var pendingSessionSummaryReasons: Set<String> = []
+    @State private var sceneActiveRefreshTask: Task<Void, Never>?
+    @State private var diagnosticsLogText = ""
+    @State private var diagnosticsLastRunAbnormal = false
+    @State private var diagnosticsStressStatus = "未开始"
+    @State private var diagnosticsStressRunning = false
     @State private var apiTestingSelections: Set<String> = []
     @AppStorage(MarkdownAutoExportStorageKey.folderPath) private var markdownExportFolderPath = ""
     @AppStorage(MarkdownAutoExportStorageKey.lastExportAt) private var markdownLastExportAtRaw: Double = 0
@@ -3350,13 +3760,31 @@ struct ContentView: View {
         }
         .onAppear {
             syncRetouchPriceDraftFromStorage()
+            diagnosticsLastRunAbnormal = RuntimeExitState.lastLaunchWasAbnormal()
+            runtimeLog("app", "content_appear", extra: [
+                "boot_ready": bootStateReady ? "true" : "false",
+                "last_run_abnormal": diagnosticsLastRunAbnormal ? "true" : "false"
+            ])
+            if diagnosticsLastRunAbnormal {
+                loadDiagnosticsLogTail()
+            }
+            requestSessionSummaryRecompute(
+                records: cloudStore.sessionRecords,
+                reason: "content_appear",
+                debounceNanoseconds: 0
+            )
             resolveMarkdownAutoExportFolderURLIfNeeded()
             observeMarkdownAutoExportChanges(
                 records: cloudStore.sessionRecords,
                 overrides: timeOverrideStore.overrides
             )
         }
-        .onReceive(ticker) { now = $0 }
+        .onReceive(ticker) { tick in
+            let shouldRefreshNow = selectedTab == .home || stage == .shooting || stage == .selecting
+            if shouldRefreshNow {
+                now = tick
+            }
+        }
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
             applySessionEvent(event)
@@ -3366,7 +3794,7 @@ struct ContentView: View {
             applyCanonicalState(state, shouldPrompt: false)
         }
         .onReceive(cloudStore.$sessionRecords) { records in
-            syncSessionSummaries(from: records)
+            requestSessionSummaryRecompute(records: records, reason: "cloud_records_changed")
             observeMarkdownAutoExportChanges(
                 records: records,
                 overrides: timeOverrideStore.overrides
@@ -3390,25 +3818,39 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            runtimeLog("app", "scene_phase", extra: ["phase": "\(phase)"])
+            if phase == .background {
+                RuntimeExitState.markBackgrounded()
+            }
             guard bootStateReady else { return }
             guard phase == .active else {
                 hideTodayRevenue = true
                 return
             }
-            cloudStore.refreshFromStore()
-            refreshDutyState()
-            updateTodayDayKey()
-            if isReadOnlyDevice {
+            sceneActiveRefreshTask?.cancel()
+            sceneActiveRefreshTask = Task {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled else { return }
+                cloudStore.refreshFromStore()
+                requestSessionSummaryRecompute(
+                    records: cloudStore.sessionRecords,
+                    reason: "scene_active",
+                    debounceNanoseconds: 0
+                )
+                refreshDutyState()
+                updateTodayDayKey()
+                if isReadOnlyDevice {
+                    if let state = syncStore.reloadCanonicalState() {
+                        applyCanonicalState(state, shouldPrompt: false)
+                    }
+                    return
+                }
                 if let state = syncStore.reloadCanonicalState() {
                     applyCanonicalState(state, shouldPrompt: false)
+                    syncStore.updateCanonicalState(state, send: true)
+                } else {
+                    syncStageState(now: now)
                 }
-                return
-            }
-            if let state = syncStore.reloadCanonicalState() {
-                applyCanonicalState(state, shouldPrompt: false)
-                syncStore.updateCanonicalState(state, send: true)
-            } else {
-                syncStageState(now: now)
             }
         }
         .task {
@@ -3418,8 +3860,72 @@ struct ContentView: View {
         }
     }
 
-    private func syncSessionSummaries(from records: [CloudDataStore.SessionRecord]) {
-        let summaries = dedupedSessionRecords(records)
+    private func requestSessionSummaryRecompute(
+        records: [CloudDataStore.SessionRecord],
+        reason: String,
+        debounceNanoseconds: UInt64 = 1_000_000_000
+    ) {
+        guard bootStateReady else { return }
+        pendingSessionSummaryRecords = records
+        pendingSessionSummaryReasons.insert(reason)
+        sessionSummaryDebounceTask?.cancel()
+        sessionSummaryDebounceTask = Task {
+            if debounceNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: debounceNanoseconds)
+            }
+            guard !Task.isCancelled else { return }
+            let input = pendingSessionSummaryRecords
+            let reasons = pendingSessionSummaryReasons.sorted().joined(separator: ",")
+            pendingSessionSummaryRecords.removeAll()
+            pendingSessionSummaryReasons.removeAll()
+            runtimeLog("stats", "recompute_start", extra: [
+                "reasons": reasons,
+                "records": "\(input.count)"
+            ])
+            let summaries = await Task.detached(priority: .utility) {
+                Self.buildSessionSummaries(input)
+            }.value
+            guard !Task.isCancelled else { return }
+            sessionSummaries = summaries
+            runtimeLog("stats", "recompute_end", extra: [
+                "sessions": "\(summaries.count)"
+            ])
+        }
+    }
+
+    nonisolated private static func buildSessionSummaries(_ records: [CloudDataStore.SessionRecord]) -> [SessionSummary] {
+        func sourcePriority(_ source: String) -> Int {
+            switch source {
+            case "phone":
+                return 3
+            case "ipad":
+                return 2
+            case "watch":
+                return 1
+            default:
+                return 0
+            }
+        }
+        func sessionSortKey(_ record: CloudDataStore.SessionRecord) -> Date {
+            let start = [record.shootingStart, record.selectingStart, record.endedAt].compactMap { $0 }.min()
+            return start ?? record.updatedAt
+        }
+        var winners: [String: CloudDataStore.SessionRecord] = [:]
+        for record in records {
+            if let existing = winners[record.id] {
+                if record.revision > existing.revision {
+                    winners[record.id] = record
+                } else if record.revision == existing.revision,
+                          sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
+                    winners[record.id] = record
+                }
+            } else {
+                winners[record.id] = record
+            }
+        }
+        return winners.values
+            .filter { !$0.isDeleted && !$0.isVoided }
+            .sorted { sessionSortKey($0) < sessionSortKey($1) }
             .filter { $0.shootingStart != nil || $0.selectingStart != nil || $0.endedAt != nil }
             .map { record in
                 SessionSummary(
@@ -3429,7 +3935,6 @@ struct ContentView: View {
                     endedAt: record.endedAt
                 )
             }
-        sessionSummaries = summaries
     }
 
     private func dedupedSessionRecords(_ records: [CloudDataStore.SessionRecord]) -> [CloudDataStore.SessionRecord] {
@@ -3456,6 +3961,37 @@ struct ContentView: View {
         guard markdownLastExportAtRaw > 0 else { return "—" }
         let date = Date(timeIntervalSince1970: markdownLastExportAtRaw)
         return formatApiTestTime(date)
+    }
+
+    private func loadDiagnosticsLogTail() {
+        Task {
+            let text = await PersistentRingBufferLogger.shared.lastLines(limit: 200)
+            diagnosticsLogText = text.isEmpty ? "暂无日志" : text
+        }
+    }
+
+    private func runDiagnosticsStressTest() {
+#if DEBUG
+        guard !diagnosticsStressRunning else { return }
+        diagnosticsStressRunning = true
+        diagnosticsStressStatus = "运行中：连续触发 stats/markdown 20 次，请手动执行前后台切换"
+        runtimeLog("stress", "start")
+        Task {
+            for index in 1...20 {
+                requestSessionSummaryRecompute(
+                    records: cloudStore.sessionRecords,
+                    reason: "stress_\(index)",
+                    debounceNanoseconds: 0
+                )
+                let todayKey = Self.dayKey(for: Date())
+                scheduleMarkdownAutoExport(for: Set([todayKey]))
+                try? await Task.sleep(nanoseconds: 80_000_000)
+            }
+            diagnosticsStressStatus = "完成：请观察 UI 是否出现 >5s 卡顿"
+            diagnosticsStressRunning = false
+            runtimeLog("stress", "end")
+        }
+#endif
     }
 
     @discardableResult
@@ -3654,29 +4190,116 @@ struct ContentView: View {
     private func runMarkdownAutoExport(for dayKeys: Set<String>) async {
         guard !dayKeys.isEmpty else { return }
         guard let folderURL = resolveMarkdownAutoExportFolderURLIfNeeded() else { return }
-        let payloads = markdownWritePayloads(for: dayKeys)
-        let errorText = await Task.detached(priority: .utility) {
+        let records = cloudStore.sessionRecords
+        let overrides = timeOverrideStore.overrides
+        let memos = dailyMemoStore.memos
+        runtimeLog("markdown", "write_start", extra: [
+            "days": "\(dayKeys.count)",
+            "records": "\(records.count)"
+        ])
+        let writeTask = Task.detached(priority: .utility) {
             do {
+                let payloads = Self.markdownWritePayloads(
+                    for: dayKeys,
+                    records: records,
+                    overrides: overrides,
+                    memos: memos
+                )
                 try Self.writeMarkdownFiles(payloads, baseFolderURL: folderURL)
                 return ""
             } catch {
                 return error.localizedDescription
             }
-        }.value
+        }
+        let errorText = await writeTask.value
         markdownLastExportAtRaw = Date().timeIntervalSince1970
         markdownLastExportError = errorText
+        runtimeLog("markdown", "write_end", extra: [
+            "days": "\(dayKeys.count)",
+            "ok": errorText.isEmpty ? "true" : "false",
+            "error": errorText
+        ])
     }
 
-    private func markdownWritePayloads(for dayKeys: Set<String>) -> [MarkdownFileWritePayload] {
-        let entries = markdownExportEntries(
-            records: cloudStore.sessionRecords,
-            overrides: timeOverrideStore.overrides
-        )
+    nonisolated private static func markdownWritePayloads(
+        for dayKeys: Set<String>,
+        records: [CloudDataStore.SessionRecord],
+        overrides: [String: SessionTimeOverride],
+        memos: [String: String]
+    ) -> [MarkdownFileWritePayload] {
+        func sourcePriority(_ source: String) -> Int {
+            switch source {
+            case "phone":
+                return 3
+            case "ipad":
+                return 2
+            case "watch":
+                return 1
+            default:
+                return 0
+            }
+        }
+
+        func sessionSortKey(_ record: CloudDataStore.SessionRecord) -> Date {
+            let start = [record.shootingStart, record.selectingStart, record.endedAt].compactMap { $0 }.min()
+            return start ?? record.updatedAt
+        }
+
+        func dedupedRecords(_ input: [CloudDataStore.SessionRecord]) -> [CloudDataStore.SessionRecord] {
+            var winners: [String: CloudDataStore.SessionRecord] = [:]
+            for record in input {
+                if let existing = winners[record.id] {
+                    if record.revision > existing.revision {
+                        winners[record.id] = record
+                    } else if record.revision == existing.revision,
+                              sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
+                        winners[record.id] = record
+                    }
+                } else {
+                    winners[record.id] = record
+                }
+            }
+            return winners.values
+                .filter { !$0.isDeleted && !$0.isVoided }
+                .sorted { sessionSortKey($0) < sessionSortKey($1) }
+        }
+
+        let entries: [MarkdownExportEntry] = dedupedRecords(records).compactMap { record in
+            let times: SessionTimes = {
+                if let overrideValue = overrides[record.id] {
+                    return SessionTimes(
+                        shootingStart: overrideValue.shootingStart,
+                        selectingStart: overrideValue.selectingStart,
+                        endedAt: overrideValue.endedAt
+                    )
+                }
+                return SessionTimes(
+                    shootingStart: record.shootingStart,
+                    selectingStart: record.selectingStart,
+                    endedAt: record.endedAt
+                )
+            }()
+            let start = times.shootingStart ?? times.selectingStart ?? times.endedAt
+            guard let start else { return nil }
+            let dayKey = ContentView.dayKey(for: start)
+            return MarkdownExportEntry(
+                id: record.id,
+                dayKey: dayKey,
+                shootingStart: times.shootingStart,
+                selectingStart: times.selectingStart,
+                endedAt: times.endedAt,
+                amountCents: record.amountCents,
+                shotCount: record.shotCount,
+                selectedCount: record.selectedCount,
+                reviewNote: record.reviewNote?.trimmingCharacters(in: .whitespacesAndNewlines),
+                stage: record.stage
+            )
+        }
         let grouped = Dictionary(grouping: entries, by: \.dayKey)
         return dayKeys
             .sorted()
             .map { dayKey in
-                let memo = dailyMemoStore.memo(for: dayKey)
+                let memo = memos[dayKey] ?? ""
                 let content = dailyMarkdownAutoExportText(
                     dayKey: dayKey,
                     entries: grouped[dayKey] ?? [],
@@ -3686,7 +4309,7 @@ struct ContentView: View {
             }
     }
 
-    private func dailyMarkdownAutoExportText(
+    nonisolated private static func dailyMarkdownAutoExportText(
         dayKey: String,
         entries: [MarkdownExportEntry],
         memo: String
@@ -3709,7 +4332,7 @@ struct ContentView: View {
             let ratio = Double(totalSelected) / Double(totalShot)
             return "\(Int((ratio * 100).rounded()))%"
         }()
-        let title = dateFromDayKey(dayKey).map(reviewDateText) ?? dayKey
+        let title = dateFromDayKey(dayKey).map { reviewDateText($0) } ?? dayKey
         let memoText = memo.trimmingCharacters(in: .whitespacesAndNewlines)
         var lines: [String] = []
         lines.append("# \(title) 日报")
@@ -3720,8 +4343,8 @@ struct ContentView: View {
         lines.append("- 拍摄张数：\(hasShot ? "\(totalShot)" : "--")")
         lines.append("- 选片张数：\(hasSelected ? "\(totalSelected)" : "--")")
         lines.append("- 选片率：\(pickRate)")
-        lines.append("- 总时长：\(format(totalDuration))")
-        lines.append("- 更新时间：\(formatApiTestTime(Date()))")
+        lines.append("- 总时长：\(formatDuration(totalDuration))")
+        lines.append("- 更新时间：\(formatDateTime(Date()))")
         lines.append("")
         lines.append("## 会话明细")
         if sorted.isEmpty {
@@ -3745,19 +4368,19 @@ struct ContentView: View {
         return lines.joined(separator: "\n")
     }
 
-    private func markdownEntrySortDate(_ entry: MarkdownExportEntry) -> Date {
+    nonisolated private static func markdownEntrySortDate(_ entry: MarkdownExportEntry) -> Date {
         entry.shootingStart ?? entry.selectingStart ?? entry.endedAt ?? Date.distantPast
     }
 
-    private func markdownSessionTimeRange(_ entry: MarkdownExportEntry) -> String {
+    nonisolated private static func markdownSessionTimeRange(_ entry: MarkdownExportEntry) -> String {
         let start = markdownEntrySortDate(entry)
         if let end = entry.endedAt, end > start {
-            return "\(formatSessionTime(start))-\(formatSessionTime(end))"
+            return "\(formatShortTime(start))-\(formatShortTime(end))"
         }
-        return formatSessionTime(start)
+        return formatShortTime(start)
     }
 
-    private func markdownStageTitle(_ stage: String) -> String {
+    nonisolated private static func markdownStageTitle(_ stage: String) -> String {
         switch stage {
         case WatchSyncStore.StageSyncKey.stageShooting:
             return "拍摄中"
@@ -3768,6 +4391,51 @@ struct ContentView: View {
         default:
             return stage
         }
+    }
+
+    nonisolated private static func formatAmount(cents: Int) -> String {
+        if cents % 100 == 0 {
+            return "¥\(cents / 100)"
+        }
+        let value = Double(cents) / 100
+        return String(format: "¥%.2f", value)
+    }
+
+    nonisolated private static func formatDuration(_ value: TimeInterval) -> String {
+        guard value > 0 else { return "00:00:00" }
+        let totalSeconds = Int(value)
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+    }
+
+    nonisolated private static func formatShortTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    nonisolated private static func formatDateTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    nonisolated private static func dateFromDayKey(_ dayKey: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: dayKey)
+    }
+
+    nonisolated private static func reviewDateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     nonisolated private static func writeMarkdownFiles(
@@ -4833,6 +5501,48 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            Text("Diagnostics")
+                .font(.headline)
+            if diagnosticsLastRunAbnormal {
+                Text("检测到上次可能异常退出，已保留最近运行日志")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 12) {
+                Button("刷新最近200行") {
+                    loadDiagnosticsLogTail()
+                }
+                .buttonStyle(.bordered)
+                Button("复制日志") {
+                    UIPasteboard.general.string = diagnosticsLogText
+                }
+                .buttonStyle(.bordered)
+#if DEBUG
+                Button(diagnosticsStressRunning ? "Stress Test 运行中" : "Stress Test") {
+                    runDiagnosticsStressTest()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(diagnosticsStressRunning)
+#endif
+            }
+#if DEBUG
+            Text("stress: \(diagnosticsStressStatus)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+#endif
+            ScrollView {
+                Text(diagnosticsLogText.isEmpty ? "暂无日志" : diagnosticsLogText)
+                    .font(.caption2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 220)
+            .padding(8)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .fileExporter(
             isPresented: $isExportingFiles,
@@ -6859,14 +7569,34 @@ struct ContentView: View {
     private func performSwipeVoid(id: String) -> Bool {
         let now = Date()
         let revision = forcedVisibilityRevision(at: now)
+        runtimeLog("session", "void_start", extra: [
+            "session_id": id,
+            "revision": "\(revision)"
+        ])
         sessionSummaries.removeAll { $0.id == id }
         let debug = sessionVisibilityStore.markVoided(id, updatedAt: now, revision: revision)
-        syncSessionSummaries(from: cloudStore.sessionRecords)
+        requestSessionSummaryRecompute(
+            records: cloudStore.sessionRecords,
+            reason: "void_session",
+            debounceNanoseconds: 0
+        )
         if !debug.winnerVoided {
             activeAlert = .validation("作废失败：未持久化")
-            syncSessionSummaries(from: cloudStore.sessionRecords)
+            requestSessionSummaryRecompute(
+                records: cloudStore.sessionRecords,
+                reason: "void_failed",
+                debounceNanoseconds: 0
+            )
+            runtimeLog("session", "void_end", extra: [
+                "session_id": id,
+                "ok": "false"
+            ])
             return false
         }
+        runtimeLog("session", "void_end", extra: [
+            "session_id": id,
+            "ok": "true"
+        ])
         return true
     }
 
@@ -6874,6 +7604,10 @@ struct ContentView: View {
     private func deleteSession(id: String, showPending: Bool = false) -> Bool {
         let now = Date()
         let revision = forcedVisibilityRevision(at: now)
+        runtimeLog("session", "delete_tombstone_start", extra: [
+            "session_id": id,
+            "revision": "\(revision)"
+        ])
         if let index = sessionSummaries.firstIndex(where: { $0.id == id }),
            sessionSummaries[index].endedAt == nil {
             resetSession()
@@ -6885,7 +7619,11 @@ struct ContentView: View {
         }
         sessionSummaries.removeAll { $0.id == id }
         let debug = sessionVisibilityStore.markDeleted(id, updatedAt: now, revision: revision)
-        syncSessionSummaries(from: cloudStore.sessionRecords)
+        requestSessionSummaryRecompute(
+            records: cloudStore.sessionRecords,
+            reason: "delete_session",
+            debounceNanoseconds: 0
+        )
         if showPending {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                 pendingDeleteIds.remove(id)
@@ -6894,9 +7632,21 @@ struct ContentView: View {
         if !debug.winnerDeleted {
             pendingDeleteIds.remove(id)
             activeAlert = .validation("Delete failed: tombstone not persisted")
-            syncSessionSummaries(from: cloudStore.sessionRecords)
+            requestSessionSummaryRecompute(
+                records: cloudStore.sessionRecords,
+                reason: "delete_failed",
+                debounceNanoseconds: 0
+            )
+            runtimeLog("session", "delete_tombstone_end", extra: [
+                "session_id": id,
+                "ok": "false"
+            ])
             return false
         }
+        runtimeLog("session", "delete_tombstone_end", extra: [
+            "session_id": id,
+            "ok": "true"
+        ])
         return true
     }
 
