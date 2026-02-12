@@ -1,4 +1,41 @@
-## ACTIVE — TC-IOS-MARKDOWN-AUTO-PERSIST-V1
+## ACTIVE — TC-IOS-IPAD-SHORTCUTS-STAGE-V1
+Priority: P0
+Goal:
+- 不打开 iPad PhotoFlow UI，仅通过 iPad 快捷指令记录阶段动作，并同步到 iPhone PhotoFlow
+- 三个快捷指令：开始拍摄 / 开始选片 / 结束
+- 默认作用对象：当前进行中的那一单（endedAt==nil）。若无进行中单：开始拍摄会自动新建一单并开始拍摄。
+
+Scope:
+1) App Intents / Shortcuts
+- 注册 3 个 AppIntent（openAppWhenRun=false）
+- Shortcuts 中可直接添加到 iPad 桌面/Spotlight
+
+2) Canonical 写入（不走事件消费，直接写 SessionRecord）
+- Start Shooting:
+  - 若存在 active session -> set stage=shooting（必要时补 shootingStart）
+  - 若不存在 -> create new session + shootingStart=now + stage=shooting
+- Start Selecting:
+  - 若存在 active session -> set selectingStart if nil + stage=selecting
+  - 若不存在 -> 返回明确失败信息（不崩）
+- End:
+  - 若存在 active session -> set endedAt=now + stage=ended
+  - 若不存在 -> 返回明确失败信息（不崩）
+- 每次写入必须 bump revision(nowMillis) + updatedAt + sourceDevice="ipad-shortcuts"
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance (device):
+A iPad 点“开始拍摄”快捷指令（不打开 iPad UI）-> iPhone 打开后显示拍摄中
+B iPad 点“开始选片”-> iPhone 打开后显示选片中
+C iPad 点“结束”-> iPhone 打开后显示已结束
+D 无 active session 时 Selecting/End 返回明确失败信息，不崩溃
+E ios_safe PASS；0 配置改动
+
+## DONE — TC-IOS-MARKDOWN-AUTO-PERSIST-V1
+Status: DONE (merged in PR #226)
 Priority: P0
 Goal:
 - 第一次选择一个文件夹，后续自动把记录写入 Markdown（按天文件）
