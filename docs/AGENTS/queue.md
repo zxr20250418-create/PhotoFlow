@@ -1,3 +1,54 @@
+## ACTIVE — TC-IOS-MARKDOWN-AUTO-PERSIST-V1
+Priority: P0
+Goal:
+- 第一次选择一个文件夹，后续自动把记录写入 Markdown（按天文件）
+- 复盘备注 reviewNote 取消 120 字限制（不限字数）
+
+Scope:
+1) Settings 增加“Markdown 自动保存”
+- Folder picker 选择导出文件夹
+- 保存 security-scoped bookmark 到 UserDefaults
+- 显示当前导出路径、lastExportAt、lastExportError
+
+2) 自动写入（按天）
+- 文件路径：Exports/YYYY/MM/YYYY-MM-DD.daily.md（在用户选择的文件夹下创建 Exports/...）
+- 触发：保存会话/结束/删除作废/修改历史后 debounce 1s 重写对应 dayKey 的文件
+- 原子写：temp + replace
+- 写失败不影响主流程，只记录 lastExportError
+
+3) reviewNote 不限字数
+- 移除任何 120 字截断/校验
+- TextEditor 不做硬限制（可保留字数显示但不阻止保存）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A 选择文件夹后，保存/结束任意一单，会自动生成/更新当天 daily.md
+B 修改历史会话会更新对应日期文件
+C 离线也能写本地文件；失败显示 lastExportError
+D reviewNote 长文本可保存并持久化
+E ios_safe PASS；0 配置改动
+
+## DONE — TC-IOS-STRIP-AI-AND-REVIEW-V1
+Status: DONE (merged in PR #224)
+Priority: P0
+Goal:
+- 移除 App 内 AI 相关能力与入口，保留纯记录能力
+- 移除“复盘（5 槽位）”展示与编辑入口，仅保留原始备注
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+- Settings/Stats/详情/编辑页不再出现 AI 入口或 5 槽位复盘 UI
+- 仅移除 UI 与入口，不做数据迁移
+- ios_safe PASS；0 配置改动
+
 ## DONE — TC-IOS-AI-MODEL-PICKER-V1
 Status: DONE (merged in PR #190)
 Priority: P0
