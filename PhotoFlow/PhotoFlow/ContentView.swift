@@ -3041,6 +3041,36 @@ struct ContentView: View {
         case nextDecision
     }
 
+    private enum MarkdownAutoExportStorageKey {
+        static let bookmark = "pf_markdown_auto_export_folder_bookmark_v1"
+        static let folderPath = "pf_markdown_auto_export_folder_path_v1"
+        static let lastExportAt = "pf_markdown_auto_export_last_at_v1"
+        static let lastExportError = "pf_markdown_auto_export_last_error_v1"
+    }
+
+    private struct MarkdownExportDigest: Equatable {
+        let dayKey: String
+        let signature: String
+    }
+
+    private struct MarkdownExportEntry: Sendable {
+        let id: String
+        let dayKey: String
+        let shootingStart: Date?
+        let selectingStart: Date?
+        let endedAt: Date?
+        let amountCents: Int?
+        let shotCount: Int?
+        let selectedCount: Int?
+        let reviewNote: String?
+        let stage: String
+    }
+
+    private struct MarkdownFileWritePayload: Sendable {
+        let dayKey: String
+        let text: String
+    }
+
     @State private var stage: Stage = .idle
     @State private var session = Session()
     @State private var activeAlert: ActiveAlert?
@@ -3167,7 +3197,16 @@ struct ContentView: View {
     @State private var pendingImportBundle: ExportBundle?
     @State private var importStatus: String?
     @State private var importError: String?
+    @State private var isMarkdownFolderPickerPresented = false
+    @State private var markdownAutoExportFolderURL: URL?
+    @State private var markdownExportDebounceTask: Task<Void, Never>?
+    @State private var markdownPendingDayKeys: Set<String> = []
+    @State private var markdownDigestBySessionId: [String: MarkdownExportDigest] = [:]
+    @State private var markdownDigestBootstrapped = false
     @State private var apiTestingSelections: Set<String> = []
+    @AppStorage(MarkdownAutoExportStorageKey.folderPath) private var markdownExportFolderPath = ""
+    @AppStorage(MarkdownAutoExportStorageKey.lastExportAt) private var markdownLastExportAtRaw: Double = 0
+    @AppStorage(MarkdownAutoExportStorageKey.lastExportError) private var markdownLastExportError = ""
 #if DEBUG
     @State private var showDebugPanel = false
     @State private var showHomeDebugSheet = false
@@ -3305,6 +3344,13 @@ struct ContentView: View {
         .sheet(isPresented: $showIpadSyncDebug) {
             ipadSyncView
         }
+        .onAppear {
+            resolveMarkdownAutoExportFolderURLIfNeeded()
+            observeMarkdownAutoExportChanges(
+                records: cloudStore.sessionRecords,
+                overrides: timeOverrideStore.overrides
+            )
+        }
         .onReceive(ticker) { now = $0 }
         .onReceive(syncStore.$incomingEvent) { event in
             guard let event = event else { return }
@@ -3316,6 +3362,16 @@ struct ContentView: View {
         }
         .onReceive(cloudStore.$sessionRecords) { records in
             syncSessionSummaries(from: records)
+            observeMarkdownAutoExportChanges(
+                records: records,
+                overrides: timeOverrideStore.overrides
+            )
+        }
+        .onReceive(timeOverrideStore.$overrides) { overrides in
+            observeMarkdownAutoExportChanges(
+                records: cloudStore.sessionRecords,
+                overrides: overrides
+            )
         }
         .onReceive(cloudStore.$shiftRecords) { _ in
             guard bootStateReady else { return }
@@ -3389,6 +3445,371 @@ struct ContentView: View {
         return winners.values
             .filter { !$0.isDeleted && !$0.isVoided }
             .sorted { sessionSortKey(for: $0) < sessionSortKey(for: $1) }
+    }
+
+    private func markdownLastExportAtText() -> String {
+        guard markdownLastExportAtRaw > 0 else { return "—" }
+        let date = Date(timeIntervalSince1970: markdownLastExportAtRaw)
+        return formatApiTestTime(date)
+    }
+
+    @discardableResult
+    private func resolveMarkdownAutoExportFolderURLIfNeeded() -> URL? {
+        if let markdownAutoExportFolderURL {
+            return markdownAutoExportFolderURL
+        }
+        let defaults = UserDefaults.standard
+        guard let bookmarkData = defaults.data(forKey: MarkdownAutoExportStorageKey.bookmark) else {
+            return nil
+        }
+        var isStale = false
+        do {
+            let url = try URL(
+                resolvingBookmarkData: bookmarkData,
+                options: [],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+            markdownAutoExportFolderURL = url
+            if markdownExportFolderPath.isEmpty {
+                markdownExportFolderPath = url.path
+            }
+            if isStale {
+                persistMarkdownAutoExportFolder(url)
+            }
+            return url
+        } catch {
+            markdownLastExportError = "导出目录不可用：\(error.localizedDescription)"
+            markdownAutoExportFolderURL = nil
+            return nil
+        }
+    }
+
+    private func persistMarkdownAutoExportFolder(_ url: URL) {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        do {
+            let bookmarkData = try url.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            let defaults = UserDefaults.standard
+            defaults.set(bookmarkData, forKey: MarkdownAutoExportStorageKey.bookmark)
+            markdownAutoExportFolderURL = url
+            markdownExportFolderPath = url.path
+            markdownLastExportError = ""
+        } catch {
+            markdownLastExportError = "保存目录失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func observeMarkdownAutoExportChanges(
+        records: [CloudDataStore.SessionRecord],
+        overrides: [String: SessionTimeOverride]
+    ) {
+        guard bootStateReady else { return }
+        let latest = markdownDigestMap(records: records, overrides: overrides)
+        guard markdownDigestBootstrapped else {
+            markdownDigestBySessionId = latest
+            markdownDigestBootstrapped = true
+            return
+        }
+        let dayKeys = changedMarkdownDayKeys(
+            old: markdownDigestBySessionId,
+            new: latest
+        )
+        markdownDigestBySessionId = latest
+        scheduleMarkdownAutoExport(for: dayKeys)
+    }
+
+    private func markdownDigestMap(
+        records: [CloudDataStore.SessionRecord],
+        overrides: [String: SessionTimeOverride]
+    ) -> [String: MarkdownExportDigest] {
+        let entries = markdownExportEntries(records: records, overrides: overrides)
+        var result: [String: MarkdownExportDigest] = [:]
+        for entry in entries {
+            result[entry.id] = MarkdownExportDigest(
+                dayKey: entry.dayKey,
+                signature: markdownSignature(for: entry)
+            )
+        }
+        return result
+    }
+
+    private func markdownSignature(for entry: MarkdownExportEntry) -> String {
+        let parts: [String] = [
+            String(entry.shootingStart?.timeIntervalSince1970 ?? -1),
+            String(entry.selectingStart?.timeIntervalSince1970 ?? -1),
+            String(entry.endedAt?.timeIntervalSince1970 ?? -1),
+            entry.stage,
+            String(entry.amountCents ?? Int.min),
+            String(entry.shotCount ?? Int.min),
+            String(entry.selectedCount ?? Int.min),
+            entry.reviewNote ?? ""
+        ]
+        return parts.joined(separator: "|")
+    }
+
+    private func markdownExportEntries(
+        records: [CloudDataStore.SessionRecord],
+        overrides: [String: SessionTimeOverride]
+    ) -> [MarkdownExportEntry] {
+        dedupedSessionRecords(records).compactMap { record in
+            let times = markdownEffectiveTimes(record: record, overrides: overrides)
+            guard let dayKey = markdownDayKey(for: times) else { return nil }
+            return MarkdownExportEntry(
+                id: record.id,
+                dayKey: dayKey,
+                shootingStart: times.shootingStart,
+                selectingStart: times.selectingStart,
+                endedAt: times.endedAt,
+                amountCents: record.amountCents,
+                shotCount: record.shotCount,
+                selectedCount: record.selectedCount,
+                reviewNote: reviewNoteSummaryText(record.reviewNote),
+                stage: record.stage
+            )
+        }
+    }
+
+    private func markdownEffectiveTimes(
+        record: CloudDataStore.SessionRecord,
+        overrides: [String: SessionTimeOverride]
+    ) -> SessionTimes {
+        if let overrideValue = overrides[record.id] {
+            return SessionTimes(
+                shootingStart: overrideValue.shootingStart,
+                selectingStart: overrideValue.selectingStart,
+                endedAt: overrideValue.endedAt
+            )
+        }
+        return SessionTimes(
+            shootingStart: record.shootingStart,
+            selectingStart: record.selectingStart,
+            endedAt: record.endedAt
+        )
+    }
+
+    private func markdownDayKey(for times: SessionTimes) -> String? {
+        let start = times.shootingStart ?? times.selectingStart ?? times.endedAt
+        guard let start else { return nil }
+        return Self.dayKey(for: start)
+    }
+
+    private func changedMarkdownDayKeys(
+        old: [String: MarkdownExportDigest],
+        new: [String: MarkdownExportDigest]
+    ) -> Set<String> {
+        var result: Set<String> = []
+        let allIds = Set(old.keys).union(new.keys)
+        for id in allIds {
+            let before = old[id]
+            let after = new[id]
+            switch (before, after) {
+            case (nil, let next?):
+                result.insert(next.dayKey)
+            case (let previous?, nil):
+                result.insert(previous.dayKey)
+            case (let previous?, let next?):
+                if previous.dayKey != next.dayKey {
+                    result.insert(previous.dayKey)
+                    result.insert(next.dayKey)
+                }
+                if previous.signature != next.signature {
+                    result.insert(next.dayKey)
+                }
+            case (nil, nil):
+                continue
+            }
+        }
+        return result
+    }
+
+    private func scheduleMarkdownAutoExport(for dayKeys: Set<String>) {
+        guard bootStateReady else { return }
+        guard !dayKeys.isEmpty else { return }
+        guard resolveMarkdownAutoExportFolderURLIfNeeded() != nil else { return }
+        markdownPendingDayKeys.formUnion(dayKeys)
+        markdownExportDebounceTask?.cancel()
+        markdownExportDebounceTask = Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            let pending = markdownPendingDayKeys
+            markdownPendingDayKeys.removeAll()
+            await runMarkdownAutoExport(for: pending)
+        }
+    }
+
+    private func runMarkdownAutoExport(for dayKeys: Set<String>) async {
+        guard !dayKeys.isEmpty else { return }
+        guard let folderURL = resolveMarkdownAutoExportFolderURLIfNeeded() else { return }
+        let payloads = markdownWritePayloads(for: dayKeys)
+        let errorText = await Task.detached(priority: .utility) {
+            do {
+                try Self.writeMarkdownFiles(payloads, baseFolderURL: folderURL)
+                return ""
+            } catch {
+                return error.localizedDescription
+            }
+        }.value
+        markdownLastExportAtRaw = Date().timeIntervalSince1970
+        markdownLastExportError = errorText
+    }
+
+    private func markdownWritePayloads(for dayKeys: Set<String>) -> [MarkdownFileWritePayload] {
+        let entries = markdownExportEntries(
+            records: cloudStore.sessionRecords,
+            overrides: timeOverrideStore.overrides
+        )
+        let grouped = Dictionary(grouping: entries, by: \.dayKey)
+        return dayKeys
+            .sorted()
+            .map { dayKey in
+                let memo = dailyMemoStore.memo(for: dayKey)
+                let content = dailyMarkdownAutoExportText(
+                    dayKey: dayKey,
+                    entries: grouped[dayKey] ?? [],
+                    memo: memo
+                )
+                return MarkdownFileWritePayload(dayKey: dayKey, text: content)
+            }
+    }
+
+    private func dailyMarkdownAutoExportText(
+        dayKey: String,
+        entries: [MarkdownExportEntry],
+        memo: String
+    ) -> String {
+        let sorted = entries.sorted { markdownEntrySortDate($0) < markdownEntrySortDate($1) }
+        let nowDate = Date()
+        let totalDuration = sorted.reduce(into: TimeInterval(0)) { partial, entry in
+            let start = markdownEntrySortDate(entry)
+            let end = entry.endedAt ?? nowDate
+            partial += max(0, end.timeIntervalSince(start))
+        }
+        let totalAmount = sorted.reduce(0) { $0 + ($1.amountCents ?? 0) }
+        let hasAmount = sorted.contains { $0.amountCents != nil }
+        let totalShot = sorted.reduce(0) { $0 + ($1.shotCount ?? 0) }
+        let hasShot = sorted.contains { $0.shotCount != nil }
+        let totalSelected = sorted.reduce(0) { $0 + ($1.selectedCount ?? 0) }
+        let hasSelected = sorted.contains { $0.selectedCount != nil }
+        let pickRate: String = {
+            guard totalShot > 0 else { return "--" }
+            let ratio = Double(totalSelected) / Double(totalShot)
+            return "\(Int((ratio * 100).rounded()))%"
+        }()
+        let title = dateFromDayKey(dayKey).map(reviewDateText) ?? dayKey
+        let memoText = memo.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lines: [String] = []
+        lines.append("# \(title) 日报")
+        lines.append("")
+        lines.append("## 汇总")
+        lines.append("- 会话数：\(sorted.count)")
+        lines.append("- 收入：\(hasAmount ? formatAmount(cents: totalAmount) : "--")")
+        lines.append("- 拍摄张数：\(hasShot ? "\(totalShot)" : "--")")
+        lines.append("- 选片张数：\(hasSelected ? "\(totalSelected)" : "--")")
+        lines.append("- 选片率：\(pickRate)")
+        lines.append("- 总时长：\(format(totalDuration))")
+        lines.append("- 更新时间：\(formatApiTestTime(Date()))")
+        lines.append("")
+        lines.append("## 会话明细")
+        if sorted.isEmpty {
+            lines.append("- 暂无记录")
+        } else {
+            for (index, entry) in sorted.enumerated() {
+                lines.append("\(index + 1). \(markdownSessionTimeRange(entry)) · \(markdownStageTitle(entry.stage))")
+                let amountText = entry.amountCents.map { formatAmount(cents: $0) } ?? "--"
+                let shotText = entry.shotCount.map(String.init) ?? "--"
+                let selectedText = entry.selectedCount.map(String.init) ?? "--"
+                lines.append("金额：\(amountText) · 拍摄：\(shotText) · 选片：\(selectedText)")
+                if let note = entry.reviewNote, !note.isEmpty {
+                    lines.append("原始备注：\(note)")
+                }
+            }
+        }
+        lines.append("")
+        lines.append("## 当日备忘")
+        lines.append(memoText.isEmpty ? "暂无" : memoText)
+        lines.append("")
+        return lines.joined(separator: "\n")
+    }
+
+    private func markdownEntrySortDate(_ entry: MarkdownExportEntry) -> Date {
+        entry.shootingStart ?? entry.selectingStart ?? entry.endedAt ?? Date.distantPast
+    }
+
+    private func markdownSessionTimeRange(_ entry: MarkdownExportEntry) -> String {
+        let start = markdownEntrySortDate(entry)
+        if let end = entry.endedAt, end > start {
+            return "\(formatSessionTime(start))-\(formatSessionTime(end))"
+        }
+        return formatSessionTime(start)
+    }
+
+    private func markdownStageTitle(_ stage: String) -> String {
+        switch stage {
+        case WatchSyncStore.StageSyncKey.stageShooting:
+            return "拍摄中"
+        case WatchSyncStore.StageSyncKey.stageSelecting:
+            return "选片中"
+        case WatchSyncStore.StageSyncKey.stageStopped:
+            return "已结束"
+        default:
+            return stage
+        }
+    }
+
+    nonisolated private static func writeMarkdownFiles(
+        _ payloads: [MarkdownFileWritePayload],
+        baseFolderURL: URL
+    ) throws {
+        guard !payloads.isEmpty else { return }
+        let fileManager = FileManager.default
+        let didAccess = baseFolderURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                baseFolderURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        for payload in payloads {
+            let targetURL = markdownFileURL(baseFolderURL: baseFolderURL, dayKey: payload.dayKey)
+            let directoryURL = targetURL.deletingLastPathComponent()
+            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true, attributes: nil)
+            let tempURL = directoryURL.appendingPathComponent(".\(UUID().uuidString).tmp")
+            do {
+                try Data(payload.text.utf8).write(to: tempURL, options: [])
+                if fileManager.fileExists(atPath: targetURL.path) {
+                    _ = try fileManager.replaceItemAt(
+                        targetURL,
+                        withItemAt: tempURL,
+                        backupItemName: nil,
+                        options: []
+                    )
+                } else {
+                    try fileManager.moveItem(at: tempURL, to: targetURL)
+                }
+            } catch {
+                try? fileManager.removeItem(at: tempURL)
+                throw error
+            }
+        }
+    }
+
+    nonisolated private static func markdownFileURL(baseFolderURL: URL, dayKey: String) -> URL {
+        let parts = dayKey.split(separator: "-")
+        let year = parts.indices.contains(0) ? String(parts[0]) : "unknown"
+        let month = parts.indices.contains(1) ? String(parts[1]) : "00"
+        return baseFolderURL
+            .appendingPathComponent("Exports", isDirectory: true)
+            .appendingPathComponent(year, isDirectory: true)
+            .appendingPathComponent(month, isDirectory: true)
+            .appendingPathComponent("\(dayKey).daily.md", isDirectory: false)
     }
 
     private var effectiveSessionSummaries: [SessionSummary] {
@@ -4376,6 +4797,37 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            Text("Markdown 自动保存")
+                .font(.headline)
+            HStack(spacing: 12) {
+                Button("选择文件夹") {
+                    isMarkdownFolderPickerPresented = true
+                }
+                .buttonStyle(.bordered)
+                if !markdownExportFolderPath.isEmpty {
+                    Button("立即重写今日") {
+                        let todayKey = Self.dayKey(for: now)
+                        scheduleMarkdownAutoExport(for: Set([todayKey]))
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            let folderText = markdownExportFolderPath.isEmpty ? "未设置" : markdownExportFolderPath
+            Text("导出目录：\(folderText)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Text("lastExportAt: \(markdownLastExportAtText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if !markdownLastExportError.isEmpty {
+                Text("lastExportError: \(markdownLastExportError)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .fileExporter(
             isPresented: $isExportingFiles,
@@ -4410,6 +4862,12 @@ struct ContentView: View {
         }
         .sheet(item: $importPreview) { preview in
             importPreviewSheet(preview)
+        }
+        .sheet(isPresented: $isMarkdownFolderPickerPresented) {
+            FolderPicker { url in
+                guard let url else { return }
+                persistMarkdownAutoExportFolder(url)
+            }
         }
     }
 
@@ -5776,18 +6234,8 @@ struct ContentView: View {
         }
     }
 
-    private func limitedTextBinding(_ text: Binding<String>, limit: Int) -> Binding<String> {
-        Binding(
-            get: { text.wrappedValue },
-            set: { newValue in
-                let clipped = String(newValue.prefix(limit))
-                text.wrappedValue = clipped
-            }
-        )
-    }
-
     private func reviewFieldEditor(title: String, placeholder: String, text: Binding<String>) -> some View {
-        let binding = limitedTextBinding(text, limit: 120)
+        let binding = text
         let isEmpty = binding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return VStack(alignment: .leading, spacing: 6) {
             Text(title)
@@ -5892,7 +6340,7 @@ struct ContentView: View {
                                     .padding(.top, 8)
                                     .padding(.leading, 6)
                             }
-                            TextEditor(text: limitedTextBinding(draft, limit: 120))
+                            TextEditor(text: draft)
                                 .font(.footnote)
                                 .frame(height: 72)
                                 .scrollContentBackground(.hidden)
@@ -10822,6 +11270,42 @@ private struct LocalRecordSnapshot {
     let revision: Int64
     let sourceDevice: String
     let payload: RecordPayload
+}
+
+private struct FolderPicker: UIViewControllerRepresentable {
+    let onPick: (URL?) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPick: onPick)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.folder],
+            asCopy: false
+        )
+        picker.delegate = context.coordinator
+        picker.allowsMultipleSelection = false
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) { }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        private let onPick: (URL?) -> Void
+
+        init(onPick: @escaping (URL?) -> Void) {
+            self.onPick = onPick
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onPick(urls.first)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onPick(nil)
+        }
+    }
 }
 
 #Preview {
