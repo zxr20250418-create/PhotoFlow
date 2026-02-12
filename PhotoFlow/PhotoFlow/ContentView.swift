@@ -5,6 +5,7 @@
 //  Created by 郑鑫荣 on 2025/12/30.
 //
 
+import AppIntents
 import Combine
 import CloudKit
 import CoreData
@@ -11305,6 +11306,203 @@ private struct FolderPicker: UIViewControllerRepresentable {
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
             onPick(nil)
         }
+    }
+}
+
+private enum IpadShortcutStageAction {
+    case startShooting
+    case startSelecting
+    case endSession
+}
+
+private enum IpadShortcutStageIntentError: LocalizedError {
+    case noActiveSession
+    case bootstrapFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noActiveSession:
+            return "No active session"
+        case .bootstrapFailed(let detail):
+            return detail.isEmpty ? "Store unavailable" : detail
+        }
+    }
+}
+
+@MainActor
+private enum IpadShortcutStageExecutor {
+    static let sourceDevice = "ipad-shortcuts"
+
+    static func perform(action: IpadShortcutStageAction) async throws -> String {
+        let store = try await loadStore()
+        store.refreshFromStore()
+        let now = Date()
+        switch action {
+        case .startShooting:
+            return applyStartShooting(now: now, store: store)
+        case .startSelecting:
+            return try applyStartSelecting(now: now, store: store)
+        case .endSession:
+            return try applyEndSession(now: now, store: store)
+        }
+    }
+
+    private static func loadStore() async throws -> CloudDataStore {
+        let result = await CloudDataStore.bootstrapWithFallback()
+        switch result {
+        case .ready(let store, _, _):
+            return store
+        case .failed(let error):
+            throw IpadShortcutStageIntentError.bootstrapFailed(error)
+        }
+    }
+
+    private static func applyStartShooting(now: Date, store: CloudDataStore) -> String {
+        if let active = latestActiveSession(from: store.sessionRecords) {
+            let revision = bumpedRevision(now: now, existing: active.revision)
+            store.upsertSessionTiming(
+                sessionId: active.id,
+                stage: WatchSyncStore.StageSyncKey.stageShooting,
+                shootingStart: active.shootingStart ?? now,
+                selectingStart: active.selectingStart,
+                endedAt: nil,
+                revision: revision,
+                updatedAt: now,
+                sourceDevice: sourceDevice
+            )
+            return "Started shooting for active session"
+        }
+        let sessionId = makeSessionId(now: now, existingIds: Set(store.sessionRecords.map(\.id)))
+        let revision = bumpedRevision(now: now, existing: nil)
+        store.upsertSessionTiming(
+            sessionId: sessionId,
+            stage: WatchSyncStore.StageSyncKey.stageShooting,
+            shootingStart: now,
+            selectingStart: nil,
+            endedAt: nil,
+            revision: revision,
+            updatedAt: now,
+            sourceDevice: sourceDevice
+        )
+        return "Started shooting with a new session"
+    }
+
+    private static func applyStartSelecting(now: Date, store: CloudDataStore) throws -> String {
+        guard let active = latestActiveSession(from: store.sessionRecords) else {
+            throw IpadShortcutStageIntentError.noActiveSession
+        }
+        let revision = bumpedRevision(now: now, existing: active.revision)
+        store.upsertSessionTiming(
+            sessionId: active.id,
+            stage: WatchSyncStore.StageSyncKey.stageSelecting,
+            shootingStart: active.shootingStart ?? now,
+            selectingStart: active.selectingStart ?? now,
+            endedAt: nil,
+            revision: revision,
+            updatedAt: now,
+            sourceDevice: sourceDevice
+        )
+        return "Started selecting for active session"
+    }
+
+    private static func applyEndSession(now: Date, store: CloudDataStore) throws -> String {
+        guard let active = latestActiveSession(from: store.sessionRecords) else {
+            throw IpadShortcutStageIntentError.noActiveSession
+        }
+        let revision = bumpedRevision(now: now, existing: active.revision)
+        let resolvedShootingStart = active.shootingStart ?? active.selectingStart ?? now
+        store.upsertSessionTiming(
+            sessionId: active.id,
+            stage: WatchSyncStore.StageSyncKey.stageStopped,
+            shootingStart: resolvedShootingStart,
+            selectingStart: active.selectingStart,
+            endedAt: now,
+            revision: revision,
+            updatedAt: now,
+            sourceDevice: sourceDevice
+        )
+        return "Ended active session"
+    }
+
+    private static func latestActiveSession(from records: [CloudDataStore.SessionRecord]) -> CloudDataStore.SessionRecord? {
+        records
+            .filter { !$0.isDeleted && !$0.isVoided && $0.endedAt == nil }
+            .max { lhs, rhs in
+                if lhs.revision == rhs.revision {
+                    return lhs.updatedAt < rhs.updatedAt
+                }
+                return lhs.revision < rhs.revision
+            }
+    }
+
+    private static func bumpedRevision(now: Date, existing: Int64?) -> Int64 {
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+        guard let existing else { return nowMillis }
+        return max(nowMillis, existing + 1)
+    }
+
+    private static func makeSessionId(now: Date, existingIds: Set<String>) -> String {
+        let base = "session-\(Int(now.timeIntervalSince1970 * 1000))"
+        if existingIds.contains(base) {
+            return "\(base)-\(UUID().uuidString)"
+        }
+        return base
+    }
+}
+
+struct PhotoFlowStartShootingIntent: AppIntent {
+    static let title: LocalizedStringResource = "开始拍摄"
+    static let description = IntentDescription("在不打开 PhotoFlow UI 的情况下执行开始拍摄。")
+    static let openAppWhenRun = false
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let message = try await IpadShortcutStageExecutor.perform(action: .startShooting)
+        return .result(dialog: IntentDialog(stringLiteral: message))
+    }
+}
+
+struct PhotoFlowStartSelectingIntent: AppIntent {
+    static let title: LocalizedStringResource = "开始选片"
+    static let description = IntentDescription("在不打开 PhotoFlow UI 的情况下执行开始选片。")
+    static let openAppWhenRun = false
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let message = try await IpadShortcutStageExecutor.perform(action: .startSelecting)
+        return .result(dialog: IntentDialog(stringLiteral: message))
+    }
+}
+
+struct PhotoFlowEndSessionIntent: AppIntent {
+    static let title: LocalizedStringResource = "结束"
+    static let description = IntentDescription("在不打开 PhotoFlow UI 的情况下执行结束会话。")
+    static let openAppWhenRun = false
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let message = try await IpadShortcutStageExecutor.perform(action: .endSession)
+        return .result(dialog: IntentDialog(stringLiteral: message))
+    }
+}
+
+struct PhotoFlowIpadStageShortcutsProvider: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: PhotoFlowStartShootingIntent(),
+            phrases: ["开始拍摄 in \(.applicationName)"],
+            shortTitle: "开始拍摄",
+            systemImageName: "camera"
+        )
+        AppShortcut(
+            intent: PhotoFlowStartSelectingIntent(),
+            phrases: ["开始选片 in \(.applicationName)"],
+            shortTitle: "开始选片",
+            systemImageName: "photo.on.rectangle.angled"
+        )
+        AppShortcut(
+            intent: PhotoFlowEndSessionIntent(),
+            phrases: ["结束 in \(.applicationName)"],
+            shortTitle: "结束",
+            systemImageName: "checkmark.circle"
+        )
     }
 }
 
