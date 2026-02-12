@@ -1,4 +1,5 @@
-## ACTIVE — TC-IOS-COST-PER-PHOTO-V1
+## DONE — TC-IOS-COST-PER-PHOTO-V1
+Status: DONE (merged in PR #232)
 Priority: P1
 Goal:
 - 今日收入卡摘要里，在“选片率”前增加“成本”
