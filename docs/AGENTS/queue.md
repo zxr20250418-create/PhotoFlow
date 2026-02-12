@@ -1,4 +1,36 @@
-## ACTIVE — TC-IOS-IPAD-SHORTCUTS-STAGE-V1
+## ACTIVE — TC-IOS-STATS-STRICT-EXCLUDE-INCOMPLETE-V1
+Priority: P0
+Goal:
+- 统计口径更准确：数据不全的单，不计入对应指标的统计（避免拉歪 RPH/选片率/客单价等）
+
+Scope:
+1) 定义“数据完整性”规则（按指标分开，不一刀切）
+- 收入类（收入合计/客单价/Top3收入/RPH）：仅计入 amount 已填 且 workSeconds>0 的会话
+- 选片率（按张）：仅计入 shotCount>0 且 selectedCount 已填 的会话
+- 选片率（按单）：仅计入 shotCount>0 且 selectedCount 已填 的会话
+- 时长类（拍摄/选片/总时长）：仅计入对应时间戳存在可计算的会话（可包含进行中）
+说明：同一单可以“计入时长但不计入收入/选片率”，避免丢掉你本来想看的时间结构。
+
+2) UI 显示“覆盖率/排除数量”
+- 每个统计块底部显示：Included N / Excluded M（对应本块口径）
+- Debug 可选显示：excludedReason 计数（missingAmount / missingCounts / missingTime）
+
+3) 全范围一致
+- 今日/本周/本月/本年（若已有范围）都应用同一套口径
+- DailyReview / Top3 / Bottom1 同步使用相同口径（至少收入类与 RPH 类一致）
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance (device):
+A) 有一单缺 amount 或缺张数时：收入类/选片率类统计不受它影响，且显示 Excluded=1
+B) 该单补齐数据后：立刻进入统计，Excluded 回落
+E ios_safe PASS；0 配置改动
+
+## DONE — TC-IOS-IPAD-SHORTCUTS-STAGE-V1
+Status: DONE (merged in PR #228)
 Priority: P0
 Goal:
 - 不打开 iPad PhotoFlow UI，仅通过 iPad 快捷指令记录阶段动作，并同步到 iPhone PhotoFlow
