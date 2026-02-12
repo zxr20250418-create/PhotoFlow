@@ -798,9 +798,25 @@ final class CloudDataStore: ObservableObject {
         let winnerVoided: Bool
     }
 
-    init() {
+    enum BootMode: String {
+        case cloud = "cloud"
+        case localOnly = "local-only"
+    }
+
+    enum BootResult {
+        case ready(store: CloudDataStore, mode: BootMode, warning: String?)
+        case failed(error: String)
+    }
+
+    private struct ContainerSetup {
+        let container: NSPersistentCloudKitContainer
+        let cloudEnabled: Bool
+        let storeCloudEnabled: Bool
+        let loadError: Error?
+    }
+
+    private init(setup: ContainerSetup) {
         localSourceDevice = CloudDataStore.deviceSource()
-        let setup = Self.makeContainer()
         container = setup.container
         context = container.viewContext
         isCloudEnabled = setup.cloudEnabled
@@ -815,6 +831,44 @@ final class CloudDataStore: ObservableObject {
         observeRemoteChanges()
         observeCloudEvents()
         refreshAll()
+    }
+
+    static func bootstrapWithFallback() async -> BootResult {
+        let model = makeModel()
+        let cloudContainer = makeContainer(model: model, enableCloud: true)
+        let cloudLoad = await loadStoresAsync(container: cloudContainer)
+        if cloudLoad.success {
+            let setup = ContainerSetup(
+                container: cloudContainer,
+                cloudEnabled: true,
+                storeCloudEnabled: true,
+                loadError: cloudLoad.error
+            )
+            return .ready(store: CloudDataStore(setup: setup), mode: .cloud, warning: nil)
+        }
+
+        let localContainer = makeContainer(model: model, enableCloud: false)
+        let localLoad = await loadStoresAsync(container: localContainer)
+        if localLoad.success {
+            let setup = ContainerSetup(
+                container: localContainer,
+                cloudEnabled: false,
+                storeCloudEnabled: false,
+                loadError: cloudLoad.error ?? localLoad.error
+            )
+            let warning = cloudLoad.error.map {
+                "Cloud store load failed, started local-only: \(formatError($0))"
+            }
+            return .ready(store: CloudDataStore(setup: setup), mode: .localOnly, warning: warning)
+        }
+
+        let combinedError = [
+            cloudLoad.error.map { "cloud=\(formatError($0))" },
+            localLoad.error.map { "local=\(formatError($0))" }
+        ]
+        .compactMap { $0 }
+        .joined(separator: " | ")
+        return .failed(error: combinedError.isEmpty ? "store bootstrap failed" : combinedError)
     }
 
     func sessionRecord(for sessionId: String) -> SessionRecord? {
@@ -1553,16 +1607,7 @@ final class CloudDataStore: ObservableObject {
         isRefreshing = true
         lastRefreshStatus = "resetting"
         lastRefreshError = nil
-        let result = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self else {
-                    continuation.resume(returning: ResetResult(success: false, error: nil))
-                    return
-                }
-                let output = self.performResetLocalStore()
-                continuation.resume(returning: output)
-            }
-        }
+        let result = await performResetLocalStoreAsync()
         if result.success {
             lastRefreshStatus = "reset-success"
             lastRefreshError = nil
@@ -1586,25 +1631,40 @@ final class CloudDataStore: ObservableObject {
         let error: Error?
     }
 
-    private func performResetLocalStore() -> ResetResult {
-        let coordinator = container.persistentStoreCoordinator
-        let stores = coordinator.persistentStores
-        for store in stores {
-            if let url = store.url {
-                do {
-                    try coordinator.remove(store)
-                    try coordinator.destroyPersistentStore(at: url, ofType: NSSQLiteStoreType, options: store.options)
-                    deleteStoreFiles(at: url)
-                } catch {
-                    return ResetResult(success: false, error: error)
+    private func performResetLocalStoreAsync() async -> ResetResult {
+        let deleteResult: ResetResult = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: ResetResult(success: false, error: nil))
+                    return
                 }
+                let coordinator = self.container.persistentStoreCoordinator
+                let stores = coordinator.persistentStores
+                for store in stores {
+                    if let url = store.url {
+                        do {
+                            try coordinator.remove(store)
+                            try coordinator.destroyPersistentStore(
+                                at: url,
+                                ofType: NSSQLiteStoreType,
+                                options: store.options
+                            )
+                            Self.deleteStoreFiles(at: url)
+                        } catch {
+                            continuation.resume(returning: ResetResult(success: false, error: error))
+                            return
+                        }
+                    }
+                }
+                continuation.resume(returning: ResetResult(success: true, error: nil))
             }
         }
-        let load = Self.loadStores(container: container)
+        guard deleteResult.success else { return deleteResult }
+        let load = await Self.loadStoresAsync(container: container)
         return ResetResult(success: load.success, error: load.error)
     }
 
-    private func deleteStoreFiles(at url: URL) {
+    nonisolated private static func deleteStoreFiles(at url: URL) {
         let fm = FileManager.default
         let base = url.deletingPathExtension().path
         let candidates = [url.path, "\(base)-shm", "\(base)-wal"]
@@ -2164,65 +2224,42 @@ final class CloudDataStore: ObservableObject {
         return root.appendingPathComponent("PhotoFlowCloud.sqlite")
     }
 
-    private static func makeContainer() -> (
-        container: NSPersistentCloudKitContainer,
-        cloudEnabled: Bool,
-        storeCloudEnabled: Bool,
-        loadError: Error?
-    ) {
-        let model = makeModel()
+    private static func makeContainer(
+        model: NSManagedObjectModel,
+        enableCloud: Bool
+    ) -> NSPersistentCloudKitContainer {
         let container = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
         let description = NSPersistentStoreDescription(url: storeURL())
-        description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
-            containerIdentifier: cloudContainerIdentifier
-        )
+        if enableCloud {
+            description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
+                containerIdentifier: cloudContainerIdentifier
+            )
+        } else {
+            description.cloudKitContainerOptions = nil
+        }
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
         description.shouldMigrateStoreAutomatically = true
         description.shouldInferMappingModelAutomatically = true
         container.persistentStoreDescriptions = [description]
-        let cloudLoad = loadStores(container: container)
-        if cloudLoad.success {
-            return (container, true, true, cloudLoad.error)
-        }
-        let fallback = NSPersistentCloudKitContainer(name: "PhotoFlowCloud", managedObjectModel: model)
-        let fallbackDescription = NSPersistentStoreDescription(url: storeURL())
-        fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
-        fallbackDescription.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
-        fallbackDescription.shouldMigrateStoreAutomatically = true
-        fallbackDescription.shouldInferMappingModelAutomatically = true
-        fallback.persistentStoreDescriptions = [fallbackDescription]
-        let fallbackLoad = loadStores(container: fallback)
-        if !fallbackLoad.success {
-            print("CloudDataStore fallback load failed.")
-        }
-        return (fallback, false, false, cloudLoad.error ?? fallbackLoad.error)
+        return container
     }
 
-    private static func loadStores(container: NSPersistentCloudKitContainer) -> (success: Bool, error: Error?) {
-        let semaphore = DispatchSemaphore(value: 0)
-        var loadError: Error?
-        DispatchQueue.global(qos: .userInitiated).async {
-            container.loadPersistentStores { _, error in
-                loadError = error
-                semaphore.signal()
+    private static func loadStoresAsync(
+        container: NSPersistentCloudKitContainer
+    ) async -> (success: Bool, error: Error?) {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                container.loadPersistentStores { _, error in
+                    if let error {
+                        print("CloudDataStore load failed: \(error.localizedDescription)")
+                        continuation.resume(returning: (false, error))
+                    } else {
+                        continuation.resume(returning: (true, nil))
+                    }
+                }
             }
         }
-        let result = semaphore.wait(timeout: .now() + 30)
-        if result == .timedOut {
-            let timeoutError = NSError(
-                domain: "CloudDataStore",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "load timed out"]
-            )
-            print("CloudDataStore load timed out.")
-            return (false, timeoutError)
-        }
-        if let error = loadError {
-            print("CloudDataStore load failed: \(error.localizedDescription)")
-            return (false, error)
-        }
-        return (true, nil)
     }
 
     private static func makeModel() -> NSManagedObjectModel {
@@ -3137,10 +3174,12 @@ struct ContentView: View {
 #endif
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
+    private let bootStateReady: Bool
 
-    init(syncStore: WatchSyncStore) {
+    init(syncStore: WatchSyncStore, cloudStore: CloudDataStore, bootStateReady: Bool = true) {
         self.syncStore = syncStore
-        let cloud = CloudDataStore()
+        self.bootStateReady = bootStateReady
+        let cloud = cloudStore
         _cloudStore = StateObject(wrappedValue: cloud)
         let openShift = Self.latestOpenShiftRecord(from: Array(cloud.shiftRecords.values))
         _latestOpenShift = State(initialValue: openShift)
@@ -3279,6 +3318,7 @@ struct ContentView: View {
             syncSessionSummaries(from: records)
         }
         .onReceive(cloudStore.$shiftRecords) { _ in
+            guard bootStateReady else { return }
             refreshDutyState()
         }
         .onReceive(dailyMemoStore.$memos) { memos in
@@ -3289,6 +3329,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            guard bootStateReady else { return }
             guard phase == .active else {
                 hideTodayRevenue = true
                 return
@@ -3310,6 +3351,7 @@ struct ContentView: View {
             }
         }
         .task {
+            guard bootStateReady else { return }
             refreshDutyState()
         }
         }
@@ -10783,5 +10825,5 @@ private struct LocalRecordSnapshot {
 }
 
 #Preview {
-    ContentView(syncStore: WatchSyncStore())
+    Text("Launch app to preview PhotoFlow")
 }
