@@ -1,3 +1,40 @@
+## ACTIVE — TC-IOS-CLOUDKIT-GUARD-LOCALONLY-V1
+Priority: P0
+Goal:
+- 避免 CoreData CloudKit mirroring 在不可靠环境触发 SIGTRAP/卡死
+- 在 Simulator/未登录 iCloud/用户关闭同步时自动走 local-only，App 永远可打开可用
+
+Scope:
+1) cloudEnabled 判定（启动时一次性决定）
+- Simulator -> false (reason=simulator)
+- iCloud 未登录 (ubiquityIdentityToken==nil) -> false (reason=no_iCloud)
+- 用户关闭 Cloud Sync -> false (reason=userDisabled)
+- 其他 -> true (reason=enabled)
+
+2) DataStack 分支
+- cloudEnabled=false 时不得触发 mirroring setup（不设置 cloudKitContainerOptions / 或直接用 NSPersistentContainer local-only）
+- cloudEnabled=true 才允许启用 CloudKit
+
+3) UI/Diagnostics
+- 显示 cloudEnabled + reason + iCloudSignedIn + buildFingerprint
+- Cloud Sync 开关（V1：提示重启生效，不做热切换）
+
+4) Boot 安全
+- 异步加载 store，禁止主线程阻塞
+- fallback：cloud失败 -> local-only；local-only失败 -> safe mode
+- 不改数据模型
+
+Guardrails:
+- Allowed: PhotoFlow/PhotoFlow/**/*.swift
+- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
+- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+
+Acceptance:
+A Simulator 启动不再 SIGTRAP/卡死，显示 local-only 原因
+B 真机未登录 iCloud 仍可用（local-only）
+C 真机登录 iCloud 可启用云同步
+D ios_safe PASS；0 配置改动
+
 ## DONE — TC-IOS-CRASH-INVESTIGATION-V1
 Status: DONE (merged in PR #234)
 Priority: P0
