@@ -780,6 +780,10 @@ final class CloudDataStore: ObservableObject {
     @Published private(set) var cloudTestMemoCount: Int?
     @Published private(set) var cloudTestSessionCount: Int?
     @Published private(set) var isCloudEnabled: Bool = true
+    @Published private(set) var cloudGuardReason: String = "unknown"
+    @Published private(set) var iCloudSignedIn: Bool = false
+    @Published private(set) var cloudSyncEnabledAtBoot: Bool = true
+    @Published private(set) var cloudFallbackWarning: String?
 
     private enum EntityName {
         static let session = "SessionRecord"
@@ -794,6 +798,10 @@ final class CloudDataStore: ObservableObject {
     static let cloudTestSessionPrefix = "cloud-test-session-"
 
     private static let defaultStage = "stopped"
+
+    private enum PreferenceKey {
+        static let cloudSyncEnabled = "pf_cloud_sync_enabled"
+    }
 
     private enum SessionField {
         static let sessionId = "sessionId"
@@ -900,6 +908,13 @@ final class CloudDataStore: ObservableObject {
         case failed(error: String)
     }
 
+    private struct CloudBootstrapPolicy: Sendable {
+        let cloudEnabled: Bool
+        let reason: String
+        let iCloudSignedIn: Bool
+        let cloudSyncEnabledSetting: Bool
+    }
+
     private struct StoreSnapshot: Sendable {
         let sessionRecords: [SessionRecord]
         let shiftRecords: [String: ShiftRecordSnapshot]
@@ -913,6 +928,8 @@ final class CloudDataStore: ObservableObject {
         let cloudEnabled: Bool
         let storeCloudEnabled: Bool
         let loadError: Error?
+        let cloudPolicy: CloudBootstrapPolicy
+        let warning: String?
     }
 
     private init(setup: ContainerSetup) {
@@ -921,30 +938,84 @@ final class CloudDataStore: ObservableObject {
         context = container.viewContext
         isCloudEnabled = setup.cloudEnabled
         storeCloudEnabled = setup.storeCloudEnabled
+        cloudGuardReason = setup.cloudPolicy.reason
+        iCloudSignedIn = setup.cloudPolicy.iCloudSignedIn
+        cloudSyncEnabledAtBoot = setup.cloudPolicy.cloudSyncEnabledSetting
+        cloudFallbackWarning = setup.warning
+        if !setup.cloudPolicy.iCloudSignedIn {
+            cloudAccountStatus = "noAccount"
+        }
         if let error = setup.loadError {
             let detail = Self.formatError(error)
             storeLoadError = detail
             lastCloudError = detail
         }
+        if let warning = setup.warning, !warning.isEmpty {
+            lastCloudError = warning
+        }
         context.automaticallyMergesChangesFromParent = true
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         observeRemoteChanges()
-        observeCloudEvents()
+        if setup.storeCloudEnabled {
+            observeCloudEvents()
+        }
         refreshAll(reason: "boot_init", debounceNanoseconds: 0)
     }
 
     static func bootstrapWithFallback() async -> BootResult {
         let model = makeModel()
-        let cloudContainer = makeContainer(model: model, enableCloud: true)
-        let cloudLoad = await loadStoresAsync(container: cloudContainer)
-        if cloudLoad.success {
-            let setup = ContainerSetup(
-                container: cloudContainer,
-                cloudEnabled: true,
-                storeCloudEnabled: true,
-                loadError: cloudLoad.error
-            )
-            return .ready(store: CloudDataStore(setup: setup), mode: .cloud, warning: nil)
+        let policy = bootPolicy()
+        runtimeLog("boot", "cloud_policy", extra: [
+            "cloud_enabled": policy.cloudEnabled ? "true" : "false",
+            "reason": policy.reason,
+            "icloud_signed_in": policy.iCloudSignedIn ? "true" : "false",
+            "user_setting": policy.cloudSyncEnabledSetting ? "true" : "false"
+        ])
+
+        if policy.cloudEnabled {
+            let cloudContainer = makeContainer(model: model, enableCloud: true)
+            let cloudLoad = await loadStoresAsync(container: cloudContainer)
+            if cloudLoad.success {
+                let setup = ContainerSetup(
+                    container: cloudContainer,
+                    cloudEnabled: true,
+                    storeCloudEnabled: true,
+                    loadError: cloudLoad.error,
+                    cloudPolicy: policy,
+                    warning: nil
+                )
+                return .ready(store: CloudDataStore(setup: setup), mode: .cloud, warning: nil)
+            }
+
+            let localContainer = makeContainer(model: model, enableCloud: false)
+            let localLoad = await loadStoresAsync(container: localContainer)
+            if localLoad.success {
+                let warning = cloudLoad.error.map {
+                    "Cloud store load failed, switched to local-only: \(formatError($0))"
+                }
+                let setup = ContainerSetup(
+                    container: localContainer,
+                    cloudEnabled: false,
+                    storeCloudEnabled: false,
+                    loadError: cloudLoad.error ?? localLoad.error,
+                    cloudPolicy: CloudBootstrapPolicy(
+                        cloudEnabled: false,
+                        reason: "cloud_load_failed",
+                        iCloudSignedIn: policy.iCloudSignedIn,
+                        cloudSyncEnabledSetting: policy.cloudSyncEnabledSetting
+                    ),
+                    warning: warning
+                )
+                return .ready(store: CloudDataStore(setup: setup), mode: .localOnly, warning: warning)
+            }
+
+            let combinedError = [
+                cloudLoad.error.map { "cloud=\(formatError($0))" },
+                localLoad.error.map { "local=\(formatError($0))" }
+            ]
+            .compactMap { $0 }
+            .joined(separator: " | ")
+            return .failed(error: combinedError.isEmpty ? "store bootstrap failed" : combinedError)
         }
 
         let localContainer = makeContainer(model: model, enableCloud: false)
@@ -954,21 +1025,15 @@ final class CloudDataStore: ObservableObject {
                 container: localContainer,
                 cloudEnabled: false,
                 storeCloudEnabled: false,
-                loadError: cloudLoad.error ?? localLoad.error
+                loadError: localLoad.error,
+                cloudPolicy: policy,
+                warning: nil
             )
-            let warning = cloudLoad.error.map {
-                "Cloud store load failed, started local-only: \(formatError($0))"
-            }
-            return .ready(store: CloudDataStore(setup: setup), mode: .localOnly, warning: warning)
+            return .ready(store: CloudDataStore(setup: setup), mode: .localOnly, warning: nil)
         }
 
-        let combinedError = [
-            cloudLoad.error.map { "cloud=\(formatError($0))" },
-            localLoad.error.map { "local=\(formatError($0))" }
-        ]
-        .compactMap { $0 }
-        .joined(separator: " | ")
-        return .failed(error: combinedError.isEmpty ? "store bootstrap failed" : combinedError)
+        let localError = localLoad.error.map { "local=\(formatError($0))" } ?? ""
+        return .failed(error: localError.isEmpty ? "store bootstrap failed" : localError)
     }
 
     func sessionRecord(for sessionId: String) -> SessionRecord? {
@@ -2014,7 +2079,7 @@ final class CloudDataStore: ObservableObject {
         if result.success {
             lastRefreshStatus = "reset-success"
             lastRefreshError = nil
-            storeCloudEnabled = true
+            storeCloudEnabled = isCloudEnabled
             storeLoadError = nil
             lastCloudError = nil
         } else {
@@ -2625,6 +2690,50 @@ final class CloudDataStore: ObservableObject {
         let root = base?.appendingPathComponent("PhotoFlow", isDirectory: true) ?? URL(fileURLWithPath: NSTemporaryDirectory())
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("PhotoFlowCloud.sqlite")
+    }
+
+    private static func cloudSyncEnabledSetting() -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: PreferenceKey.cloudSyncEnabled) == nil {
+            return true
+        }
+        return defaults.bool(forKey: PreferenceKey.cloudSyncEnabled)
+    }
+
+    private static func bootPolicy() -> CloudBootstrapPolicy {
+        let userSetting = cloudSyncEnabledSetting()
+#if targetEnvironment(simulator)
+        return CloudBootstrapPolicy(
+            cloudEnabled: false,
+            reason: "simulator",
+            iCloudSignedIn: false,
+            cloudSyncEnabledSetting: userSetting
+        )
+#else
+        let signedIn = FileManager.default.ubiquityIdentityToken != nil
+        if !signedIn {
+            return CloudBootstrapPolicy(
+                cloudEnabled: false,
+                reason: "no_iCloud",
+                iCloudSignedIn: false,
+                cloudSyncEnabledSetting: userSetting
+            )
+        }
+        if !userSetting {
+            return CloudBootstrapPolicy(
+                cloudEnabled: false,
+                reason: "userDisabled",
+                iCloudSignedIn: true,
+                cloudSyncEnabledSetting: userSetting
+            )
+        }
+        return CloudBootstrapPolicy(
+            cloudEnabled: true,
+            reason: "enabled",
+            iCloudSignedIn: true,
+            cloudSyncEnabledSetting: userSetting
+        )
+#endif
     }
 
     private static func makeContainer(
@@ -3618,6 +3727,8 @@ struct ContentView: View {
     @State private var diagnosticsStressStatus = "未开始"
     @State private var diagnosticsStressRunning = false
     @State private var apiTestingSelections: Set<String> = []
+    @AppStorage("pf_cloud_sync_enabled") private var cloudSyncEnabledSetting = true
+    @State private var cloudSyncRestartRequired = false
     @AppStorage(MarkdownAutoExportStorageKey.folderPath) private var markdownExportFolderPath = ""
     @AppStorage(MarkdownAutoExportStorageKey.lastExportAt) private var markdownLastExportAtRaw: Double = 0
     @AppStorage(MarkdownAutoExportStorageKey.lastExportError) private var markdownLastExportError = ""
@@ -3628,10 +3739,17 @@ struct ContentView: View {
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @ObservedObject var syncStore: WatchSyncStore
     private let bootStateReady: Bool
+    private let bootWarningMessage: String?
 
-    init(syncStore: WatchSyncStore, cloudStore: CloudDataStore, bootStateReady: Bool = true) {
+    init(
+        syncStore: WatchSyncStore,
+        cloudStore: CloudDataStore,
+        bootStateReady: Bool = true,
+        bootWarningMessage: String? = nil
+    ) {
         self.syncStore = syncStore
         self.bootStateReady = bootStateReady
+        self.bootWarningMessage = normalizedDailyReviewText(bootWarningMessage)
         let cloud = cloudStore
         _cloudStore = StateObject(wrappedValue: cloud)
         let openShift = Self.latestOpenShiftRecord(from: Array(cloud.shiftRecords.values))
@@ -3658,205 +3776,243 @@ struct ContentView: View {
     }
 
     var body: some View {
-        if isPadDevice {
-            ipadRecordingView
-        } else {
-        ZStack {
-            if selectedTab == .home {
-                homeView
+        Group {
+            if isPadDevice {
+                ipadRecordingView
             } else {
-                statsView
+            ZStack {
+                if selectedTab == .home {
+                    homeView
+                } else {
+                    statsView
+                }
             }
-        }
-        .safeAreaInset(edge: .bottom) {
-            bottomBar
-        }
-        .alert(item: $activeAlert) { alert in
-            Alert(title: Text(alert.message))
-        }
-        .sheet(item: $editingSession) { session in
-            NavigationStack {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        GroupBox("指标") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                TextField("金额", text: $draftAmount)
-                                    .keyboardType(.decimalPad)
-                                    .textFieldStyle(.roundedBorder)
-                                TextField("拍摄张数", text: $draftShotCount)
-                                    .keyboardType(.numberPad)
-                                    .textFieldStyle(.roundedBorder)
-                                TextField("选片张数", text: $draftSelected)
-                                    .keyboardType(.numberPad)
-                                    .textFieldStyle(.roundedBorder)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-
-                        let traitGroups = traitsStore.groupedTraits(
-                            includeInactive: false,
-                            includeSelectedIds: reviewDraftTraitIds
-                        )
-                        GroupBox("客户画像特征") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                TraitChipsView(groups: traitGroups, selectedIds: $reviewDraftTraitIds)
-                                Button("管理特征") {
-                                    isTraitsManagerPresented = true
+            .safeAreaInset(edge: .bottom) {
+                bottomBar
+            }
+            .alert(item: $activeAlert) { alert in
+                Alert(title: Text(alert.message))
+            }
+            .sheet(item: $editingSession) { session in
+                NavigationStack {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            GroupBox("指标") {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    TextField("金额", text: $draftAmount)
+                                        .keyboardType(.decimalPad)
+                                        .textFieldStyle(.roundedBorder)
+                                    TextField("拍摄张数", text: $draftShotCount)
+                                        .keyboardType(.numberPad)
+                                        .textFieldStyle(.roundedBorder)
+                                    TextField("选片张数", text: $draftSelected)
+                                        .keyboardType(.numberPad)
+                                        .textFieldStyle(.roundedBorder)
                                 }
-                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
 
-                        GroupBox("原始备注") {
-                            reviewFieldEditor(
-                                title: "原始备注",
-                                placeholder: "关键备注/补充说明…",
-                                text: $draftReviewNote
+                            let traitGroups = traitsStore.groupedTraits(
+                                includeInactive: false,
+                                includeSelectedIds: reviewDraftTraitIds
                             )
+                            GroupBox("客户画像特征") {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    TraitChipsView(groups: traitGroups, selectedIds: $reviewDraftTraitIds)
+                                    Button("管理特征") {
+                                        isTraitsManagerPresented = true
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+
+                            GroupBox("原始备注") {
+                                reviewFieldEditor(
+                                    title: "原始备注",
+                                    placeholder: "关键备注/补充说明…",
+                                    text: $draftReviewNote
+                                )
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .safeAreaInset(edge: .bottom) {
+                        Color.clear.frame(height: 80)
+                    }
+                    .navigationTitle("编辑指标")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") {
+                                editingSession = nil
+                            }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("保存") {
+                                saveMeta(for: session.id)
+                                editingSession = nil
+                            }
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                }
-                .scrollDismissesKeyboard(.interactively)
-                .safeAreaInset(edge: .bottom) {
-                    Color.clear.frame(height: 80)
-                }
-                .navigationTitle("编辑指标")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("取消") {
-                            editingSession = nil
-                        }
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("保存") {
-                            saveMeta(for: session.id)
-                            editingSession = nil
-                        }
-                    }
                 }
             }
-        }
-        .sheet(item: $timeEditingSession) { session in
-            timeOverrideEditor(sessionId: session.id)
-        }
-        .sheet(isPresented: $isManualSessionPresented) {
-            manualSessionEditor
-        }
-        .sheet(isPresented: $isTraitsManagerPresented) {
-            TraitsManagerView(store: traitsStore)
-        }
-        .sheet(isPresented: $isDailyReviewPresented) {
-            dailyReviewSheet
-        }
-        .sheet(isPresented: $isWeeklyReviewPresented) {
-            weeklyReviewSheet
-        }
-        .sheet(isPresented: $showIpadSyncDebug) {
-            ipadSyncView
-        }
-        .onAppear {
-            syncRetouchPriceDraftFromStorage()
-            diagnosticsLastRunAbnormal = RuntimeExitState.lastLaunchWasAbnormal()
-            runtimeLog("app", "content_appear", extra: [
-                "boot_ready": bootStateReady ? "true" : "false",
-                "last_run_abnormal": diagnosticsLastRunAbnormal ? "true" : "false"
-            ])
-            if diagnosticsLastRunAbnormal {
-                loadDiagnosticsLogTail()
+            .sheet(item: $timeEditingSession) { session in
+                timeOverrideEditor(sessionId: session.id)
             }
-            requestSessionSummaryRecompute(
-                records: cloudStore.sessionRecords,
-                reason: "content_appear",
-                debounceNanoseconds: 0
-            )
-            resolveMarkdownAutoExportFolderURLIfNeeded()
-            observeMarkdownAutoExportChanges(
-                records: cloudStore.sessionRecords,
-                overrides: timeOverrideStore.overrides
-            )
-        }
-        .onReceive(ticker) { tick in
-            let shouldRefreshNow = selectedTab == .home || stage == .shooting || stage == .selecting
-            if shouldRefreshNow {
-                now = tick
+            .sheet(isPresented: $isManualSessionPresented) {
+                manualSessionEditor
             }
-        }
-        .onReceive(syncStore.$incomingEvent) { event in
-            guard let event = event else { return }
-            applySessionEvent(event)
-        }
-        .onReceive(syncStore.$incomingCanonicalState) { state in
-            guard let state else { return }
-            applyCanonicalState(state, shouldPrompt: false)
-        }
-        .onReceive(cloudStore.$sessionRecords) { records in
-            requestSessionSummaryRecompute(records: records, reason: "cloud_records_changed")
-            observeMarkdownAutoExportChanges(
-                records: records,
-                overrides: timeOverrideStore.overrides
-            )
-        }
-        .onReceive(timeOverrideStore.$overrides) { overrides in
-            observeMarkdownAutoExportChanges(
-                records: cloudStore.sessionRecords,
-                overrides: overrides
-            )
-        }
-        .onReceive(cloudStore.$shiftRecords) { _ in
-            guard bootStateReady else { return }
-            refreshDutyState()
-        }
-        .onReceive(dailyMemoStore.$memos) { memos in
-            let dayKey = dailyMemoStore.dayKey(for: now)
-            let latest = memos[dayKey] ?? ""
-            if latest != memoDraft {
-                memoDraft = latest
+            .sheet(isPresented: $isTraitsManagerPresented) {
+                TraitsManagerView(store: traitsStore)
             }
-        }
-        .onChange(of: scenePhase) { _, phase in
-            runtimeLog("app", "scene_phase", extra: ["phase": "\(phase)"])
-            if phase == .background {
-                RuntimeExitState.markBackgrounded()
+            .sheet(isPresented: $isDailyReviewPresented) {
+                dailyReviewSheet
             }
-            guard bootStateReady else { return }
-            guard phase == .active else {
-                hideTodayRevenue = true
-                return
+            .sheet(isPresented: $isWeeklyReviewPresented) {
+                weeklyReviewSheet
             }
-            sceneActiveRefreshTask?.cancel()
-            sceneActiveRefreshTask = Task {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                guard !Task.isCancelled else { return }
-                cloudStore.refreshFromStore()
+            .sheet(isPresented: $showIpadSyncDebug) {
+                ipadSyncView
+            }
+            .onAppear {
+                syncRetouchPriceDraftFromStorage()
+                diagnosticsLastRunAbnormal = RuntimeExitState.lastLaunchWasAbnormal()
+                cloudSyncRestartRequired = cloudSyncEnabledSetting != cloudStore.cloudSyncEnabledAtBoot
+                runtimeLog("app", "content_appear", extra: [
+                    "boot_ready": bootStateReady ? "true" : "false",
+                    "last_run_abnormal": diagnosticsLastRunAbnormal ? "true" : "false"
+                ])
+                if diagnosticsLastRunAbnormal {
+                    loadDiagnosticsLogTail()
+                }
                 requestSessionSummaryRecompute(
                     records: cloudStore.sessionRecords,
-                    reason: "scene_active",
+                    reason: "content_appear",
                     debounceNanoseconds: 0
                 )
-                refreshDutyState()
-                updateTodayDayKey()
-                if isReadOnlyDevice {
-                    if let state = syncStore.reloadCanonicalState() {
-                        applyCanonicalState(state, shouldPrompt: false)
-                    }
-                    return
-                }
-                if let state = syncStore.reloadCanonicalState() {
-                    applyCanonicalState(state, shouldPrompt: false)
-                    syncStore.updateCanonicalState(state, send: true)
-                } else {
-                    syncStageState(now: now)
+                resolveMarkdownAutoExportFolderURLIfNeeded()
+                observeMarkdownAutoExportChanges(
+                    records: cloudStore.sessionRecords,
+                    overrides: timeOverrideStore.overrides
+                )
+            }
+            .onReceive(ticker) { tick in
+                let shouldRefreshNow = selectedTab == .home || stage == .shooting || stage == .selecting
+                if shouldRefreshNow {
+                    now = tick
                 }
             }
+            .onReceive(syncStore.$incomingEvent) { event in
+                guard let event = event else { return }
+                applySessionEvent(event)
+            }
+            .onReceive(syncStore.$incomingCanonicalState) { state in
+                guard let state else { return }
+                applyCanonicalState(state, shouldPrompt: false)
+            }
+            .onReceive(cloudStore.$sessionRecords) { records in
+                requestSessionSummaryRecompute(records: records, reason: "cloud_records_changed")
+                observeMarkdownAutoExportChanges(
+                    records: records,
+                    overrides: timeOverrideStore.overrides
+                )
+            }
+            .onReceive(timeOverrideStore.$overrides) { overrides in
+                observeMarkdownAutoExportChanges(
+                    records: cloudStore.sessionRecords,
+                    overrides: overrides
+                )
+            }
+            .onReceive(cloudStore.$shiftRecords) { _ in
+                guard bootStateReady else { return }
+                refreshDutyState()
+            }
+            .onReceive(dailyMemoStore.$memos) { memos in
+                let dayKey = dailyMemoStore.dayKey(for: now)
+                let latest = memos[dayKey] ?? ""
+                if latest != memoDraft {
+                    memoDraft = latest
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                runtimeLog("app", "scene_phase", extra: ["phase": "\(phase)"])
+                if phase == .background {
+                    RuntimeExitState.markBackgrounded()
+                }
+                guard bootStateReady else { return }
+                guard phase == .active else {
+                    hideTodayRevenue = true
+                    return
+                }
+                sceneActiveRefreshTask?.cancel()
+                sceneActiveRefreshTask = Task {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    guard !Task.isCancelled else { return }
+                    cloudStore.refreshFromStore()
+                    requestSessionSummaryRecompute(
+                        records: cloudStore.sessionRecords,
+                        reason: "scene_active",
+                        debounceNanoseconds: 0
+                    )
+                    refreshDutyState()
+                    updateTodayDayKey()
+                    if isReadOnlyDevice {
+                        if let state = syncStore.reloadCanonicalState() {
+                            applyCanonicalState(state, shouldPrompt: false)
+                        }
+                        return
+                    }
+                    if let state = syncStore.reloadCanonicalState() {
+                        applyCanonicalState(state, shouldPrompt: false)
+                        syncStore.updateCanonicalState(state, send: true)
+                    } else {
+                        syncStageState(now: now)
+                    }
+                }
+            }
+            .onChange(of: cloudSyncEnabledSetting) { _, newValue in
+                cloudSyncRestartRequired = newValue != cloudStore.cloudSyncEnabledAtBoot
+                runtimeLog("cloud", "sync_setting_changed", extra: [
+                    "new_value": newValue ? "true" : "false",
+                    "restart_required": cloudSyncRestartRequired ? "true" : "false"
+                ])
+            }
+            .task {
+                guard bootStateReady else { return }
+                refreshDutyState()
+            }
         }
-        .task {
-            guard bootStateReady else { return }
-            refreshDutyState()
         }
+        .safeAreaInset(edge: .top) {
+            cloudFallbackBanner
+        }
+    }
+
+    @ViewBuilder
+    private var cloudFallbackBanner: some View {
+        if let warning = cloudStore.cloudFallbackWarning,
+           !warning.isEmpty,
+           bootStateReady {
+            Text(warning)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.thinMaterial)
+        } else if let warning = bootWarningMessage,
+                  !warning.isEmpty,
+                  bootStateReady {
+            Text(warning)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.thinMaterial)
         }
     }
 
@@ -5504,6 +5660,23 @@ struct ContentView: View {
 
             Divider()
 
+            Text("Cloud Sync")
+                .font(.headline)
+            Toggle("Cloud Sync", isOn: $cloudSyncEnabledSetting)
+            Text("启动态：\(cloudStore.isCloudEnabled ? "enabled" : "local-only") · reason=\(cloudStore.cloudGuardReason)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("iCloudSignedIn: \(cloudStore.iCloudSignedIn ? "true" : "false")")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if cloudSyncRestartRequired {
+                Text("Restart required: Cloud Sync change applies on next app launch")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
             Text("Diagnostics")
                 .font(.headline)
             if diagnosticsLastRunAbnormal {
@@ -5511,6 +5684,18 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+            Text("cloudEnabled: \(cloudStore.isCloudEnabled ? "true" : "false")")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("reason: \(cloudStore.cloudGuardReason)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("iCloudSignedIn: \(cloudStore.iCloudSignedIn ? "true" : "false")")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("buildFingerprint: \(buildFingerprintText)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             HStack(spacing: 12) {
                 Button("刷新最近200行") {
                     loadDiagnosticsLogTail()
@@ -5723,6 +5908,8 @@ struct ContentView: View {
         let bundleId = Bundle.main.bundleIdentifier ?? "unknown"
         let storeCloudEnabledText = cloudStore.storeCloudEnabled ? "true" : "false"
         let cloudLoadEnabledText = cloudStore.isCloudEnabled ? "true" : "false"
+        let cloudReasonText = cloudStore.cloudGuardReason
+        let iCloudSignedInText = cloudStore.iCloudSignedIn ? "true" : "false"
         let accountStatusText = cloudStore.cloudAccountStatus
         let storeLoadErrorText = cloudStore.storeLoadError ?? "—"
         let cloudSyncErrorText = cloudStore.cloudSyncError ?? "—"
@@ -5808,6 +5995,8 @@ struct ContentView: View {
                 Text("cloudKitContainerIdentifier: \(CloudDataStore.cloudContainerIdentifier)")
                 Text("storeCloudEnabled: \(storeCloudEnabledText)")
                 Text("cloudLoadEnabled: \(cloudLoadEnabledText)")
+                Text("reason: \(cloudReasonText)")
+                Text("iCloudSignedIn: \(iCloudSignedInText)")
                 Text("CKAccountStatus: \(accountStatusText)")
                 Text("storeLoadError: \(storeLoadErrorText)")
                 Text("cloudSyncError: \(cloudSyncErrorText)")
