@@ -24,7 +24,7 @@ struct PhotoFlowApp: App {
 private final class AppBootGate: ObservableObject {
     enum State {
         case loading
-        case ready(store: CloudDataStore)
+        case ready(store: CloudDataStore, warning: String?)
         case safeMode(message: String)
     }
 
@@ -81,7 +81,7 @@ private final class AppBootGate: ObservableObject {
                 "mode": mode.rawValue,
                 "warning": warning ?? ""
             ])
-            state = .ready(store: store)
+            state = .ready(store: store, warning: warning)
         case .failed(let error):
             let fallback = error.isEmpty ? "启动失败，已进入安全模式。" : error
             lastBootError = fallback
@@ -117,8 +117,13 @@ private struct BootGateRootView: View {
             switch bootGate.state {
             case .loading:
                 loadingView
-            case .ready(let store):
-                ContentView(syncStore: syncStore, cloudStore: store, bootStateReady: true)
+            case .ready(let store, let warning):
+                ContentView(
+                    syncStore: syncStore,
+                    cloudStore: store,
+                    bootStateReady: true,
+                    bootWarningMessage: warning
+                )
             case .safeMode(let message):
                 safeModeView(message: message)
             }
