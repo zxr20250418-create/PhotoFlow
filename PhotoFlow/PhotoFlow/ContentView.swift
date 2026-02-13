@@ -792,8 +792,15 @@ final class CloudDataStore: ObservableObject {
     static let cloudContainerIdentifier = "iCloud.com.zhengxinrong.PhotoFlow"
     static let cloudTestMemoPrefix = "cloud-test-memo-"
     static let cloudTestSessionPrefix = "cloud-test-session-"
+    static let cloudSyncEnabledDefaultsKey = "pf_cloud_sync_enabled"
 
     private static let defaultStage = "stopped"
+
+    private enum CloudBootReason: String {
+        case enabled
+        case simulator
+        case userDisabled
+    }
 
     private enum SessionField {
         static let sessionId = "sessionId"
@@ -896,7 +903,7 @@ final class CloudDataStore: ObservableObject {
     }
 
     enum BootResult {
-        case ready(store: CloudDataStore, mode: BootMode, warning: String?)
+        case ready(store: CloudDataStore, mode: BootMode, reason: String, warning: String?)
         case failed(error: String)
     }
 
@@ -934,17 +941,54 @@ final class CloudDataStore: ObservableObject {
     }
 
     static func bootstrapWithFallback() async -> BootResult {
+        let decision = cloudBootDecision()
         let model = makeModel()
-        let cloudContainer = makeContainer(model: model, enableCloud: true)
-        let cloudLoad = await loadStoresAsync(container: cloudContainer)
-        if cloudLoad.success {
-            let setup = ContainerSetup(
-                container: cloudContainer,
-                cloudEnabled: true,
-                storeCloudEnabled: true,
-                loadError: cloudLoad.error
-            )
-            return .ready(store: CloudDataStore(setup: setup), mode: .cloud, warning: nil)
+
+        if decision.cloudEnabled {
+            let cloudContainer = makeContainer(model: model, enableCloud: true)
+            let cloudLoad = await loadStoresAsync(container: cloudContainer)
+            if cloudLoad.success {
+                let setup = ContainerSetup(
+                    container: cloudContainer,
+                    cloudEnabled: true,
+                    storeCloudEnabled: true,
+                    loadError: cloudLoad.error
+                )
+                return .ready(
+                    store: CloudDataStore(setup: setup),
+                    mode: .cloud,
+                    reason: decision.reason.rawValue,
+                    warning: nil
+                )
+            }
+
+            let localContainer = makeContainer(model: model, enableCloud: false)
+            let localLoad = await loadStoresAsync(container: localContainer)
+            if localLoad.success {
+                let setup = ContainerSetup(
+                    container: localContainer,
+                    cloudEnabled: false,
+                    storeCloudEnabled: false,
+                    loadError: cloudLoad.error ?? localLoad.error
+                )
+                let warning = cloudLoad.error.map {
+                    "Cloud store load failed, started local-only: \(formatError($0))"
+                }
+                return .ready(
+                    store: CloudDataStore(setup: setup),
+                    mode: .localOnly,
+                    reason: decision.reason.rawValue,
+                    warning: warning
+                )
+            }
+
+            let combinedError = [
+                cloudLoad.error.map { "cloud=\(formatError($0))" },
+                localLoad.error.map { "local=\(formatError($0))" }
+            ]
+            .compactMap { $0 }
+            .joined(separator: " | ")
+            return .failed(error: combinedError.isEmpty ? "store bootstrap failed" : combinedError)
         }
 
         let localContainer = makeContainer(model: model, enableCloud: false)
@@ -954,21 +998,18 @@ final class CloudDataStore: ObservableObject {
                 container: localContainer,
                 cloudEnabled: false,
                 storeCloudEnabled: false,
-                loadError: cloudLoad.error ?? localLoad.error
+                loadError: localLoad.error
             )
-            let warning = cloudLoad.error.map {
-                "Cloud store load failed, started local-only: \(formatError($0))"
-            }
-            return .ready(store: CloudDataStore(setup: setup), mode: .localOnly, warning: warning)
+            return .ready(
+                store: CloudDataStore(setup: setup),
+                mode: .localOnly,
+                reason: decision.reason.rawValue,
+                warning: nil
+            )
         }
 
-        let combinedError = [
-            cloudLoad.error.map { "cloud=\(formatError($0))" },
-            localLoad.error.map { "local=\(formatError($0))" }
-        ]
-        .compactMap { $0 }
-        .joined(separator: " | ")
-        return .failed(error: combinedError.isEmpty ? "store bootstrap failed" : combinedError)
+        let localError = localLoad.error.map { "local=\(formatError($0))" } ?? "local store bootstrap failed"
+        return .failed(error: localError)
     }
 
     func sessionRecord(for sessionId: String) -> SessionRecord? {
@@ -2646,6 +2687,26 @@ final class CloudDataStore: ObservableObject {
         description.shouldInferMappingModelAutomatically = true
         container.persistentStoreDescriptions = [description]
         return container
+    }
+
+    private static func cloudBootDecision() -> (cloudEnabled: Bool, reason: CloudBootReason) {
+#if targetEnvironment(simulator)
+        return (false, .simulator)
+#else
+        if !cloudSyncEnabledPreference() {
+            return (false, .userDisabled)
+        }
+        // Do not gate by ubiquityIdentityToken. AppIntent background execution can report nil token.
+        return (true, .enabled)
+#endif
+    }
+
+    private static func cloudSyncEnabledPreference() -> Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: cloudSyncEnabledDefaultsKey) != nil else {
+            return true
+        }
+        return defaults.bool(forKey: cloudSyncEnabledDefaultsKey)
     }
 
     private static func loadStoresAsync(
@@ -12192,31 +12253,67 @@ private enum IpadShortcutStageIntentError: LocalizedError {
 private enum IpadShortcutStageExecutor {
     static let sourceDevice = "ipad-shortcuts"
 
-    static func perform(action: IpadShortcutStageAction) async throws -> String {
-        let store = try await loadStore()
-        store.refreshFromStore()
-        let now = Date()
-        switch action {
-        case .startShooting:
-            return applyStartShooting(now: now, store: store)
-        case .startSelecting:
-            return try applyStartSelecting(now: now, store: store)
-        case .endSession:
-            return try applyEndSession(now: now, store: store)
-        }
+    private struct StoreBootstrapInfo {
+        let store: CloudDataStore
+        let mode: CloudDataStore.BootMode
+        let cloudReason: String
+        let warning: String?
     }
 
-    private static func loadStore() async throws -> CloudDataStore {
+    private struct ActionWriteResult {
+        let sessionId: String
+        let action: String
+        let revision: Int64
+    }
+
+    static func perform(action: IpadShortcutStageAction) async throws -> String {
+        let bootstrap = try await loadStore()
+        let store = bootstrap.store
+        store.refreshFromStore()
+        let now = Date()
+        let writeResult: ActionWriteResult
+        switch action {
+        case .startShooting:
+            writeResult = applyStartShooting(now: now, store: store)
+        case .startSelecting:
+            writeResult = try applyStartSelecting(now: now, store: store)
+        case .endSession:
+            writeResult = try applyEndSession(now: now, store: store)
+        }
+
+        let storeUsed = bootstrap.mode == .cloud ? "cloud" : "local"
+        let detail = [
+            "storeUsed=\(storeUsed)",
+            "cloudReason=\(bootstrap.cloudReason)",
+            "sessionId=\(writeResult.sessionId)",
+            "action=\(writeResult.action)",
+            "revision=\(writeResult.revision)"
+        ]
+        .joined(separator: " ")
+
+        if bootstrap.mode == .localOnly, let warning = bootstrap.warning, !warning.isEmpty {
+            let compactWarning = warning.replacingOccurrences(of: "\n", with: " ")
+            return "saved local-only: \(compactWarning) | \(detail)"
+        }
+        return detail
+    }
+
+    private static func loadStore() async throws -> StoreBootstrapInfo {
         let result = await CloudDataStore.bootstrapWithFallback()
         switch result {
-        case .ready(let store, _, _):
-            return store
+        case .ready(let store, let mode, let reason, let warning):
+            return StoreBootstrapInfo(
+                store: store,
+                mode: mode,
+                cloudReason: reason,
+                warning: warning
+            )
         case .failed(let error):
             throw IpadShortcutStageIntentError.bootstrapFailed(error)
         }
     }
 
-    private static func applyStartShooting(now: Date, store: CloudDataStore) -> String {
+    private static func applyStartShooting(now: Date, store: CloudDataStore) -> ActionWriteResult {
         if let active = latestActiveSession(from: store.sessionRecords) {
             let revision = bumpedRevision(now: now, existing: active.revision)
             store.upsertSessionTiming(
@@ -12229,7 +12326,11 @@ private enum IpadShortcutStageExecutor {
                 updatedAt: now,
                 sourceDevice: sourceDevice
             )
-            return "Started shooting for active session"
+            return ActionWriteResult(
+                sessionId: active.id,
+                action: "startShooting",
+                revision: revision
+            )
         }
         let sessionId = makeSessionId(now: now, existingIds: Set(store.sessionRecords.map(\.id)))
         let revision = bumpedRevision(now: now, existing: nil)
@@ -12243,10 +12344,14 @@ private enum IpadShortcutStageExecutor {
             updatedAt: now,
             sourceDevice: sourceDevice
         )
-        return "Started shooting with a new session"
+        return ActionWriteResult(
+            sessionId: sessionId,
+            action: "startShooting",
+            revision: revision
+        )
     }
 
-    private static func applyStartSelecting(now: Date, store: CloudDataStore) throws -> String {
+    private static func applyStartSelecting(now: Date, store: CloudDataStore) throws -> ActionWriteResult {
         guard let active = latestActiveSession(from: store.sessionRecords) else {
             throw IpadShortcutStageIntentError.noActiveSession
         }
@@ -12261,10 +12366,14 @@ private enum IpadShortcutStageExecutor {
             updatedAt: now,
             sourceDevice: sourceDevice
         )
-        return "Started selecting for active session"
+        return ActionWriteResult(
+            sessionId: active.id,
+            action: "startSelecting",
+            revision: revision
+        )
     }
 
-    private static func applyEndSession(now: Date, store: CloudDataStore) throws -> String {
+    private static func applyEndSession(now: Date, store: CloudDataStore) throws -> ActionWriteResult {
         guard let active = latestActiveSession(from: store.sessionRecords) else {
             throw IpadShortcutStageIntentError.noActiveSession
         }
@@ -12280,7 +12389,11 @@ private enum IpadShortcutStageExecutor {
             updatedAt: now,
             sourceDevice: sourceDevice
         )
-        return "Ended active session"
+        return ActionWriteResult(
+            sessionId: active.id,
+            action: "endSession",
+            revision: revision
+        )
     }
 
     private static func latestActiveSession(from records: [CloudDataStore.SessionRecord]) -> CloudDataStore.SessionRecord? {

@@ -72,13 +72,14 @@ private final class AppBootGate: ObservableObject {
     private func finishBoot(with result: CloudDataStore.BootResult) {
         timeoutTask?.cancel()
         switch result {
-        case .ready(let store, let mode, let warning):
+        case .ready(let store, let mode, let reason, let warning):
             if let warning, !warning.isEmpty {
                 lastBootError = warning
             }
             bootModeDescription = mode.rawValue
             runtimeLog("boot", "store_boot_ok", extra: [
                 "mode": mode.rawValue,
+                "reason": reason,
                 "warning": warning ?? ""
             ])
             state = .ready(store: store)
