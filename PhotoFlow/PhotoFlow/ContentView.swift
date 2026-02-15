@@ -159,7 +159,15 @@ private enum IntentActiveSessionStore {
         UserDefaults(suiteName: appGroupId) ?? UserDefaults.standard
     }
 
+    struct ActiveSessionAnchor: Equatable {
+        let dayKey: String
+        let sessionId: String
+        let revision: Int64
+        let updatedAt: TimeInterval
+    }
+
     private static let activeSessionIdKey = "pf_intent_active_session_id_v1"
+    private static let activeSessionRevisionKey = "pf_intent_active_session_revision_v1"
     private static let activeSessionUpdatedAtKey = "pf_intent_active_session_updated_at_v1"
     private static let activeSessionDayKey = "pf_intent_active_session_day_key_v1"
 
@@ -172,66 +180,137 @@ private enum IntentActiveSessionStore {
         return formatter
     }()
 
+    static func loadAnchor() -> ActiveSessionAnchor? {
+        guard let sessionId = normalized(defaults.string(forKey: activeSessionIdKey)),
+              let dayKey = normalized(defaults.string(forKey: activeSessionDayKey)),
+              defaults.object(forKey: activeSessionUpdatedAtKey) != nil else {
+            return nil
+        }
+        let updatedAt = defaults.double(forKey: activeSessionUpdatedAtKey)
+        let revision = defaults.object(forKey: activeSessionRevisionKey) as? NSNumber
+        return ActiveSessionAnchor(
+            dayKey: dayKey,
+            sessionId: sessionId,
+            revision: revision?.int64Value ?? 0,
+            updatedAt: updatedAt
+        )
+    }
+
+    static func saveAnchor(_ anchor: ActiveSessionAnchor?) {
+        guard let anchor else {
+            clearAnchor()
+            return
+        }
+        saveAnchor(
+            dayKey: anchor.dayKey,
+            sessionId: anchor.sessionId,
+            revision: anchor.revision,
+            updatedAt: anchor.updatedAt
+        )
+    }
+
+    static func saveAnchor(
+        dayKey: String,
+        sessionId: String,
+        revision: Int64,
+        updatedAt: TimeInterval
+    ) {
+        guard let normalizedSessionId = normalized(sessionId),
+              let normalizedDayKey = normalized(dayKey) else {
+            clearAnchor()
+            return
+        }
+        defaults.set(normalizedSessionId, forKey: activeSessionIdKey)
+        defaults.set(normalizedDayKey, forKey: activeSessionDayKey)
+        defaults.set(NSNumber(value: revision), forKey: activeSessionRevisionKey)
+        defaults.set(updatedAt, forKey: activeSessionUpdatedAtKey)
+    }
+
+    static func clearAnchor() {
+        defaults.removeObject(forKey: activeSessionIdKey)
+        defaults.removeObject(forKey: activeSessionDayKey)
+        defaults.removeObject(forKey: activeSessionRevisionKey)
+        defaults.removeObject(forKey: activeSessionUpdatedAtKey)
+    }
+
     static func read() -> String? {
-        normalized(defaults.string(forKey: activeSessionIdKey))
+        loadAnchor()?.sessionId
     }
 
     static func readUpdatedAt() -> TimeInterval? {
-        guard defaults.object(forKey: activeSessionUpdatedAtKey) != nil else { return nil }
-        return defaults.double(forKey: activeSessionUpdatedAtKey)
+        loadAnchor()?.updatedAt
     }
 
     static func readDayKey() -> String? {
-        normalized(defaults.string(forKey: activeSessionDayKey))
+        loadAnchor()?.dayKey
     }
 
-    static func write(_ sessionId: String?, updatedAt: Date = Date()) {
+    static func readRevision() -> Int64? {
+        loadAnchor()?.revision
+    }
+
+    static func write(_ sessionId: String?, updatedAt: Date = Date(), revision: Int64 = 0) {
         guard let sessionId = normalized(sessionId) else {
-            clear()
+            clearAnchor()
             return
         }
-        defaults.set(sessionId, forKey: activeSessionIdKey)
-        defaults.set(updatedAt.timeIntervalSince1970, forKey: activeSessionUpdatedAtKey)
-        defaults.set(dayKey(for: updatedAt), forKey: activeSessionDayKey)
+        let effectiveRevision: Int64
+        if revision > 0 {
+            effectiveRevision = revision
+        } else {
+            effectiveRevision = readRevision() ?? 0
+        }
+        saveAnchor(
+            dayKey: dayKey(for: updatedAt),
+            sessionId: sessionId,
+            revision: effectiveRevision,
+            updatedAt: updatedAt.timeIntervalSince1970
+        )
     }
 
     static func clear() {
-        defaults.removeObject(forKey: activeSessionIdKey)
-        defaults.removeObject(forKey: activeSessionUpdatedAtKey)
-        defaults.removeObject(forKey: activeSessionDayKey)
+        clearAnchor()
     }
 
     static func clearIfMatches(_ sessionId: String) {
         guard let active = read(), active == sessionId else { return }
-        clear()
+        clearAnchor()
     }
 
     static func updateFromSessionTiming(
         sessionId: String,
         stage: String,
         endedAt: Date?,
+        revision: Int64,
         updatedAt: Date = Date()
     ) {
         if endedAt != nil || isEndedStage(stage) {
             clearIfMatches(sessionId)
             return
         }
-        write(sessionId, updatedAt: updatedAt)
+        write(sessionId, updatedAt: updatedAt, revision: revision)
     }
 
     static func reconcile(with records: [CloudDataStore.SessionRecord], now: Date = Date()) {
         let today = dayKey(for: now)
-        if let storedDayKey = readDayKey(), storedDayKey != today {
-            clear()
+        let winners = winnerRecords(from: records)
+        if let anchor = loadAnchor(), anchor.dayKey != today {
+            clearAnchor()
         }
         if let pointer = read(),
-           isEligibleActiveSession(pointer, records: records, dayKey: today) {
+           let record = winners[pointer],
+           isEligibleActiveSession(record, dayKey: today) {
             return
         }
-        if let latest = latestActiveSessionId(from: records, dayKey: today) {
-            write(latest, updatedAt: now)
+        if let latest = latestActiveSession(from: Array(winners.values), dayKey: today) {
+            saveAnchor(
+                dayKey: today,
+                sessionId: latest.id,
+                revision: latest.revision,
+                updatedAt: latest.updatedAt.timeIntervalSince1970
+            )
         } else {
-            clear()
+            clearAnchor()
         }
     }
 
@@ -240,10 +319,18 @@ private enum IntentActiveSessionStore {
         records: [CloudDataStore.SessionRecord],
         now: Date = Date()
     ) -> String? {
+        let winners = winnerRecords(from: records)
         let today = dayKey(for: now)
         if let pointer = normalized(pointer),
-           isEligibleActiveSession(pointer, records: records, dayKey: today) {
+           let record = winners[pointer],
+           isEligibleActiveSession(record, dayKey: today) {
             return pointer
+        }
+        if let anchor = loadAnchor(),
+           anchor.dayKey == today,
+           let record = winners[anchor.sessionId],
+           isEligibleActiveSession(record, dayKey: today) {
+            return anchor.sessionId
         }
         return nil
     }
@@ -252,17 +339,52 @@ private enum IntentActiveSessionStore {
         records: [CloudDataStore.SessionRecord],
         now: Date = Date()
     ) -> String? {
-        latestActiveSessionId(from: records, dayKey: dayKey(for: now))
+        let today = dayKey(for: now)
+        let winners = winnerRecords(from: records)
+        guard let record = latestActiveSession(from: Array(winners.values), dayKey: today) else {
+            return nil
+        }
+        saveAnchor(
+            dayKey: today,
+            sessionId: record.id,
+            revision: record.revision,
+            updatedAt: record.updatedAt.timeIntervalSince1970
+        )
+        return record.id
     }
 
     static func dayKey(for date: Date) -> String {
         dayKeyFormatter.string(from: date)
     }
 
-    private static func latestActiveSessionId(
+    private static func winnerRecords(from records: [CloudDataStore.SessionRecord]) -> [String: CloudDataStore.SessionRecord] {
+        var winners: [String: CloudDataStore.SessionRecord] = [:]
+        for record in records {
+            if let existing = winners[record.id] {
+                if shouldReplaceWinner(candidate: record, existing: existing) {
+                    winners[record.id] = record
+                }
+            } else {
+                winners[record.id] = record
+            }
+        }
+        return winners
+    }
+
+    private static func shouldReplaceWinner(
+        candidate: CloudDataStore.SessionRecord,
+        existing: CloudDataStore.SessionRecord
+    ) -> Bool {
+        if candidate.revision != existing.revision {
+            return candidate.revision > existing.revision
+        }
+        return candidate.updatedAt > existing.updatedAt
+    }
+
+    private static func latestActiveSession(
         from records: [CloudDataStore.SessionRecord],
         dayKey: String
-    ) -> String? {
+    ) -> CloudDataStore.SessionRecord? {
         records
             .filter { record in
                 isInProgress(record) &&
@@ -270,13 +392,12 @@ private enum IntentActiveSessionStore {
             }
             .max { lhs, rhs in
                 if lhs.revision == rhs.revision {
-                    let lhsStart = lhs.shootingStart ?? lhs.selectingStart ?? lhs.updatedAt
-                    let rhsStart = rhs.shootingStart ?? rhs.selectingStart ?? rhs.updatedAt
-                    return lhsStart < rhsStart
+                    let lhsUpdated = lhs.updatedAt.timeIntervalSince1970
+                    let rhsUpdated = rhs.updatedAt.timeIntervalSince1970
+                    return lhsUpdated < rhsUpdated
                 }
                 return lhs.revision < rhs.revision
-            }?
-            .id
+            }
     }
 
     private static func sessionDayKey(_ record: CloudDataStore.SessionRecord) -> String {
@@ -285,20 +406,17 @@ private enum IntentActiveSessionStore {
     }
 
     private static func isEligibleActiveSession(
-        _ sessionId: String,
-        records: [CloudDataStore.SessionRecord],
+        _ record: CloudDataStore.SessionRecord,
         dayKey: String
     ) -> Bool {
-        guard let record = records.first(where: { $0.id == sessionId }) else {
-            return false
-        }
         return isInProgress(record) && sessionDayKey(record) == dayKey
     }
 
     private static func isInProgress(_ record: CloudDataStore.SessionRecord) -> Bool {
         !record.isDeleted &&
         !record.isVoided &&
-        (record.endedAt == nil || !isEndedStage(record.stage))
+        record.endedAt == nil &&
+        !isEndedStage(record.stage)
     }
 
     private static func isEndedStage(_ stage: String) -> Bool {
@@ -1280,6 +1398,7 @@ final class CloudDataStore: ObservableObject {
                 sessionId: sessionId,
                 stage: stage,
                 endedAt: endedAt,
+                revision: nextRevisionValue,
                 updatedAt: updatedAt
             )
         }
@@ -5859,7 +5978,7 @@ struct ContentView: View {
             Divider()
             Text("Last Shortcut Run")
                 .font(.headline)
-            Text("activeSessionId: \(activeSessionIdText())")
+            Text("anchorSessionId: \(activeSessionIdText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastShortcutAt: \(shortcutLastRunAtText())")
@@ -5868,7 +5987,7 @@ struct ContentView: View {
             Text("lastShortcutAction: \(shortcutLastRequestedStageText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("lastResolvedTargetSessionId: \(shortcutLastTargetSessionIdText())")
+            Text("targetSessionId: \(shortcutLastTargetSessionIdText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastShortcutResult: \(shortcutLastRun.lastShortcutResult)")
@@ -12572,7 +12691,10 @@ private struct IpadShortcutLastRunRecord: Codable, Equatable {
 }
 
 private enum IpadShortcutStageQueueStorage {
-    private static let defaults = UserDefaults.standard
+    private static let appGroupId = "group.com.zhengxinrong.photoflow"
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: appGroupId) ?? UserDefaults.standard
+    }
     private static let queueKey = "pf_ipad_shortcut_stage_queue_v1"
     private static let lastRunKey = "pf_ipad_shortcut_last_run_v1"
     private static let lastRevisionKey = "pf_ipad_shortcut_last_revision_v1"
@@ -12783,6 +12905,8 @@ private enum IpadShortcutStageExecutor {
         let store = bootstrap.store
         let now = Date()
         let dayKey = IntentActiveSessionStore.dayKey(for: now)
+        let storeUsed = bootstrap.mode == .cloud ? "cloud" : "local"
+        let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
         store.refreshFromStore()
         let decision = resolveTargetDecision(action: action, records: store.sessionRecords, now: now)
         switch decision {
@@ -12794,7 +12918,16 @@ private enum IpadShortcutStageExecutor {
                 result: "failed",
                 error: message
             )
-            return message
+            return [
+                "storeUsed=\(storeUsed)",
+                "cloudReason=\(bootstrap.cloudReason)",
+                "dayKey=\(dayKey)",
+                "anchorSessionId=\(anchorBeforeSessionId)",
+                "targetSessionId=nil",
+                "stage=\(stageValue(for: action))",
+                "note=\(message)"
+            ]
+            .joined(separator: " ")
 
         case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
             IntentActiveSessionStore.write(targetSessionId, updatedAt: now)
@@ -12804,49 +12937,48 @@ private enum IpadShortcutStageExecutor {
                 targetSessionId: targetSessionId,
                 sessionHint: targetSessionId
             )
-            let storeUsed = bootstrap.mode == .cloud ? "cloud" : "local"
             let flush = flushQueuedEvents(using: store, trigger: "intent_\(action.rawValue)")
             if let applied = flush.appliedByEventId[enqueuedEvent.eventId] {
-                var detail = [
-                    "storeUsed=\(storeUsed)",
-                    "cloudReason=\(bootstrap.cloudReason)",
-                    "sessionId=\(applied.sessionId)",
-                    "stage=\(applied.stage)",
-                    "dayKey=\(applied.dayKey)",
-                    "targetSessionId=\(applied.targetSessionId)",
-                    "revision=\(applied.revision)"
-                ]
                 var lastRunResult = "ok"
                 var notes: [String] = []
-                if bootstrap.mode == .localOnly {
-                    let warning = normalizedError(bootstrap.warning ?? "云端不可用，事件已入队，等待后续同步。")
-                    detail.append("note=\(warning)")
-                    notes.append(warning)
-                    lastRunResult = "queued"
-                }
                 if let note = decision.note, !note.isEmpty {
-                    detail.append("note=\(note)")
                     notes.append(note)
                 }
                 if let note = applied.note, !note.isEmpty {
-                    detail.append("note=\(note)")
                     notes.append(note)
+                }
+                if bootstrap.mode == .localOnly {
+                    lastRunResult = "queued"
+                    notes.append(normalizedError(bootstrap.warning ?? "云端不可用，事件已入队，等待后续同步。"))
                 }
 
                 if action == .endSession {
                     IntentActiveSessionStore.clear()
                 } else {
-                    IntentActiveSessionStore.write(applied.sessionId, updatedAt: now)
+                    IntentActiveSessionStore.write(applied.sessionId, updatedAt: now, revision: applied.revision)
                 }
+                let anchorAfterSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+                let noteText = notes.isEmpty ? "ok" : notes.joined(separator: " | ")
 
                 IpadShortcutStageQueueStorage.recordLastRun(
                     action: action,
                     requestedStage: action.rawValue,
                     targetSessionId: applied.targetSessionId,
                     result: lastRunResult,
-                    error: notes.isEmpty ? nil : notes.joined(separator: " | ")
+                    error: notes.isEmpty ? nil : noteText
                 )
-                return detail.joined(separator: " ")
+                return [
+                    "storeUsed=\(storeUsed)",
+                    "cloudReason=\(bootstrap.cloudReason)",
+                    "dayKey=\(applied.dayKey)",
+                    "anchorSessionId=\(anchorAfterSessionId)",
+                    "targetSessionId=\(applied.targetSessionId)",
+                    "sessionId=\(applied.sessionId)",
+                    "stage=\(applied.stage)",
+                    "revision=\(applied.revision)",
+                    "note=\(noteText)"
+                ]
+                .joined(separator: " ")
             }
 
             var reasonParts: [String] = []
@@ -12855,6 +12987,7 @@ private enum IpadShortcutStageExecutor {
             }
             reasonParts.append(normalizedError(flush.lastError ?? bootstrap.warning ?? "已入队，等待同步。"))
             let reason = reasonParts.joined(separator: " | ")
+            let anchorQueuedSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
             IpadShortcutStageQueueStorage.recordLastRun(
                 action: action,
                 requestedStage: action.rawValue,
@@ -12865,10 +12998,11 @@ private enum IpadShortcutStageExecutor {
             return [
                 "storeUsed=\(storeUsed)",
                 "cloudReason=\(bootstrap.cloudReason)",
+                "dayKey=\(dayKey)",
+                "anchorSessionId=\(anchorQueuedSessionId)",
+                "targetSessionId=\(enqueuedEvent.targetSessionId ?? "nil")",
                 "sessionId=pending",
                 "stage=\(stageValue(for: action))",
-                "dayKey=\(dayKey)",
-                "targetSessionId=\(enqueuedEvent.targetSessionId ?? "nil")",
                 "revision=\(enqueuedEvent.revision)",
                 "note=\(reason)"
             ]
@@ -12879,6 +13013,7 @@ private enum IpadShortcutStageExecutor {
     private static func performWithoutStore(action: IpadShortcutStageAction, bootstrapError: String) -> String {
         let now = Date()
         let dayKey = IntentActiveSessionStore.dayKey(for: now)
+        let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
         let decision = resolveTargetDecisionWithoutRecords(action: action, now: now)
         switch decision {
         case .reject(let message):
@@ -12889,7 +13024,16 @@ private enum IpadShortcutStageExecutor {
                 result: "failed",
                 error: message
             )
-            return message
+            return [
+                "storeUsed=unavailable",
+                "cloudReason=bootstrap_failed",
+                "dayKey=\(dayKey)",
+                "anchorSessionId=\(anchorBeforeSessionId)",
+                "targetSessionId=nil",
+                "stage=\(stageValue(for: action))",
+                "note=\(message)"
+            ]
+            .joined(separator: " ")
 
         case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
             IntentActiveSessionStore.write(targetSessionId, updatedAt: now)
@@ -12904,6 +13048,7 @@ private enum IpadShortcutStageExecutor {
             }
             reasonParts.append(normalizedError("存储初始化失败，事件已入队，等待稍后同步。\(bootstrapError)"))
             let reason = reasonParts.joined(separator: " | ")
+            let anchorQueuedSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
             IpadShortcutStageQueueStorage.recordLastRun(
                 action: action,
                 requestedStage: action.rawValue,
@@ -12914,10 +13059,11 @@ private enum IpadShortcutStageExecutor {
             return [
                 "storeUsed=unavailable",
                 "cloudReason=bootstrap_failed",
+                "dayKey=\(dayKey)",
+                "anchorSessionId=\(anchorQueuedSessionId)",
+                "targetSessionId=\(targetSessionId)",
                 "sessionId=pending",
                 "stage=\(stageValue(for: action))",
-                "dayKey=\(dayKey)",
-                "targetSessionId=\(targetSessionId)",
                 "revision=\(enqueuedEvent.revision)",
                 "note=\(reason)"
             ]
@@ -12938,12 +13084,12 @@ private enum IpadShortcutStageExecutor {
         ) {
             return .useExisting(sessionId: globalTarget)
         }
+        if let fallback = IntentActiveSessionStore.resolveFallbackInProgressSessionId(records: records, now: now) {
+            return .useExisting(sessionId: fallback)
+        }
         if action == .startShooting {
             let createdId = makeSessionId(now: now, existingIds: Set(records.map(\.id)))
             return .createNew(sessionId: createdId, note: "已创建新会话")
-        }
-        if let fallback = IntentActiveSessionStore.resolveFallbackInProgressSessionId(records: records, now: now) {
-            return .useExisting(sessionId: fallback)
         }
         return .reject(message: noActiveSessionMessage)
     }
@@ -12953,9 +13099,10 @@ private enum IpadShortcutStageExecutor {
         now: Date
     ) -> TargetDecision {
         let today = IntentActiveSessionStore.dayKey(for: now)
-        if let globalTarget = IntentActiveSessionStore.read(),
-           IntentActiveSessionStore.readDayKey() == today {
-            return .useExisting(sessionId: globalTarget)
+        if let anchor = IntentActiveSessionStore.loadAnchor(),
+           anchor.dayKey == today,
+           !anchor.sessionId.isEmpty {
+            return .useExisting(sessionId: anchor.sessionId)
         }
         if action == .startShooting {
             let createdId = makeSessionId(now: now, existingIds: Set<String>())
@@ -13132,7 +13279,7 @@ private enum IpadShortcutStageExecutor {
         if action == .endSession {
             IntentActiveSessionStore.clear()
         } else {
-            IntentActiveSessionStore.write(sessionId, updatedAt: eventTime)
+            IntentActiveSessionStore.write(sessionId, updatedAt: eventTime, revision: nextRevision)
         }
         let dayKey = IntentActiveSessionStore.dayKey(for: state.shootingStart ?? state.selectingStart ?? eventTime)
 
@@ -13152,8 +13299,16 @@ private enum IpadShortcutStageExecutor {
         sessionStates: [String: SessionState]
     ) -> SessionResolution? {
         if let target = normalizedSessionId(event.targetSessionId) {
-            if let state = sessionStates[target], (state.isDeleted || state.isVoided) {
-                return nil
+            if let state = sessionStates[target] {
+                if state.isDeleted || state.isVoided {
+                    return nil
+                }
+                if action != .startShooting && !isActive(state: state) {
+                    if let fallbackTarget = resolveFallbackActiveSessionId(from: sessionStates, now: event.createdAtDate) {
+                        return SessionResolution(sessionId: fallbackTarget, targetSessionId: fallbackTarget, note: nil)
+                    }
+                    return nil
+                }
             }
             return SessionResolution(sessionId: target, targetSessionId: target, note: nil)
         }
