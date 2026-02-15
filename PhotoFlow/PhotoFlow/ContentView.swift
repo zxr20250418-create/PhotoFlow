@@ -152,11 +152,191 @@ private func encodeDailyReviewNote(notesAll: String?, aiSummary: DailyReviewAiSu
     return dailyReviewNotePrefix + json
 }
 
+private let photoFlowAppGroupId = "group.com.zhengxinrong.photoflow"
+
+@MainActor
+private enum SessionAnchorStore {
+    struct Anchor: Equatable {
+        let dayKey: String
+        let sessionId: String
+        let revision: Int64
+        let updatedAt: TimeInterval
+    }
+
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: photoFlowAppGroupId) ?? UserDefaults.standard
+    }
+
+    private static let currentAnchorSessionIdKey = "currentAnchorSessionId"
+    private static let currentAnchorDayKeyKey = "currentAnchorDayKey"
+    private static let currentAnchorRevisionKey = "currentAnchorRevision"
+    private static let currentAnchorUpdatedAtKey = "currentAnchorUpdatedAt"
+
+    private static let dayKeyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .iso8601)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    static func dayKey(for date: Date) -> String {
+        dayKeyFormatter.string(from: date)
+    }
+
+    static func loadAnchor() -> Anchor? {
+        guard let sessionId = normalized(defaults.string(forKey: currentAnchorSessionIdKey)),
+              let dayKey = normalized(defaults.string(forKey: currentAnchorDayKeyKey)),
+              defaults.object(forKey: currentAnchorUpdatedAtKey) != nil else {
+            return nil
+        }
+        let updatedAt = defaults.double(forKey: currentAnchorUpdatedAtKey)
+        let revision = (defaults.object(forKey: currentAnchorRevisionKey) as? NSNumber)?.int64Value ?? 0
+        return Anchor(
+            dayKey: dayKey,
+            sessionId: sessionId,
+            revision: revision,
+            updatedAt: updatedAt
+        )
+    }
+
+    static func ensureAnchorSessionId(
+        for date: Date = Date(),
+        deviceIdSuffix: String
+    ) -> String {
+        let dayKey = dayKey(for: date)
+        if let anchor = loadAnchor(), anchor.dayKey == dayKey {
+            return anchor.sessionId
+        }
+        let sessionId = makeAnchorSessionId(dayKey: dayKey, deviceIdSuffix: deviceIdSuffix)
+        let revision = max(Int64(date.timeIntervalSince1970 * 1000), 1)
+        saveAnchor(
+            Anchor(
+                dayKey: dayKey,
+                sessionId: sessionId,
+                revision: revision,
+                updatedAt: date.timeIntervalSince1970
+            )
+        )
+        return sessionId
+    }
+
+    static func saveAnchor(_ anchor: Anchor?) {
+        guard let anchor else {
+            clearAnchor()
+            return
+        }
+        guard let normalizedSessionId = normalized(anchor.sessionId),
+              let normalizedDayKey = normalized(anchor.dayKey) else {
+            clearAnchor()
+            return
+        }
+        defaults.set(normalizedSessionId, forKey: currentAnchorSessionIdKey)
+        defaults.set(normalizedDayKey, forKey: currentAnchorDayKeyKey)
+        defaults.set(NSNumber(value: anchor.revision), forKey: currentAnchorRevisionKey)
+        defaults.set(anchor.updatedAt, forKey: currentAnchorUpdatedAtKey)
+    }
+
+    static func clearAnchor() {
+        defaults.removeObject(forKey: currentAnchorSessionIdKey)
+        defaults.removeObject(forKey: currentAnchorDayKeyKey)
+        defaults.removeObject(forKey: currentAnchorRevisionKey)
+        defaults.removeObject(forKey: currentAnchorUpdatedAtKey)
+    }
+
+    static func clearIfDayChanged(now: Date = Date()) {
+        guard let anchor = loadAnchor() else { return }
+        if anchor.dayKey != dayKey(for: now) {
+            clearAnchor()
+        }
+    }
+
+    private static func makeAnchorSessionId(dayKey: String, deviceIdSuffix: String) -> String {
+        let normalizedSuffix = deviceIdSuffix
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        let trimmedSuffix = String(normalizedSuffix.prefix(6))
+        let random = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(6)).lowercased()
+        let devicePart = trimmedSuffix.isEmpty ? "device" : trimmedSuffix
+        return "\(dayKey)-\(devicePart)-\(random)"
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private enum StageEventDedupeStore {
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: photoFlowAppGroupId) ?? UserDefaults.standard
+    }
+
+    private static let processedEventsKey = "pf_stage_event_processed_ids_v2"
+    private static let maxEntries = 500
+    private static let ttl: TimeInterval = 7 * 24 * 60 * 60
+
+    struct Entry: Codable, Equatable, Sendable {
+        let eventId: String
+        let processedAt: TimeInterval
+    }
+
+    struct State: Equatable, Sendable {
+        fileprivate var entries: [Entry]
+        fileprivate var eventIdSet: Set<String>
+
+        init(entries: [Entry]) {
+            self.entries = entries
+            self.eventIdSet = Set(entries.map(\.eventId))
+        }
+
+        mutating func prune(now: Date = Date()) {
+            let cutoff = now.timeIntervalSince1970 - StageEventDedupeStore.ttl
+            entries = entries.filter { $0.processedAt >= cutoff && !$0.eventId.isEmpty }
+            if entries.count > StageEventDedupeStore.maxEntries {
+                entries.sort { $0.processedAt < $1.processedAt }
+                entries.removeFirst(entries.count - StageEventDedupeStore.maxEntries)
+            }
+            eventIdSet = Set(entries.map(\.eventId))
+        }
+
+        func contains(_ eventId: String) -> Bool {
+            eventIdSet.contains(eventId)
+        }
+
+        mutating func markProcessed(_ eventId: String, at time: TimeInterval) {
+            guard !eventId.isEmpty else { return }
+            if eventIdSet.contains(eventId) {
+                return
+            }
+            entries.append(Entry(eventId: eventId, processedAt: time))
+            eventIdSet.insert(eventId)
+            prune(now: Date(timeIntervalSince1970: time))
+        }
+    }
+
+    static func load(now: Date = Date()) -> State {
+        guard let data = defaults.data(forKey: processedEventsKey),
+              let decoded = try? JSONDecoder().decode([Entry].self, from: data) else {
+            return State(entries: [])
+        }
+        var state = State(entries: decoded)
+        state.prune(now: now)
+        return state
+    }
+
+    static func save(_ state: State) {
+        guard let data = try? JSONEncoder().encode(state.entries) else { return }
+        defaults.set(data, forKey: processedEventsKey)
+    }
+}
+
 @MainActor
 private enum IntentActiveSessionStore {
-    private static let appGroupId = "group.com.zhengxinrong.photoflow"
     private static var defaults: UserDefaults {
-        UserDefaults(suiteName: appGroupId) ?? UserDefaults.standard
+        UserDefaults(suiteName: photoFlowAppGroupId) ?? UserDefaults.standard
     }
 
     struct ActiveSessionAnchor: Equatable {
@@ -171,20 +351,11 @@ private enum IntentActiveSessionStore {
         case cloud
     }
 
-    private static let activeSessionIdKey = "shortcut_anchor_session_id"
-    private static let activeSessionRevisionKey = "shortcut_anchor_revision"
-    private static let activeSessionUpdatedAtKey = "shortcut_anchor_updated_at"
-    private static let activeSessionDayKey = "shortcut_anchor_day_key"
+    private static let activeSessionIdKey = "currentAnchorSessionId"
+    private static let activeSessionRevisionKey = "currentAnchorRevision"
+    private static let activeSessionUpdatedAtKey = "currentAnchorUpdatedAt"
+    private static let activeSessionDayKey = "currentAnchorDayKey"
     private static let activeSessionStoreUsedKey = "shortcut_anchor_store_used"
-
-    private static let dayKeyFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .iso8601)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
 
     static func loadAnchor() -> ActiveSessionAnchor? {
         guard let sessionId = normalized(defaults.string(forKey: activeSessionIdKey)),
@@ -380,7 +551,7 @@ private enum IntentActiveSessionStore {
     }
 
     static func dayKey(for date: Date) -> String {
-        dayKeyFormatter.string(from: date)
+        SessionAnchorStore.dayKey(for: date)
     }
 
     private static func winnerRecords(from records: [CloudDataStore.SessionRecord]) -> [String: CloudDataStore.SessionRecord] {
@@ -1110,6 +1281,7 @@ final class CloudDataStore: ObservableObject {
     struct PendingStageEvent: Identifiable, Equatable, Sendable {
         let id: String
         let dayKey: String
+        let anchorSessionId: String
         let stageAfter: String
         let createdAt: TimeInterval
         let revision: Int64
@@ -1251,6 +1423,7 @@ final class CloudDataStore: ObservableObject {
     private enum StageEventField {
         static let id = "id"
         static let dayKey = "dayKey"
+        static let anchorSessionId = "anchorSessionId"
         static let stageAfter = "stageAfter"
         static let createdAt = "createdAt"
         static let revision = "revision"
@@ -1483,16 +1656,20 @@ final class CloudDataStore: ObservableObject {
     }
 
     func enqueuePendingStageEvent(
+        eventId: String,
         stageAfter: String,
+        anchorSessionId: String,
         sourceDevice: String = "ipad",
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        revision: Int64
     ) async -> PendingStageEvent? {
         let normalizedStage = stageAfter.lowercased()
         guard normalizedStage == "shooting" || normalizedStage == "selecting" || normalizedStage == "ended" else {
             return nil
         }
-        let revision = max(Int64(createdAt.timeIntervalSince1970 * 1000), lastRevision + 1)
-        let eventId = UUID().uuidString
+        guard !eventId.isEmpty else { return nil }
+        guard !anchorSessionId.isEmpty else { return nil }
+        let nextRevision = max(revision, Int64(createdAt.timeIntervalSince1970 * 1000))
         let dayKey = IntentActiveSessionStore.dayKey(for: createdAt)
         let timestamp = createdAt.timeIntervalSince1970
 
@@ -1501,9 +1678,10 @@ final class CloudDataStore: ObservableObject {
                 let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.stageEvent, into: context)
                 target.setValue(eventId, forKey: StageEventField.id)
                 target.setValue(dayKey, forKey: StageEventField.dayKey)
+                target.setValue(anchorSessionId, forKey: StageEventField.anchorSessionId)
                 target.setValue(normalizedStage, forKey: StageEventField.stageAfter)
                 target.setValue(timestamp, forKey: StageEventField.createdAt)
-                target.setValue(revision, forKey: StageEventField.revision)
+                target.setValue(nextRevision, forKey: StageEventField.revision)
                 target.setValue(sourceDevice, forKey: StageEventField.sourceDevice)
                 target.setValue(nil, forKey: StageEventField.appliedAt)
                 target.setValue(nil, forKey: StageEventField.appliedBy)
@@ -1526,9 +1704,10 @@ final class CloudDataStore: ObservableObject {
         return PendingStageEvent(
             id: eventId,
             dayKey: dayKey,
+            anchorSessionId: anchorSessionId,
             stageAfter: normalizedStage,
             createdAt: timestamp,
-            revision: revision,
+            revision: nextRevision,
             sourceDevice: sourceDevice,
             appliedAt: nil,
             appliedBy: nil,
@@ -1550,6 +1729,7 @@ final class CloudDataStore: ObservableObject {
             )
         }
 
+        let now = Date()
         let result = await withCheckedContinuation { continuation in
             container.performBackgroundTask { context in
                 func int64Value(_ object: NSManagedObject, key: String) -> Int64 {
@@ -1574,25 +1754,16 @@ final class CloudDataStore: ObservableObject {
                     (object.value(forKey: key) as? String) ?? fallback
                 }
 
-                func currentActiveSession(_ sessions: [String: NSManagedObject]) -> NSManagedObject? {
-                    sessions.values
-                        .filter { object in
-                            let stage = stringValue(object, key: SessionField.stage).lowercased()
-                            let endedAt = object.value(forKey: SessionField.endedAt) as? Date
-                            let isDeleted = boolValue(object, key: SessionField.isDeleted)
-                            let isVoided = boolValue(object, key: SessionField.isVoided)
-                            return !isDeleted && !isVoided && endedAt == nil &&
-                                stage != WatchSyncStore.StageSyncKey.stageStopped.lowercased() &&
-                                stage != "ended"
-                        }
-                        .max { lhs, rhs in
-                            let lhsRevision = int64Value(lhs, key: SessionField.revision)
-                            let rhsRevision = int64Value(rhs, key: SessionField.revision)
-                            if lhsRevision == rhsRevision {
-                                return doubleValue(lhs, key: SessionField.updatedAt) < doubleValue(rhs, key: SessionField.updatedAt)
-                            }
-                            return lhsRevision < rhsRevision
-                        }
+                func isActiveSession(_ object: NSManagedObject) -> Bool {
+                    let stage = stringValue(object, key: SessionField.stage).lowercased()
+                    let endedAt = object.value(forKey: SessionField.endedAt) as? Date
+                    let isDeleted = boolValue(object, key: SessionField.isDeleted)
+                    let isVoided = boolValue(object, key: SessionField.isVoided)
+                    return !isDeleted &&
+                        !isVoided &&
+                        endedAt == nil &&
+                        stage != WatchSyncStore.StageSyncKey.stageStopped.lowercased() &&
+                        stage != "ended"
                 }
 
                 func resolveSessionWinners() -> [String: NSManagedObject] {
@@ -1638,20 +1809,25 @@ final class CloudDataStore: ObservableObject {
                     return
                 }
 
+                var dedupeState = StageEventDedupeStore.load(now: now)
                 var winners = resolveSessionWinners()
                 var appliedCount = 0
                 var rejectedCount = 0
                 var shouldClearShortcutChain = false
-                let now = Date()
                 let nowSeconds = now.timeIntervalSince1970
                 let nowMillis = Int64(nowSeconds * 1000)
+                let noActiveSessionNote = "no_active_session:请先开始拍摄"
 
                 for event in events {
                     let stageAfter = stringValue(event, key: StageEventField.stageAfter).lowercased()
+                    let eventId = stringValue(event, key: StageEventField.id)
+                    let anchorSessionId = stringValue(event, key: StageEventField.anchorSessionId)
+                    let stageBefore = winners[anchorSessionId].map { stringValue($0, key: SessionField.stage) } ?? "none"
                     let eventRevision = max(int64Value(event, key: StageEventField.revision), nowMillis)
                     let eventTimeSeconds = doubleValue(event, key: StageEventField.createdAt)
                     let eventTime = Date(timeIntervalSince1970: eventTimeSeconds > 0 ? eventTimeSeconds : nowSeconds)
-                    let active = currentActiveSession(winners)
+                    var note = ""
+                    var didCreateSession = false
 
                     func markEvent(status: String, note: String) {
                         event.setValue(status, forKey: StageEventField.status)
@@ -1685,24 +1861,88 @@ final class CloudDataStore: ObservableObject {
                         }
                     }
 
+                    if eventId.isEmpty {
+                        markEvent(status: "rejected", note: "invalid_event_id")
+                        rejectedCount += 1
+                        runtimeLog("shortcut", "consume_event", extra: [
+                            "eventId": "missing",
+                            "dayKey": stringValue(event, key: StageEventField.dayKey),
+                            "anchorSessionId": anchorSessionId.isEmpty ? "nil" : anchorSessionId,
+                            "stageBefore": stageBefore,
+                            "stageAfter": stageAfter,
+                            "didCreateSession": "false",
+                            "note": "invalid_event_id"
+                        ])
+                        continue
+                    }
+
+                    if dedupeState.contains(eventId) {
+                        note = "duplicate_event_ignored"
+                        markEvent(status: "applied", note: note)
+                        appliedCount += 1
+                        runtimeLog("shortcut", "consume_event", extra: [
+                            "eventId": eventId,
+                            "dayKey": stringValue(event, key: StageEventField.dayKey),
+                            "anchorSessionId": anchorSessionId.isEmpty ? "nil" : anchorSessionId,
+                            "stageBefore": stageBefore,
+                            "stageAfter": stageAfter,
+                            "didCreateSession": "false",
+                            "note": note
+                        ])
+                        continue
+                    }
+
+                    guard !anchorSessionId.isEmpty else {
+                        note = "invalid_anchor_session"
+                        markEvent(status: "rejected", note: note)
+                        rejectedCount += 1
+                        dedupeState.markProcessed(eventId, at: nowSeconds)
+                        runtimeLog("shortcut", "consume_event", extra: [
+                            "eventId": eventId,
+                            "dayKey": stringValue(event, key: StageEventField.dayKey),
+                            "anchorSessionId": "nil",
+                            "stageBefore": stageBefore,
+                            "stageAfter": stageAfter,
+                            "didCreateSession": "false",
+                            "note": note
+                        ])
+                        continue
+                    }
+
                     switch stageAfter {
                     case "shooting":
-                        if let active {
-                            let shootingStart = (active.value(forKey: SessionField.shootingStart) as? Date) ?? eventTime
-                            let selectingStart = active.value(forKey: SessionField.selectingStart) as? Date
+                        if let target = winners[anchorSessionId] {
+                            guard isActiveSession(target) else {
+                                note = noActiveSessionNote
+                                markEvent(status: "rejected", note: note)
+                                rejectedCount += 1
+                                dedupeState.markProcessed(eventId, at: nowSeconds)
+                                runtimeLog("shortcut", "consume_event", extra: [
+                                    "eventId": eventId,
+                                    "dayKey": stringValue(event, key: StageEventField.dayKey),
+                                    "anchorSessionId": anchorSessionId,
+                                    "stageBefore": stageBefore,
+                                    "stageAfter": stageAfter,
+                                    "didCreateSession": "false",
+                                    "note": note
+                                ])
+                                continue
+                            }
+                            let shootingStart = (target.value(forKey: SessionField.shootingStart) as? Date) ?? eventTime
+                            let selectingStart = target.value(forKey: SessionField.selectingStart) as? Date
                             applySessionUpdate(
-                                object: active,
+                                object: target,
                                 stage: WatchSyncStore.StageSyncKey.stageShooting,
                                 shootingStart: shootingStart,
                                 selectingStart: selectingStart,
                                 endedAt: nil
                             )
-                            markEvent(status: "applied", note: "applied_existing_active")
+                            note = "applied_shooting"
+                            markEvent(status: "applied", note: note)
                             appliedCount += 1
                         } else {
                             let newSession = NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
-                            let createdSessionId = "session-\(max(nowMillis, eventRevision))"
-                            newSession.setValue(createdSessionId, forKey: SessionField.sessionId)
+                            newSession.setValue(anchorSessionId, forKey: SessionField.sessionId)
                             applySessionUpdate(
                                 object: newSession,
                                 stage: WatchSyncStore.StageSyncKey.stageShooting,
@@ -1710,57 +1950,107 @@ final class CloudDataStore: ObservableObject {
                                 selectingStart: nil,
                                 endedAt: nil
                             )
-                            markEvent(status: "applied", note: "created_new_session_on_phone")
+                            didCreateSession = true
+                            note = "created_new_session"
+                            markEvent(status: "applied", note: note)
                             appliedCount += 1
                         }
 
                     case "selecting":
-                        guard let active else {
-                            markEvent(status: "rejected", note: "no active session")
+                        guard let target = winners[anchorSessionId], isActiveSession(target) else {
+                            note = noActiveSessionNote
+                            markEvent(status: "rejected", note: note)
                             rejectedCount += 1
+                            dedupeState.markProcessed(eventId, at: nowSeconds)
+                            runtimeLog("shortcut", "consume_event", extra: [
+                                "eventId": eventId,
+                                "dayKey": stringValue(event, key: StageEventField.dayKey),
+                                "anchorSessionId": anchorSessionId,
+                                "stageBefore": stageBefore,
+                                "stageAfter": stageAfter,
+                                "didCreateSession": "false",
+                                "note": note
+                            ])
                             continue
                         }
-                        let shootingStart = (active.value(forKey: SessionField.shootingStart) as? Date) ?? eventTime
-                        let selectingStart = (active.value(forKey: SessionField.selectingStart) as? Date) ?? eventTime
+                        let shootingStart = (target.value(forKey: SessionField.shootingStart) as? Date) ?? eventTime
+                        let selectingStart = (target.value(forKey: SessionField.selectingStart) as? Date) ?? eventTime
                         applySessionUpdate(
-                            object: active,
+                            object: target,
                             stage: WatchSyncStore.StageSyncKey.stageSelecting,
                             shootingStart: shootingStart,
                             selectingStart: selectingStart,
                             endedAt: nil
                         )
-                        markEvent(status: "applied", note: "applied_selecting")
+                        note = "applied_selecting"
+                        markEvent(status: "applied", note: note)
                         appliedCount += 1
 
                     case "ended":
-                        guard let active else {
-                            markEvent(status: "rejected", note: "no active session")
+                        guard let target = winners[anchorSessionId], isActiveSession(target) else {
+                            note = noActiveSessionNote
+                            markEvent(status: "rejected", note: note)
                             rejectedCount += 1
+                            dedupeState.markProcessed(eventId, at: nowSeconds)
+                            runtimeLog("shortcut", "consume_event", extra: [
+                                "eventId": eventId,
+                                "dayKey": stringValue(event, key: StageEventField.dayKey),
+                                "anchorSessionId": anchorSessionId,
+                                "stageBefore": stageBefore,
+                                "stageAfter": stageAfter,
+                                "didCreateSession": "false",
+                                "note": note
+                            ])
                             continue
                         }
-                        let shootingStart = (active.value(forKey: SessionField.shootingStart) as? Date) ?? eventTime
-                        let selectingStart = active.value(forKey: SessionField.selectingStart) as? Date
+                        let shootingStart = (target.value(forKey: SessionField.shootingStart) as? Date) ?? eventTime
+                        let selectingStart = target.value(forKey: SessionField.selectingStart) as? Date
                         applySessionUpdate(
-                            object: active,
+                            object: target,
                             stage: WatchSyncStore.StageSyncKey.stageStopped,
                             shootingStart: shootingStart,
                             selectingStart: selectingStart,
                             endedAt: eventTime
                         )
-                        markEvent(status: "applied", note: "applied_end")
+                        note = "applied_end"
+                        markEvent(status: "applied", note: note)
                         appliedCount += 1
                         shouldClearShortcutChain = true
 
                     default:
-                        markEvent(status: "rejected", note: "invalid_stage")
+                        note = "invalid_stage"
+                        markEvent(status: "rejected", note: note)
                         rejectedCount += 1
+                        dedupeState.markProcessed(eventId, at: nowSeconds)
+                        runtimeLog("shortcut", "consume_event", extra: [
+                            "eventId": eventId,
+                            "dayKey": stringValue(event, key: StageEventField.dayKey),
+                            "anchorSessionId": anchorSessionId,
+                            "stageBefore": stageBefore,
+                            "stageAfter": stageAfter,
+                            "didCreateSession": "false",
+                            "note": note
+                        ])
+                        continue
                     }
+
+                    dedupeState.markProcessed(eventId, at: nowSeconds)
+                    runtimeLog("shortcut", "consume_event", extra: [
+                        "eventId": eventId,
+                        "dayKey": stringValue(event, key: StageEventField.dayKey),
+                        "anchorSessionId": anchorSessionId,
+                        "stageBefore": stageBefore,
+                        "stageAfter": stageAfter,
+                        "didCreateSession": didCreateSession ? "true" : "false",
+                        "note": note
+                    ])
                 }
 
                 do {
                     if context.hasChanges {
                         try context.save()
                     }
+                    StageEventDedupeStore.save(dedupeState)
                     let pending = events.count - appliedCount - rejectedCount
                     continuation.resume(
                         returning: PendingConsumeResult(
@@ -1788,6 +2078,7 @@ final class CloudDataStore: ObservableObject {
         await MainActor.run {
             if result.shouldClearShortcutChain {
                 IntentActiveSessionStore.clearShortcutChain()
+                SessionAnchorStore.clearAnchor()
             }
             lastPendingConsumeAt = Date()
             lastPendingConsumeResult = "\(trigger): \(result.summary)"
@@ -2821,9 +3112,11 @@ final class CloudDataStore: ObservableObject {
                   !eventId.isEmpty else { return nil }
             let stageAfter = stringValue(object, key: StageEventField.stageAfter, fallback: "")
             let dayKey = stringValue(object, key: StageEventField.dayKey, fallback: "")
+            let anchorSessionId = stringValue(object, key: StageEventField.anchorSessionId, fallback: "")
             return PendingStageEvent(
                 id: eventId,
                 dayKey: dayKey,
+                anchorSessionId: anchorSessionId,
                 stageAfter: stageAfter,
                 createdAt: doubleValue(object, key: StageEventField.createdAt),
                 revision: int64Value(object, key: StageEventField.revision),
@@ -3664,6 +3957,7 @@ final class CloudDataStore: ObservableObject {
         stageEvent.properties = [
             attribute(StageEventField.id, type: .stringAttributeType, optional: true),
             attribute(StageEventField.dayKey, type: .stringAttributeType, optional: true),
+            attribute(StageEventField.anchorSessionId, type: .stringAttributeType, optional: true),
             attribute(StageEventField.stageAfter, type: .stringAttributeType, optional: true),
             attribute(StageEventField.createdAt, type: .doubleAttributeType, defaultValue: 0.0),
             attribute(StageEventField.revision, type: .integer64AttributeType, defaultValue: 0),
@@ -13544,21 +13838,33 @@ private enum IpadShortcutStageExecutor {
     private static func performWithStore(action: IpadShortcutStageAction, bootstrap: StoreBootstrapInfo) async -> String {
         let store = bootstrap.store
         let now = Date()
-        let dayKey = IntentActiveSessionStore.dayKey(for: now)
+        SessionAnchorStore.clearIfDayChanged(now: now)
+        let dayKey = SessionAnchorStore.dayKey(for: now)
+        let revision = Int64(now.timeIntervalSince1970 * 1000)
         let storeUsed = storeUsed(for: bootstrap.mode).rawValue
-        let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let rawDeviceId = UIDevice.current.identifierForVendor?.uuidString ?? sourceDevice
+        let deviceSuffix = String(rawDeviceId.replacingOccurrences(of: "-", with: "").suffix(6))
+        let eventDeviceId = deviceSuffix.isEmpty ? sourceDevice : deviceSuffix
+        let anchorSessionId = SessionAnchorStore.ensureAnchorSessionId(for: now, deviceIdSuffix: eventDeviceId)
+        IntentActiveSessionStore.write(anchorSessionId, updatedAt: now, revision: revision)
         let stageAfter = eventStageValue(for: action)
+        let eventId = "\(eventDeviceId)-\(revision)-\(stageAfter)"
+        let stageBefore = store.sessionRecord(for: anchorSessionId)?.stage ?? "none"
+        let didCreateSession = false
 
         guard let event = await store.enqueuePendingStageEvent(
+            eventId: eventId,
             stageAfter: stageAfter,
+            anchorSessionId: anchorSessionId,
             sourceDevice: sourceDevice,
-            createdAt: now
+            createdAt: now,
+            revision: revision
         ) else {
             let message = "事件入队失败，请稍后重试"
             IpadShortcutStageQueueStorage.recordLastRun(
                 action: action,
                 requestedStage: action.rawValue,
-                targetSessionId: nil,
+                targetSessionId: anchorSessionId,
                 eventId: nil,
                 eventStatus: "failed",
                 eventNote: message,
@@ -13569,12 +13875,13 @@ private enum IpadShortcutStageExecutor {
                 "storeUsed=\(storeUsed)",
                 "cloudReason=\(bootstrap.cloudReason)",
                 "dayKey=\(dayKey)",
-                "anchorSessionId=\(anchorBeforeSessionId)",
-                "targetSessionId=nil",
+                "anchorSessionId=\(anchorSessionId)",
+                "targetSessionId=\(anchorSessionId)",
                 "recordsFound=0",
-                "didCreateNewSession=false",
-                "stageBefore=unknown",
+                "didCreateSession=\(didCreateSession ? "true" : "false")",
+                "stageBefore=\(stageBefore)",
                 "stageAfter=\(stageAfter)",
+                "eventId=\(eventId)",
                 "note=\(message)"
             ]
             .joined(separator: " ")
@@ -13583,14 +13890,24 @@ private enum IpadShortcutStageExecutor {
         let ackNote = bootstrap.mode == .localOnly
             ? normalizedError(bootstrap.warning ?? "已入队，等待 iPhone 应用")
             : "已入队，等待 iPhone 应用"
-        let anchorAfterSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let shortcutNote: String
+        switch action {
+        case .startSelecting, .endSession:
+            shortcutNote = "\(ackNote)；若无进行中会话将提示：请先开始拍摄"
+        case .startShooting:
+            shortcutNote = ackNote
+        }
+        if action == .endSession {
+            SessionAnchorStore.clearAnchor()
+            IntentActiveSessionStore.clearShortcutChain()
+        }
         IpadShortcutStageQueueStorage.recordLastRun(
             action: action,
             requestedStage: action.rawValue,
-            targetSessionId: nil,
+            targetSessionId: anchorSessionId,
             eventId: event.id,
             eventStatus: event.status,
-            eventNote: event.note ?? ackNote,
+            eventNote: event.note ?? shortcutNote,
             result: "queued",
             error: nil
         )
@@ -13598,15 +13915,15 @@ private enum IpadShortcutStageExecutor {
             "storeUsed=\(storeUsed)",
             "cloudReason=\(bootstrap.cloudReason)",
             "dayKey=\(event.dayKey)",
-            "anchorSessionId=\(anchorAfterSessionId)",
-            "targetSessionId=nil",
+            "anchorSessionId=\(event.anchorSessionId)",
+            "targetSessionId=\(event.anchorSessionId)",
             "recordsFound=0",
-            "didCreateNewSession=false",
-            "stageBefore=queue_only",
+            "didCreateSession=\(didCreateSession ? "true" : "false")",
+            "stageBefore=\(stageBefore)",
             "stageAfter=\(event.stageAfter)",
             "eventId=\(event.id)",
             "status=\(event.status)",
-            "note=\(ackNote)"
+            "note=\(shortcutNote)"
         ].joined(separator: " ")
     }
 
@@ -13617,14 +13934,14 @@ private enum IpadShortcutStageExecutor {
         stickyStoreUsed: IntentActiveSessionStore.ShortcutAnchorStoreUsed?
     ) -> String {
         let now = Date()
-        let dayKey = IntentActiveSessionStore.dayKey(for: now)
-        let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let dayKey = SessionAnchorStore.dayKey(for: now)
+        let anchorBeforeSessionId = SessionAnchorStore.loadAnchor()?.sessionId ?? "nil"
         let storeUsedLabel = stickyStoreUsed?.rawValue ?? "unavailable"
         let message = normalizedError("存储初始化失败，无法入队。\(bootstrapError)")
         IpadShortcutStageQueueStorage.recordLastRun(
             action: action,
             requestedStage: action.rawValue,
-            targetSessionId: nil,
+            targetSessionId: anchorBeforeSessionId == "nil" ? nil : anchorBeforeSessionId,
             eventId: nil,
             eventStatus: "failed",
             eventNote: message,
@@ -13633,15 +13950,15 @@ private enum IpadShortcutStageExecutor {
         )
         return [
             "storeUsed=\(storeUsedLabel)",
-            "cloudReason=\(cloudReason)",
-            "dayKey=\(dayKey)",
-            "anchorSessionId=\(anchorBeforeSessionId)",
-            "targetSessionId=nil",
-            "recordsFound=0",
-            "didCreateNewSession=false",
-            "stageBefore=queue_only",
-            "stageAfter=\(eventStageValue(for: action))",
-            "note=\(message)"
+                "cloudReason=\(cloudReason)",
+                "dayKey=\(dayKey)",
+                "anchorSessionId=\(anchorBeforeSessionId)",
+                "targetSessionId=nil",
+                "recordsFound=0",
+                "didCreateSession=false",
+                "stageBefore=unknown",
+                "stageAfter=\(eventStageValue(for: action))",
+                "note=\(message)"
         ].joined(separator: " ")
     }
 
