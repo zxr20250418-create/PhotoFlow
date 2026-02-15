@@ -166,10 +166,16 @@ private enum IntentActiveSessionStore {
         let updatedAt: TimeInterval
     }
 
-    private static let activeSessionIdKey = "pf_intent_active_session_id_v1"
-    private static let activeSessionRevisionKey = "pf_intent_active_session_revision_v1"
-    private static let activeSessionUpdatedAtKey = "pf_intent_active_session_updated_at_v1"
-    private static let activeSessionDayKey = "pf_intent_active_session_day_key_v1"
+    enum ShortcutAnchorStoreUsed: String, Codable {
+        case local
+        case cloud
+    }
+
+    private static let activeSessionIdKey = "shortcut_anchor_session_id"
+    private static let activeSessionRevisionKey = "shortcut_anchor_revision"
+    private static let activeSessionUpdatedAtKey = "shortcut_anchor_updated_at"
+    private static let activeSessionDayKey = "shortcut_anchor_day_key"
+    private static let activeSessionStoreUsedKey = "shortcut_anchor_store_used"
 
     private static let dayKeyFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -233,6 +239,26 @@ private enum IntentActiveSessionStore {
         defaults.removeObject(forKey: activeSessionUpdatedAtKey)
     }
 
+    static func loadAnchorStoreUsed() -> ShortcutAnchorStoreUsed? {
+        guard let rawValue = normalized(defaults.string(forKey: activeSessionStoreUsedKey)) else {
+            return nil
+        }
+        return ShortcutAnchorStoreUsed(rawValue: rawValue)
+    }
+
+    static func saveAnchorStoreUsed(_ storeUsed: ShortcutAnchorStoreUsed?) {
+        guard let storeUsed else {
+            defaults.removeObject(forKey: activeSessionStoreUsedKey)
+            return
+        }
+        defaults.set(storeUsed.rawValue, forKey: activeSessionStoreUsedKey)
+    }
+
+    static func clearShortcutChain() {
+        clearAnchor()
+        saveAnchorStoreUsed(nil)
+    }
+
     static func read() -> String? {
         loadAnchor()?.sessionId
     }
@@ -274,7 +300,7 @@ private enum IntentActiveSessionStore {
 
     static func clearIfMatches(_ sessionId: String) {
         guard let active = read(), active == sessionId else { return }
-        clearAnchor()
+        clearShortcutChain()
     }
 
     static func updateFromSessionTiming(
@@ -1332,6 +1358,65 @@ final class CloudDataStore: ObservableObject {
         return .failed(error: localError)
     }
 
+    static func bootstrap(modePreference: BootMode?) async -> BootResult {
+        switch modePreference {
+        case .cloud:
+            return await bootstrapForcedCloud()
+        case .localOnly:
+            return await bootstrapForcedLocal()
+        case .none:
+            return await bootstrapWithFallback()
+        }
+    }
+
+    private static func bootstrapForcedCloud() async -> BootResult {
+        let decision = cloudBootDecision()
+        guard decision.cloudEnabled else {
+            return .failed(error: "forced cloud unavailable: \(decision.reason.rawValue)")
+        }
+        let model = makeModel()
+        let cloudContainer = makeContainer(model: model, enableCloud: true)
+        let cloudLoad = await loadStoresAsync(container: cloudContainer)
+        guard cloudLoad.success else {
+            let detail = cloudLoad.error.map { formatError($0) } ?? "unknown"
+            return .failed(error: "forced cloud load failed: \(detail)")
+        }
+        let setup = ContainerSetup(
+            container: cloudContainer,
+            cloudEnabled: true,
+            storeCloudEnabled: true,
+            loadError: cloudLoad.error
+        )
+        return .ready(
+            store: CloudDataStore(setup: setup),
+            mode: .cloud,
+            reason: "forced_cloud",
+            warning: nil
+        )
+    }
+
+    private static func bootstrapForcedLocal() async -> BootResult {
+        let model = makeModel()
+        let localContainer = makeContainer(model: model, enableCloud: false)
+        let localLoad = await loadStoresAsync(container: localContainer)
+        guard localLoad.success else {
+            let detail = localLoad.error.map { formatError($0) } ?? "unknown"
+            return .failed(error: "forced local load failed: \(detail)")
+        }
+        let setup = ContainerSetup(
+            container: localContainer,
+            cloudEnabled: false,
+            storeCloudEnabled: false,
+            loadError: localLoad.error
+        )
+        return .ready(
+            store: CloudDataStore(setup: setup),
+            mode: .localOnly,
+            reason: "forced_local",
+            warning: nil
+        )
+    }
+
     func sessionRecord(for sessionId: String) -> SessionRecord? {
         sessionRecords.first { $0.id == sessionId }
     }
@@ -1344,6 +1429,7 @@ final class CloudDataStore: ObservableObject {
         weeklyReviews[weekKey]
     }
 
+    @discardableResult
     func upsertSessionTiming(
         sessionId: String,
         stage: String,
@@ -1353,19 +1439,19 @@ final class CloudDataStore: ObservableObject {
         revision: Int64? = nil,
         updatedAt: Date = Date(),
         sourceDevice: String? = nil
-    ) {
+    ) -> Bool {
         guard !sessionId.isEmpty else {
             assertionFailure("sessionId is required")
-            return
+            return false
         }
         if isSessionDeleted(sessionId) {
-            return
+            return false
         }
         let source = sourceDevice ?? localSourceDevice
         let record = fetchSessionManagedObject(sessionId: sessionId)
         let existingDeleted = boolValue(record, key: SessionField.isDeleted)
         if existingDeleted {
-            return
+            return false
         }
         let existingRevision = int64Value(record, key: SessionField.revision)
         let existingSource = stringValue(record, key: SessionField.sourceDevice, fallback: "unknown")
@@ -1375,7 +1461,7 @@ final class CloudDataStore: ObservableObject {
             incomingSource: source,
             existingRevision: existingRevision,
             existingSource: existingSource
-        ) else { return }
+        ) else { return false }
         let target = record ?? NSEntityDescription.insertNewObject(forEntityName: EntityName.session, into: context)
         target.setValue(sessionId, forKey: SessionField.sessionId)
         target.setValue(stage, forKey: SessionField.stage)
@@ -1393,7 +1479,9 @@ final class CloudDataStore: ObservableObject {
             target.setValue(existingVoided, forKey: SessionField.isVoided)
             setSessionDeleted(existingDeleted, on: target)
         }
-        if saveContext() {
+        let hasPendingChanges = context.hasChanges
+        let didPersist = !hasPendingChanges || saveContext()
+        if didPersist {
             IntentActiveSessionStore.updateFromSessionTiming(
                 sessionId: sessionId,
                 stage: stage,
@@ -1402,6 +1490,7 @@ final class CloudDataStore: ObservableObject {
                 updatedAt: updatedAt
             )
         }
+        return didPersist
     }
 
     func updateSessionMeta(
@@ -4398,6 +4487,10 @@ struct ContentView: View {
         activeSessionId?.isEmpty == false ? (activeSessionId ?? "—") : "—"
     }
 
+    private func anchorStoreUsedText() -> String {
+        IntentActiveSessionStore.loadAnchorStoreUsed()?.rawValue ?? "—"
+    }
+
     private func shortcutLastRequestedStageText() -> String {
         if let stage = shortcutLastRun.lastShortcutRequestedStage, !stage.isEmpty {
             return stage
@@ -5979,6 +6072,9 @@ struct ContentView: View {
             Text("Last Shortcut Run")
                 .font(.headline)
             Text("anchorSessionId: \(activeSessionIdText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("anchorStoreUsed: \(anchorStoreUsedText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastShortcutAt: \(shortcutLastRunAtText())")
@@ -12813,15 +12909,15 @@ private enum IpadShortcutStageExecutor {
     private static let noActiveSessionMessage = "未找到进行中会话，请先运行开始拍摄"
 
     private enum TargetDecision {
-        case useExisting(sessionId: String)
-        case createNew(sessionId: String, note: String)
-        case reject(message: String)
+        case useExisting(sessionId: String, recordsFound: Int, stageBefore: String)
+        case createNew(sessionId: String, note: String, recordsFound: Int, stageBefore: String)
+        case reject(message: String, recordsFound: Int, stageBefore: String)
 
         var targetSessionId: String? {
             switch self {
-            case .useExisting(let sessionId):
+            case .useExisting(let sessionId, _, _):
                 return sessionId
-            case .createNew(let sessionId, _):
+            case .createNew(let sessionId, _, _, _):
                 return sessionId
             case .reject:
                 return nil
@@ -12830,10 +12926,41 @@ private enum IpadShortcutStageExecutor {
 
         var note: String? {
             switch self {
-            case .createNew(_, let note):
+            case .createNew(_, let note, _, _):
                 return note
             case .useExisting, .reject:
                 return nil
+            }
+        }
+
+        var didCreateNewSession: Bool {
+            switch self {
+            case .createNew:
+                return true
+            case .useExisting, .reject:
+                return false
+            }
+        }
+
+        var recordsFound: Int {
+            switch self {
+            case .useExisting(_, let recordsFound, _):
+                return recordsFound
+            case .createNew(_, _, let recordsFound, _):
+                return recordsFound
+            case .reject(_, let recordsFound, _):
+                return recordsFound
+            }
+        }
+
+        var stageBefore: String {
+            switch self {
+            case .useExisting(_, _, let stageBefore):
+                return stageBefore
+            case .createNew(_, _, _, let stageBefore):
+                return stageBefore
+            case .reject(_, _, let stageBefore):
+                return stageBefore
             }
         }
     }
@@ -12847,6 +12974,8 @@ private enum IpadShortcutStageExecutor {
 
     private struct StoreBootstrapFailure: LocalizedError {
         let detail: String
+        let cloudReason: String
+        let stickyStoreUsed: IntentActiveSessionStore.ShortcutAnchorStoreUsed?
 
         var errorDescription: String? {
             detail.isEmpty ? "存储初始化失败" : detail
@@ -12888,15 +13017,21 @@ private enum IpadShortcutStageExecutor {
     }
 
     static func perform(action: IpadShortcutStageAction) async -> String {
-        let bootstrapResult = await loadStore()
+        let stickyStoreUsed = IntentActiveSessionStore.loadAnchorStoreUsed()
+        let bootstrapResult = await loadStore(storePreference: stickyStoreUsed)
         switch bootstrapResult {
         case .success(let bootstrap):
+            if stickyStoreUsed == nil {
+                IntentActiveSessionStore.saveAnchorStoreUsed(storeUsed(for: bootstrap.mode))
+            }
             return performWithStore(action: action, bootstrap: bootstrap)
 
         case .failure(let failure):
             return performWithoutStore(
                 action: action,
-                bootstrapError: failure.errorDescription ?? "存储初始化失败"
+                bootstrapError: failure.errorDescription ?? "存储初始化失败",
+                cloudReason: failure.cloudReason,
+                stickyStoreUsed: failure.stickyStoreUsed
             )
         }
     }
@@ -12905,12 +13040,12 @@ private enum IpadShortcutStageExecutor {
         let store = bootstrap.store
         let now = Date()
         let dayKey = IntentActiveSessionStore.dayKey(for: now)
-        let storeUsed = bootstrap.mode == .cloud ? "cloud" : "local"
+        let storeUsed = storeUsed(for: bootstrap.mode).rawValue
         let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
         store.refreshFromStore()
         let decision = resolveTargetDecision(action: action, records: store.sessionRecords, now: now)
         switch decision {
-        case .reject(let message):
+        case .reject(let message, let recordsFound, let stageBefore):
             IpadShortcutStageQueueStorage.recordLastRun(
                 action: action,
                 requestedStage: action.rawValue,
@@ -12924,12 +13059,16 @@ private enum IpadShortcutStageExecutor {
                 "dayKey=\(dayKey)",
                 "anchorSessionId=\(anchorBeforeSessionId)",
                 "targetSessionId=nil",
-                "stage=\(stageValue(for: action))",
+                "recordsFound=\(recordsFound)",
+                "didCreateNewSession=false",
+                "stageBefore=\(stageBefore)",
+                "stageAfter=\(stageValue(for: action))",
                 "note=\(message)"
             ]
             .joined(separator: " ")
 
-        case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
+        case .useExisting(let targetSessionId, let recordsFound, let stageBefore),
+                .createNew(let targetSessionId, _, let recordsFound, let stageBefore):
             IntentActiveSessionStore.write(targetSessionId, updatedAt: now)
 
             let enqueuedEvent = IpadShortcutStageQueueStorage.enqueue(
@@ -12953,7 +13092,7 @@ private enum IpadShortcutStageExecutor {
                 }
 
                 if action == .endSession {
-                    IntentActiveSessionStore.clear()
+                    IntentActiveSessionStore.clearShortcutChain()
                 } else {
                     IntentActiveSessionStore.write(applied.sessionId, updatedAt: now, revision: applied.revision)
                 }
@@ -12974,7 +13113,10 @@ private enum IpadShortcutStageExecutor {
                     "anchorSessionId=\(anchorAfterSessionId)",
                     "targetSessionId=\(applied.targetSessionId)",
                     "sessionId=\(applied.sessionId)",
-                    "stage=\(applied.stage)",
+                    "recordsFound=\(recordsFound)",
+                    "didCreateNewSession=\(decision.didCreateNewSession ? "true" : "false")",
+                    "stageBefore=\(stageBefore)",
+                    "stageAfter=\(applied.stage)",
                     "revision=\(applied.revision)",
                     "note=\(noteText)"
                 ]
@@ -13002,7 +13144,10 @@ private enum IpadShortcutStageExecutor {
                 "anchorSessionId=\(anchorQueuedSessionId)",
                 "targetSessionId=\(enqueuedEvent.targetSessionId ?? "nil")",
                 "sessionId=pending",
-                "stage=\(stageValue(for: action))",
+                "recordsFound=\(recordsFound)",
+                "didCreateNewSession=\(decision.didCreateNewSession ? "true" : "false")",
+                "stageBefore=\(stageBefore)",
+                "stageAfter=\(stageValue(for: action))",
                 "revision=\(enqueuedEvent.revision)",
                 "note=\(reason)"
             ]
@@ -13010,13 +13155,19 @@ private enum IpadShortcutStageExecutor {
         }
     }
 
-    private static func performWithoutStore(action: IpadShortcutStageAction, bootstrapError: String) -> String {
+    private static func performWithoutStore(
+        action: IpadShortcutStageAction,
+        bootstrapError: String,
+        cloudReason: String,
+        stickyStoreUsed: IntentActiveSessionStore.ShortcutAnchorStoreUsed?
+    ) -> String {
         let now = Date()
         let dayKey = IntentActiveSessionStore.dayKey(for: now)
         let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
         let decision = resolveTargetDecisionWithoutRecords(action: action, now: now)
+        let storeUsedLabel = stickyStoreUsed?.rawValue ?? "unavailable"
         switch decision {
-        case .reject(let message):
+        case .reject(let message, let recordsFound, let stageBefore):
             IpadShortcutStageQueueStorage.recordLastRun(
                 action: action,
                 requestedStage: action.rawValue,
@@ -13025,17 +13176,21 @@ private enum IpadShortcutStageExecutor {
                 error: message
             )
             return [
-                "storeUsed=unavailable",
-                "cloudReason=bootstrap_failed",
+                "storeUsed=\(storeUsedLabel)",
+                "cloudReason=\(cloudReason)",
                 "dayKey=\(dayKey)",
                 "anchorSessionId=\(anchorBeforeSessionId)",
                 "targetSessionId=nil",
-                "stage=\(stageValue(for: action))",
+                "recordsFound=\(recordsFound)",
+                "didCreateNewSession=false",
+                "stageBefore=\(stageBefore)",
+                "stageAfter=\(stageValue(for: action))",
                 "note=\(message)"
             ]
             .joined(separator: " ")
 
-        case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
+        case .useExisting(let targetSessionId, let recordsFound, let stageBefore),
+                .createNew(let targetSessionId, _, let recordsFound, let stageBefore):
             IntentActiveSessionStore.write(targetSessionId, updatedAt: now)
             let enqueuedEvent = IpadShortcutStageQueueStorage.enqueue(
                 action: action,
@@ -13057,13 +13212,16 @@ private enum IpadShortcutStageExecutor {
                 error: reason
             )
             return [
-                "storeUsed=unavailable",
-                "cloudReason=bootstrap_failed",
+                "storeUsed=\(storeUsedLabel)",
+                "cloudReason=\(cloudReason)",
                 "dayKey=\(dayKey)",
                 "anchorSessionId=\(anchorQueuedSessionId)",
                 "targetSessionId=\(targetSessionId)",
                 "sessionId=pending",
-                "stage=\(stageValue(for: action))",
+                "recordsFound=\(recordsFound)",
+                "didCreateNewSession=\(decision.didCreateNewSession ? "true" : "false")",
+                "stageBefore=\(stageBefore)",
+                "stageAfter=\(stageValue(for: action))",
                 "revision=\(enqueuedEvent.revision)",
                 "note=\(reason)"
             ]
@@ -13076,22 +13234,41 @@ private enum IpadShortcutStageExecutor {
         records: [CloudDataStore.SessionRecord],
         now: Date
     ) -> TargetDecision {
-        let activePointer = IntentActiveSessionStore.read()
-        if let globalTarget = IntentActiveSessionStore.resolveTargetSessionId(
-            preferred: activePointer,
-            records: records,
-            now: now
-        ) {
-            return .useExisting(sessionId: globalTarget)
+        let today = IntentActiveSessionStore.dayKey(for: now)
+        let winners = winningSessionRecords(records)
+        if action != .startShooting,
+           let anchor = IntentActiveSessionStore.loadAnchor(),
+           anchor.dayKey == today,
+           let exact = winners[anchor.sessionId],
+           isInProgressRecord(exact, dayKey: today) {
+            return .useExisting(sessionId: anchor.sessionId, recordsFound: 1, stageBefore: exact.stage)
         }
-        if let fallback = IntentActiveSessionStore.resolveFallbackInProgressSessionId(records: records, now: now) {
-            return .useExisting(sessionId: fallback)
+        if action == .startShooting,
+           let anchor = IntentActiveSessionStore.loadAnchor(),
+           anchor.dayKey == today,
+           let exact = winners[anchor.sessionId],
+           isInProgressRecord(exact, dayKey: today) {
+            return .useExisting(sessionId: anchor.sessionId, recordsFound: 1, stageBefore: exact.stage)
+        }
+        if let fallback = latestInProgressRecord(from: Array(winners.values), dayKey: today) {
+            IntentActiveSessionStore.saveAnchor(
+                dayKey: today,
+                sessionId: fallback.id,
+                revision: fallback.revision,
+                updatedAt: fallback.updatedAt.timeIntervalSince1970
+            )
+            return .useExisting(sessionId: fallback.id, recordsFound: 1, stageBefore: fallback.stage)
         }
         if action == .startShooting {
             let createdId = makeSessionId(now: now, existingIds: Set(records.map(\.id)))
-            return .createNew(sessionId: createdId, note: "已创建新会话")
+            return .createNew(
+                sessionId: createdId,
+                note: "已创建新会话",
+                recordsFound: 0,
+                stageBefore: "none"
+            )
         }
-        return .reject(message: noActiveSessionMessage)
+        return .reject(message: noActiveSessionMessage, recordsFound: 0, stageBefore: "none")
     }
 
     private static func resolveTargetDecisionWithoutRecords(
@@ -13102,13 +13279,63 @@ private enum IpadShortcutStageExecutor {
         if let anchor = IntentActiveSessionStore.loadAnchor(),
            anchor.dayKey == today,
            !anchor.sessionId.isEmpty {
-            return .useExisting(sessionId: anchor.sessionId)
+            return .useExisting(sessionId: anchor.sessionId, recordsFound: 1, stageBefore: "unknown")
         }
         if action == .startShooting {
             let createdId = makeSessionId(now: now, existingIds: Set<String>())
-            return .createNew(sessionId: createdId, note: "已创建新会话")
+            return .createNew(
+                sessionId: createdId,
+                note: "已创建新会话",
+                recordsFound: 0,
+                stageBefore: "none"
+            )
         }
-        return .reject(message: noActiveSessionMessage)
+        return .reject(message: noActiveSessionMessage, recordsFound: 0, stageBefore: "none")
+    }
+
+    private static func winningSessionRecords(
+        _ records: [CloudDataStore.SessionRecord]
+    ) -> [String: CloudDataStore.SessionRecord] {
+        var winners: [String: CloudDataStore.SessionRecord] = [:]
+        for record in records {
+            if let existing = winners[record.id] {
+                if record.revision > existing.revision ||
+                    (record.revision == existing.revision && record.updatedAt > existing.updatedAt) {
+                    winners[record.id] = record
+                }
+            } else {
+                winners[record.id] = record
+            }
+        }
+        return winners
+    }
+
+    private static func latestInProgressRecord(
+        from records: [CloudDataStore.SessionRecord],
+        dayKey: String
+    ) -> CloudDataStore.SessionRecord? {
+        records
+            .filter { isInProgressRecord($0, dayKey: dayKey) }
+            .max { lhs, rhs in
+                if lhs.revision == rhs.revision {
+                    return lhs.updatedAt < rhs.updatedAt
+                }
+                return lhs.revision < rhs.revision
+            }
+    }
+
+    private static func isInProgressRecord(
+        _ record: CloudDataStore.SessionRecord,
+        dayKey: String
+    ) -> Bool {
+        let stage = record.stage.lowercased()
+        let recordDayKey = IntentActiveSessionStore.dayKey(for: record.shootingStart ?? record.selectingStart ?? record.updatedAt)
+        return !record.isDeleted &&
+            !record.isVoided &&
+            record.endedAt == nil &&
+            stage != WatchSyncStore.StageSyncKey.stageStopped.lowercased() &&
+            stage != "ended" &&
+            recordDayKey == dayKey
     }
 
     static func flushQueuedEvents(using store: CloudDataStore, trigger: String) -> FlushResult {
@@ -13131,6 +13358,7 @@ private enum IpadShortcutStageExecutor {
         var appliedByEventId: [String: AppliedEventInfo] = [:]
         var lastError: String?
         var droppedCount = 0
+        var remainingQueue: [IpadShortcutStageEvent] = []
 
         for event in queue {
             guard let action = event.resolvedAction else {
@@ -13146,30 +13374,43 @@ private enum IpadShortcutStageExecutor {
             if let applied {
                 appliedByEventId[event.eventId] = applied
             } else {
+                remainingQueue.append(event)
                 droppedCount += 1
-                lastError = "存在无法应用的快捷指令事件，已丢弃。"
+                lastError = "存在暂时无法应用的快捷指令事件，已保留待重试。"
             }
         }
 
-        IpadShortcutStageQueueStorage.replaceQueue([])
+        IpadShortcutStageQueueStorage.replaceQueue(remainingQueue)
         runtimeLog("shortcut", "flush", extra: [
             "trigger": trigger,
             "applied": "\(appliedByEventId.count)",
-            "pending": "0",
+            "pending": "\(remainingQueue.count)",
             "dropped": "\(droppedCount)",
             "error": lastError ?? ""
         ])
 
         return FlushResult(
             appliedCount: appliedByEventId.count,
-            pendingCount: 0,
+            pendingCount: remainingQueue.count,
             lastError: lastError,
             appliedByEventId: appliedByEventId
         )
     }
 
-    private static func loadStore() async -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
-        let result = await CloudDataStore.bootstrapWithFallback()
+    private static func loadStore(
+        storePreference: IntentActiveSessionStore.ShortcutAnchorStoreUsed?
+    ) async -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
+        let bootModePreference: CloudDataStore.BootMode?
+        switch storePreference {
+        case .cloud:
+            bootModePreference = .cloud
+        case .local:
+            bootModePreference = .localOnly
+        case .none:
+            bootModePreference = nil
+        }
+
+        let result = await CloudDataStore.bootstrap(modePreference: bootModePreference)
         switch result {
         case .ready(let store, let mode, let reason, let warning):
             return .success(
@@ -13181,8 +13422,26 @@ private enum IpadShortcutStageExecutor {
                 )
             )
         case .failed(let error):
-            return .failure(StoreBootstrapFailure(detail: error))
+            let reason: String
+            if let sticky = storePreference {
+                reason = "sticky_\(sticky.rawValue)"
+            } else {
+                reason = "bootstrap_failed"
+            }
+            return .failure(
+                StoreBootstrapFailure(
+                    detail: error,
+                    cloudReason: reason,
+                    stickyStoreUsed: storePreference
+                )
+            )
         }
+    }
+
+    private static func storeUsed(
+        for mode: CloudDataStore.BootMode
+    ) -> IntentActiveSessionStore.ShortcutAnchorStoreUsed {
+        mode == .cloud ? .cloud : .local
     }
 
     private static func applyQueuedEvent(
@@ -13221,7 +13480,7 @@ private enum IpadShortcutStageExecutor {
         switch action {
         case .startShooting:
             let shootingStart = state.shootingStart ?? eventTime
-            store.upsertSessionTiming(
+            let persisted = store.upsertSessionTiming(
                 sessionId: sessionId,
                 stage: WatchSyncStore.StageSyncKey.stageShooting,
                 shootingStart: shootingStart,
@@ -13231,6 +13490,7 @@ private enum IpadShortcutStageExecutor {
                 updatedAt: eventTime,
                 sourceDevice: sourceDevice
             )
+            guard persisted else { return nil }
             state.shootingStart = shootingStart
             state.endedAt = nil
             state.stage = WatchSyncStore.StageSyncKey.stageShooting
@@ -13238,7 +13498,7 @@ private enum IpadShortcutStageExecutor {
         case .startSelecting:
             let shootingStart = state.shootingStart ?? eventTime
             let selectingStart = state.selectingStart ?? eventTime
-            store.upsertSessionTiming(
+            let persisted = store.upsertSessionTiming(
                 sessionId: sessionId,
                 stage: WatchSyncStore.StageSyncKey.stageSelecting,
                 shootingStart: shootingStart,
@@ -13248,6 +13508,7 @@ private enum IpadShortcutStageExecutor {
                 updatedAt: eventTime,
                 sourceDevice: sourceDevice
             )
+            guard persisted else { return nil }
             state.shootingStart = shootingStart
             state.selectingStart = selectingStart
             state.endedAt = nil
@@ -13256,7 +13517,7 @@ private enum IpadShortcutStageExecutor {
         case .endSession:
             let shootingStart = state.shootingStart ?? state.selectingStart ?? eventTime
             let selectingStart = state.selectingStart
-            store.upsertSessionTiming(
+            let persisted = store.upsertSessionTiming(
                 sessionId: sessionId,
                 stage: WatchSyncStore.StageSyncKey.stageStopped,
                 shootingStart: shootingStart,
@@ -13266,6 +13527,7 @@ private enum IpadShortcutStageExecutor {
                 updatedAt: eventTime,
                 sourceDevice: sourceDevice
             )
+            guard persisted else { return nil }
             state.shootingStart = shootingStart
             state.selectingStart = selectingStart
             state.endedAt = eventTime
@@ -13277,7 +13539,7 @@ private enum IpadShortcutStageExecutor {
         sessionStates[sessionId] = state
 
         if action == .endSession {
-            IntentActiveSessionStore.clear()
+            IntentActiveSessionStore.clearShortcutChain()
         } else {
             IntentActiveSessionStore.write(sessionId, updatedAt: eventTime, revision: nextRevision)
         }
