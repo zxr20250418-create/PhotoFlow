@@ -153,6 +153,150 @@ private func encodeDailyReviewNote(notesAll: String?, aiSummary: DailyReviewAiSu
 }
 
 @MainActor
+private enum ActiveSessionPointerStore {
+    private static let defaults = UserDefaults.standard
+    private static let activeSessionIdKey = "pf_active_session_id_v1"
+    private static let lastEndedSessionIdKey = "pf_last_ended_session_id_v1"
+
+    static func read() -> String? {
+        normalized(defaults.string(forKey: activeSessionIdKey))
+    }
+
+    static func write(_ sessionId: String?) {
+        if let sessionId = normalized(sessionId) {
+            defaults.set(sessionId, forKey: activeSessionIdKey)
+        } else {
+            defaults.removeObject(forKey: activeSessionIdKey)
+        }
+    }
+
+    static func readLastEndedSessionId() -> String? {
+        normalized(defaults.string(forKey: lastEndedSessionIdKey))
+    }
+
+    static func clearIfMatches(_ sessionId: String) {
+        if let active = read(), active == sessionId {
+            write(nil)
+        }
+        if let ended = readLastEndedSessionId(), ended == sessionId {
+            defaults.removeObject(forKey: lastEndedSessionIdKey)
+        }
+    }
+
+    static func updateFromSessionTiming(sessionId: String, stage: String, endedAt: Date?) {
+        write(sessionId)
+        if endedAt != nil || isEndedStage(stage) {
+            defaults.set(sessionId, forKey: lastEndedSessionIdKey)
+        }
+    }
+
+    static func reconcile(with records: [CloudDataStore.SessionRecord]) {
+        if let pointer = read(),
+           isKnownSession(pointer, records: records) {
+            return
+        }
+        write(latestActiveSessionId(from: records))
+        if let ended = readLastEndedSessionId(),
+           !isKnownSession(ended, records: records) {
+            defaults.removeObject(forKey: lastEndedSessionIdKey)
+        }
+    }
+
+    static func resolveTargetSessionId(
+        preferred pointer: String?,
+        records: [CloudDataStore.SessionRecord]
+    ) -> String? {
+        if let pointer = normalized(pointer),
+           isEligibleActiveSession(pointer, records: records) {
+            return pointer
+        }
+        return latestActiveSessionId(from: records)
+    }
+
+    private static func latestActiveSessionId(from records: [CloudDataStore.SessionRecord]) -> String? {
+        records
+            .filter { record in
+                !record.isDeleted &&
+                !record.isVoided &&
+                record.endedAt == nil &&
+                !isEndedStage(record.stage)
+            }
+            .max { lhs, rhs in
+                if lhs.updatedAt == rhs.updatedAt {
+                    return lhs.revision < rhs.revision
+                }
+                return lhs.updatedAt < rhs.updatedAt
+            }?
+            .id
+    }
+
+    private static func isEligibleActiveSession(_ sessionId: String, records: [CloudDataStore.SessionRecord]) -> Bool {
+        guard let record = records.first(where: { $0.id == sessionId }) else {
+            return false
+        }
+        return !record.isDeleted &&
+            !record.isVoided &&
+            record.endedAt == nil &&
+            !isEndedStage(record.stage)
+    }
+
+    private static func isKnownSession(_ sessionId: String, records: [CloudDataStore.SessionRecord]) -> Bool {
+        guard let record = records.first(where: { $0.id == sessionId }) else {
+            return false
+        }
+        return !record.isDeleted && !record.isVoided
+    }
+
+    private static func isEndedStage(_ stage: String) -> Bool {
+        let normalizedStage = stage.lowercased()
+        if normalizedStage == WatchSyncStore.StageSyncKey.stageStopped.lowercased() {
+            return true
+        }
+        return normalizedStage == "ended" || normalizedStage == "end"
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+@MainActor
+private enum ShortcutSessionPointerStore {
+    private static let defaults = UserDefaults.standard
+    private static let lastRequestedStageKey = "pf_shortcut_last_requested_stage_v1"
+    private static let lastTargetSessionIdKey = "pf_shortcut_last_target_session_id_v1"
+
+    static func writeLastShortcutMetadata(requestedStage: String?, targetSessionId: String?) {
+        if let requestedStage = normalized(requestedStage) {
+            defaults.set(requestedStage, forKey: lastRequestedStageKey)
+        } else {
+            defaults.removeObject(forKey: lastRequestedStageKey)
+        }
+        if let targetSessionId = normalized(targetSessionId) {
+            defaults.set(targetSessionId, forKey: lastTargetSessionIdKey)
+        } else {
+            defaults.removeObject(forKey: lastTargetSessionIdKey)
+        }
+    }
+
+    static func readLastShortcutRequestedStage() -> String? {
+        normalized(defaults.string(forKey: lastRequestedStageKey))
+    }
+
+    static func readLastShortcutTargetSessionId() -> String? {
+        normalized(defaults.string(forKey: lastTargetSessionIdKey))
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+@MainActor
 final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     fileprivate enum StageSyncKey {
         static let stage = "pf_widget_stage"
@@ -1073,7 +1217,13 @@ final class CloudDataStore: ObservableObject {
             target.setValue(existingVoided, forKey: SessionField.isVoided)
             setSessionDeleted(existingDeleted, on: target)
         }
-        saveContext()
+        if saveContext() {
+            ActiveSessionPointerStore.updateFromSessionTiming(
+                sessionId: sessionId,
+                stage: stage,
+                endedAt: endedAt
+            )
+        }
     }
 
     func updateSessionMeta(
@@ -1168,7 +1318,9 @@ final class CloudDataStore: ObservableObject {
         if record == nil {
             target.setValue(Self.defaultStage, forKey: SessionField.stage)
         }
-        saveContext()
+        if saveContext(), (isDeleted == true || isVoided == true) {
+            ActiveSessionPointerStore.clearIfMatches(sessionId)
+        }
     }
 
     func voidSession(
@@ -1612,17 +1764,20 @@ final class CloudDataStore: ObservableObject {
         )
     }
 
-    private func saveContext() {
-        guard context.hasChanges else { return }
+    @discardableResult
+    private func saveContext() -> Bool {
+        guard context.hasChanges else { return false }
         do {
             try context.save()
             refreshAll(reason: "save_context")
+            return true
         } catch {
             let detail = Self.formatError(error)
             cloudSyncError = detail
             lastCloudError = detail
             print("CloudDataStore save failed: \(detail)")
             context.rollback()
+            return false
         }
     }
 
@@ -1662,6 +1817,7 @@ final class CloudDataStore: ObservableObject {
         dayMemos = snapshot.dayMemos
         dailyReviews = snapshot.dailyReviews
         weeklyReviews = snapshot.weeklyReviews
+        ActiveSessionPointerStore.reconcile(with: sessionRecords)
         updateRevisionSnapshot()
         updateDeletedSnapshot()
     }
@@ -3678,6 +3834,9 @@ struct ContentView: View {
     @State private var diagnosticsLastRunAbnormal = false
     @State private var diagnosticsStressStatus = "未开始"
     @State private var diagnosticsStressRunning = false
+    @State private var shortcutLastRun = IpadShortcutLastRunRecord.empty
+    @State private var activeSessionId: String?
+    @State private var lastEndedSessionId: String?
     @State private var apiTestingSelections: Set<String> = []
     @AppStorage(MarkdownAutoExportStorageKey.folderPath) private var markdownExportFolderPath = ""
     @AppStorage(MarkdownAutoExportStorageKey.lastExportAt) private var markdownLastExportAtRaw: Double = 0
@@ -3839,6 +3998,8 @@ struct ContentView: View {
                 records: cloudStore.sessionRecords,
                 overrides: timeOverrideStore.overrides
             )
+            refreshShortcutRunDiagnostics()
+            flushPendingShortcutEvents(reason: "content_appear")
         }
         .onReceive(ticker) { tick in
             let shouldRefreshNow = selectedTab == .home || stage == .shooting || stage == .selecting
@@ -3900,6 +4061,7 @@ struct ContentView: View {
                 )
                 refreshDutyState()
                 updateTodayDayKey()
+                flushPendingShortcutEvents(reason: "scene_active")
                 if isReadOnlyDevice {
                     if let state = syncStore.reloadCanonicalState() {
                         applyCanonicalState(state, shouldPrompt: false)
@@ -3917,6 +4079,7 @@ struct ContentView: View {
         .task {
             guard bootStateReady else { return }
             refreshDutyState()
+            flushPendingShortcutEvents(reason: "task_boot")
         }
         }
     }
@@ -4029,6 +4192,52 @@ struct ContentView: View {
             let text = await PersistentRingBufferLogger.shared.lastLines(limit: 200)
             diagnosticsLogText = text.isEmpty ? "暂无日志" : text
         }
+    }
+
+    private func refreshShortcutRunDiagnostics() {
+        shortcutLastRun = IpadShortcutStageQueueStorage.loadLastRun()
+        activeSessionId = ActiveSessionPointerStore.read()
+        lastEndedSessionId = ActiveSessionPointerStore.readLastEndedSessionId()
+    }
+
+    private func flushPendingShortcutEvents(reason: String) {
+        let result = IpadShortcutStageExecutor.flushQueuedEvents(using: cloudStore, trigger: reason)
+        if result.appliedCount > 0 {
+            requestSessionSummaryRecompute(
+                records: cloudStore.sessionRecords,
+                reason: "shortcut_queue_flush_\(reason)",
+                debounceNanoseconds: 0
+            )
+        }
+        refreshShortcutRunDiagnostics()
+    }
+
+    private func shortcutLastRunAtText() -> String {
+        guard shortcutLastRun.lastShortcutAt > 0 else { return "—" }
+        let date = Date(timeIntervalSince1970: shortcutLastRun.lastShortcutAt)
+        return formatApiTestTime(date)
+    }
+
+    private func activeSessionIdText() -> String {
+        activeSessionId?.isEmpty == false ? (activeSessionId ?? "—") : "—"
+    }
+
+    private func lastEndedSessionIdText() -> String {
+        lastEndedSessionId?.isEmpty == false ? (lastEndedSessionId ?? "—") : "—"
+    }
+
+    private func shortcutLastRequestedStageText() -> String {
+        if let stage = shortcutLastRun.lastShortcutRequestedStage, !stage.isEmpty {
+            return stage
+        }
+        return ShortcutSessionPointerStore.readLastShortcutRequestedStage() ?? "—"
+    }
+
+    private func shortcutLastTargetSessionIdText() -> String {
+        if let target = shortcutLastRun.lastShortcutTargetSessionId, !target.isEmpty {
+            return target
+        }
+        return ShortcutSessionPointerStore.readLastShortcutTargetSessionId() ?? "—"
     }
 
     private func runDiagnosticsStressTest() {
@@ -5593,6 +5802,36 @@ struct ContentView: View {
             Text("stress: \(diagnosticsStressStatus)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+
+            Divider()
+            Text("Last Shortcut Run")
+                .font(.headline)
+            Text("activeSessionId: \(activeSessionIdText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastEndedSessionId: \(lastEndedSessionIdText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastShortcutAt: \(shortcutLastRunAtText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastShortcutAction: \(shortcutLastRequestedStageText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastResolvedTargetSessionId: \(shortcutLastTargetSessionIdText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastShortcutResult: \(shortcutLastRun.lastShortcutResult)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("pendingShortcutEvents: \(IpadShortcutStageQueueStorage.pendingCount())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if let lastError = shortcutLastRun.lastShortcutError, !lastError.isEmpty {
+                Text("lastShortcutError: \(lastError)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
 #endif
             ScrollView {
                 Text(diagnosticsLogText.isEmpty ? "暂无日志" : diagnosticsLogText)
@@ -12229,29 +12468,203 @@ private struct FolderPicker: UIViewControllerRepresentable {
     }
 }
 
-private enum IpadShortcutStageAction {
+private enum IpadShortcutStageAction: String, Codable {
     case startShooting
     case startSelecting
     case endSession
+
+    var displayName: String {
+        switch self {
+        case .startShooting:
+            return "开始拍摄"
+        case .startSelecting:
+            return "开始选片"
+        case .endSession:
+            return "结束"
+        }
+    }
 }
 
-private enum IpadShortcutStageIntentError: LocalizedError {
-    case noActiveSession
-    case bootstrapFailed(String)
+private struct IpadShortcutStageEvent: Codable, Equatable {
+    let eventId: String
+    let createdAt: TimeInterval
+    let requestedStage: String
+    let targetSessionId: String?
+    let sessionHint: String?
+    let sourceDevice: String
+    let revision: Int64
 
-    var errorDescription: String? {
-        switch self {
-        case .noActiveSession:
-            return "No active session"
-        case .bootstrapFailed(let detail):
-            return detail.isEmpty ? "Store unavailable" : detail
+    var resolvedAction: IpadShortcutStageAction? {
+        IpadShortcutStageAction(rawValue: requestedStage)
+    }
+
+    var createdAtDate: Date {
+        Date(timeIntervalSince1970: createdAt)
+    }
+}
+
+private struct IpadShortcutLastRunRecord: Codable, Equatable {
+    let lastShortcutAt: TimeInterval
+    let lastShortcutName: String
+    let lastShortcutRequestedStage: String?
+    let lastShortcutTargetSessionId: String?
+    let lastShortcutResult: String
+    let lastShortcutError: String?
+
+    static let empty = IpadShortcutLastRunRecord(
+        lastShortcutAt: 0,
+        lastShortcutName: "—",
+        lastShortcutRequestedStage: nil,
+        lastShortcutTargetSessionId: nil,
+        lastShortcutResult: "none",
+        lastShortcutError: nil
+    )
+}
+
+private enum IpadShortcutStageQueueStorage {
+    private static let defaults = UserDefaults.standard
+    private static let queueKey = "pf_ipad_shortcut_stage_queue_v1"
+    private static let lastRunKey = "pf_ipad_shortcut_last_run_v1"
+    private static let lastRevisionKey = "pf_ipad_shortcut_last_revision_v1"
+    private static let maxQueueCount = 256
+
+    static func enqueue(action: IpadShortcutStageAction, targetSessionId: String?, sessionHint: String?) -> IpadShortcutStageEvent {
+        var queue = loadQueue()
+        let now = Date()
+        let event = IpadShortcutStageEvent(
+            eventId: UUID().uuidString,
+            createdAt: now.timeIntervalSince1970,
+            requestedStage: action.rawValue,
+            targetSessionId: normalizedText(targetSessionId),
+            sessionHint: sessionHint,
+            sourceDevice: "ipad",
+            revision: nextRevision(now: now)
+        )
+        queue.append(event)
+        if queue.count > maxQueueCount {
+            queue.removeFirst(queue.count - maxQueueCount)
         }
+        persistQueue(queue)
+        return event
+    }
+
+    static func loadQueue() -> [IpadShortcutStageEvent] {
+        guard let data = defaults.data(forKey: queueKey) else { return [] }
+        do {
+            return try JSONDecoder().decode([IpadShortcutStageEvent].self, from: data)
+        } catch {
+            defaults.removeObject(forKey: queueKey)
+            return []
+        }
+    }
+
+    static func replaceQueue(_ queue: [IpadShortcutStageEvent]) {
+        persistQueue(queue)
+    }
+
+    static func pendingCount() -> Int {
+        loadQueue().count
+    }
+
+    static func loadLastRun() -> IpadShortcutLastRunRecord {
+        guard let data = defaults.data(forKey: lastRunKey) else { return .empty }
+        do {
+            return try JSONDecoder().decode(IpadShortcutLastRunRecord.self, from: data)
+        } catch {
+            defaults.removeObject(forKey: lastRunKey)
+            return .empty
+        }
+    }
+
+    static func recordLastRun(
+        action: IpadShortcutStageAction,
+        requestedStage: String,
+        targetSessionId: String?,
+        result: String,
+        error: String?
+    ) {
+        let normalizedRequestedStage = normalizedText(requestedStage)
+        let normalizedTargetSessionId = normalizedText(targetSessionId)
+        ShortcutSessionPointerStore.writeLastShortcutMetadata(
+            requestedStage: normalizedRequestedStage,
+            targetSessionId: normalizedTargetSessionId
+        )
+        let payload = IpadShortcutLastRunRecord(
+            lastShortcutAt: Date().timeIntervalSince1970,
+            lastShortcutName: action.displayName,
+            lastShortcutRequestedStage: normalizedRequestedStage,
+            lastShortcutTargetSessionId: normalizedTargetSessionId,
+            lastShortcutResult: result,
+            lastShortcutError: normalizedText(error)
+        )
+        do {
+            let data = try JSONEncoder().encode(payload)
+            defaults.set(data, forKey: lastRunKey)
+        } catch {
+            defaults.removeObject(forKey: lastRunKey)
+        }
+    }
+
+    private static func persistQueue(_ queue: [IpadShortcutStageEvent]) {
+        if queue.isEmpty {
+            defaults.removeObject(forKey: queueKey)
+            return
+        }
+        do {
+            let data = try JSONEncoder().encode(queue)
+            defaults.set(data, forKey: queueKey)
+        } catch {
+            defaults.removeObject(forKey: queueKey)
+        }
+    }
+
+    private static func nextRevision(now: Date) -> Int64 {
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+        let previous = (defaults.object(forKey: lastRevisionKey) as? NSNumber)?.int64Value ?? 0
+        let next = max(nowMillis, previous + 1)
+        defaults.set(NSNumber(value: next), forKey: lastRevisionKey)
+        return next
+    }
+
+    private static func normalizedText(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let compact = value
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return compact.isEmpty ? nil : compact
     }
 }
 
 @MainActor
 private enum IpadShortcutStageExecutor {
-    static let sourceDevice = "ipad-shortcuts"
+    static let sourceDevice = "ipad"
+    private static let noActiveSessionMessage = "未找到进行中会话，请先运行开始拍摄"
+
+    private enum TargetDecision {
+        case useExisting(sessionId: String)
+        case createNew(sessionId: String, note: String)
+        case reject(message: String)
+
+        var targetSessionId: String? {
+            switch self {
+            case .useExisting(let sessionId):
+                return sessionId
+            case .createNew(let sessionId, _):
+                return sessionId
+            case .reject:
+                return nil
+            }
+        }
+
+        var note: String? {
+            switch self {
+            case .createNew(_, let note):
+                return note
+            case .useExisting, .reject:
+                return nil
+            }
+        }
+    }
 
     private struct StoreBootstrapInfo {
         let store: CloudDataStore
@@ -12260,157 +12673,489 @@ private enum IpadShortcutStageExecutor {
         let warning: String?
     }
 
-    private struct ActionWriteResult {
-        let sessionId: String
-        let action: String
-        let revision: Int64
+    private struct StoreBootstrapFailure: LocalizedError {
+        let detail: String
+
+        var errorDescription: String? {
+            detail.isEmpty ? "存储初始化失败" : detail
+        }
     }
 
-    static func perform(action: IpadShortcutStageAction) async throws -> String {
-        let bootstrap = try await loadStore()
+    struct AppliedEventInfo {
+        let sessionId: String
+        let action: IpadShortcutStageAction
+        let revision: Int64
+        let targetSessionId: String
+        let note: String?
+    }
+
+    struct FlushResult {
+        let appliedCount: Int
+        let pendingCount: Int
+        let lastError: String?
+        let appliedByEventId: [String: AppliedEventInfo]
+    }
+
+    private struct SessionState {
+        let id: String
+        var shootingStart: Date?
+        var selectingStart: Date?
+        var endedAt: Date?
+        var revision: Int64
+        var isVoided: Bool
+        var isDeleted: Bool
+        var updatedAt: Date
+        var stage: String
+    }
+
+    private struct SessionResolution {
+        let sessionId: String
+        let targetSessionId: String
+        let note: String?
+    }
+
+    static func perform(action: IpadShortcutStageAction) async -> String {
+        let bootstrapResult = await loadStore()
+        switch bootstrapResult {
+        case .success(let bootstrap):
+            return performWithStore(action: action, bootstrap: bootstrap)
+
+        case .failure(let failure):
+            return performWithoutStore(
+                action: action,
+                bootstrapError: failure.errorDescription ?? "存储初始化失败"
+            )
+        }
+    }
+
+    private static func performWithStore(action: IpadShortcutStageAction, bootstrap: StoreBootstrapInfo) -> String {
         let store = bootstrap.store
         store.refreshFromStore()
-        let now = Date()
-        let writeResult: ActionWriteResult
-        switch action {
-        case .startShooting:
-            writeResult = applyStartShooting(now: now, store: store)
-        case .startSelecting:
-            writeResult = try applyStartSelecting(now: now, store: store)
-        case .endSession:
-            writeResult = try applyEndSession(now: now, store: store)
-        }
+        let decision = resolveTargetDecision(action: action, records: store.sessionRecords)
+        switch decision {
+        case .reject(let message):
+            IpadShortcutStageQueueStorage.recordLastRun(
+                action: action,
+                requestedStage: action.rawValue,
+                targetSessionId: nil,
+                result: "failed",
+                error: message
+            )
+            return message
 
-        let storeUsed = bootstrap.mode == .cloud ? "cloud" : "local"
-        let detail = [
-            "storeUsed=\(storeUsed)",
-            "cloudReason=\(bootstrap.cloudReason)",
-            "sessionId=\(writeResult.sessionId)",
-            "action=\(writeResult.action)",
-            "revision=\(writeResult.revision)"
-        ]
-        .joined(separator: " ")
+        case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
+            ActiveSessionPointerStore.write(targetSessionId)
 
-        if bootstrap.mode == .localOnly, let warning = bootstrap.warning, !warning.isEmpty {
-            let compactWarning = warning.replacingOccurrences(of: "\n", with: " ")
-            return "saved local-only: \(compactWarning) | \(detail)"
+            let enqueuedEvent = IpadShortcutStageQueueStorage.enqueue(
+                action: action,
+                targetSessionId: targetSessionId,
+                sessionHint: targetSessionId
+            )
+            let storeUsed = bootstrap.mode == .cloud ? "cloud" : "local"
+            let flush = flushQueuedEvents(using: store, trigger: "intent_\(action.rawValue)")
+            if let applied = flush.appliedByEventId[enqueuedEvent.eventId] {
+                var detail = [
+                    "storeUsed=\(storeUsed)",
+                    "cloudReason=\(bootstrap.cloudReason)",
+                    "sessionId=\(applied.sessionId)",
+                    "targetSessionId=\(applied.targetSessionId)",
+                    "action=\(applied.action.rawValue)",
+                    "revision=\(applied.revision)"
+                ]
+                var lastRunResult = "ok"
+                var notes: [String] = []
+                if bootstrap.mode == .localOnly {
+                    let warning = normalizedError(bootstrap.warning ?? "云端不可用，事件已入队，等待后续同步。")
+                    detail.append("note=\(warning)")
+                    notes.append(warning)
+                    lastRunResult = "queued"
+                }
+                if let note = decision.note, !note.isEmpty {
+                    detail.append("note=\(note)")
+                    notes.append(note)
+                }
+                if let note = applied.note, !note.isEmpty {
+                    detail.append("note=\(note)")
+                    notes.append(note)
+                }
+
+                ActiveSessionPointerStore.write(applied.sessionId)
+
+                IpadShortcutStageQueueStorage.recordLastRun(
+                    action: action,
+                    requestedStage: action.rawValue,
+                    targetSessionId: applied.targetSessionId,
+                    result: lastRunResult,
+                    error: notes.isEmpty ? nil : notes.joined(separator: " | ")
+                )
+                return detail.joined(separator: " ")
+            }
+
+            var reasonParts: [String] = []
+            if let decisionNote = decision.note, !decisionNote.isEmpty {
+                reasonParts.append(decisionNote)
+            }
+            reasonParts.append(normalizedError(flush.lastError ?? bootstrap.warning ?? "已入队，等待同步。"))
+            let reason = reasonParts.joined(separator: " | ")
+            IpadShortcutStageQueueStorage.recordLastRun(
+                action: action,
+                requestedStage: action.rawValue,
+                targetSessionId: enqueuedEvent.targetSessionId ?? targetSessionId,
+                result: "queued",
+                error: reason
+            )
+            return [
+                "storeUsed=\(storeUsed)",
+                "cloudReason=\(bootstrap.cloudReason)",
+                "sessionId=pending",
+                "targetSessionId=\(enqueuedEvent.targetSessionId ?? "nil")",
+                "action=\(action.rawValue)",
+                "revision=\(enqueuedEvent.revision)",
+                "note=\(reason)"
+            ]
+            .joined(separator: " ")
         }
-        return detail
     }
 
-    private static func loadStore() async throws -> StoreBootstrapInfo {
+    private static func performWithoutStore(action: IpadShortcutStageAction, bootstrapError: String) -> String {
+        let decision = resolveTargetDecisionWithoutRecords(action: action)
+        switch decision {
+        case .reject(let message):
+            IpadShortcutStageQueueStorage.recordLastRun(
+                action: action,
+                requestedStage: action.rawValue,
+                targetSessionId: nil,
+                result: "failed",
+                error: message
+            )
+            return message
+
+        case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
+            ActiveSessionPointerStore.write(targetSessionId)
+            let enqueuedEvent = IpadShortcutStageQueueStorage.enqueue(
+                action: action,
+                targetSessionId: targetSessionId,
+                sessionHint: targetSessionId
+            )
+            var reasonParts: [String] = []
+            if let decisionNote = decision.note, !decisionNote.isEmpty {
+                reasonParts.append(decisionNote)
+            }
+            reasonParts.append(normalizedError("存储初始化失败，事件已入队，等待稍后同步。\(bootstrapError)"))
+            let reason = reasonParts.joined(separator: " | ")
+            IpadShortcutStageQueueStorage.recordLastRun(
+                action: action,
+                requestedStage: action.rawValue,
+                targetSessionId: targetSessionId,
+                result: "queued",
+                error: reason
+            )
+            return [
+                "storeUsed=unavailable",
+                "cloudReason=bootstrap_failed",
+                "sessionId=pending",
+                "targetSessionId=\(targetSessionId)",
+                "action=\(action.rawValue)",
+                "revision=\(enqueuedEvent.revision)",
+                "note=\(reason)"
+            ]
+            .joined(separator: " ")
+        }
+    }
+
+    private static func resolveTargetDecision(action: IpadShortcutStageAction, records: [CloudDataStore.SessionRecord]) -> TargetDecision {
+        let activePointer = ActiveSessionPointerStore.read()
+        if let globalTarget = ActiveSessionPointerStore.resolveTargetSessionId(
+            preferred: activePointer,
+            records: records
+        ) {
+            return .useExisting(sessionId: globalTarget)
+        }
+        if action == .startShooting {
+            let createdId = makeSessionId(now: Date(), existingIds: Set(records.map(\.id)))
+            return .createNew(sessionId: createdId, note: "未找到进行中会话，已创建新会话")
+        }
+        return .reject(message: noActiveSessionMessage)
+    }
+
+    private static func resolveTargetDecisionWithoutRecords(action: IpadShortcutStageAction) -> TargetDecision {
+        if let globalTarget = ActiveSessionPointerStore.read() {
+            return .useExisting(sessionId: globalTarget)
+        }
+        if action == .startShooting {
+            let createdId = makeSessionId(now: Date(), existingIds: Set<String>())
+            return .createNew(sessionId: createdId, note: "未找到进行中会话，已创建新会话")
+        }
+        return .reject(message: noActiveSessionMessage)
+    }
+
+    static func flushQueuedEvents(using store: CloudDataStore, trigger: String) -> FlushResult {
+        var queue = IpadShortcutStageQueueStorage.loadQueue()
+        guard !queue.isEmpty else {
+            return FlushResult(appliedCount: 0, pendingCount: 0, lastError: nil, appliedByEventId: [:])
+        }
+
+        queue.sort { lhs, rhs in
+            if lhs.revision == rhs.revision {
+                if lhs.createdAt == rhs.createdAt {
+                    return lhs.eventId < rhs.eventId
+                }
+                return lhs.createdAt < rhs.createdAt
+            }
+            return lhs.revision < rhs.revision
+        }
+
+        var sessionStates = makeSessionStates(from: store.sessionRecords)
+        var appliedByEventId: [String: AppliedEventInfo] = [:]
+        var lastError: String?
+        var droppedCount = 0
+
+        for event in queue {
+            guard let action = event.resolvedAction else {
+                droppedCount += 1
+                continue
+            }
+            let applied = applyQueuedEvent(
+                event: event,
+                action: action,
+                store: store,
+                sessionStates: &sessionStates
+            )
+            if let applied {
+                appliedByEventId[event.eventId] = applied
+            } else {
+                droppedCount += 1
+                lastError = "存在无法应用的快捷指令事件，已丢弃。"
+            }
+        }
+
+        IpadShortcutStageQueueStorage.replaceQueue([])
+        runtimeLog("shortcut", "flush", extra: [
+            "trigger": trigger,
+            "applied": "\(appliedByEventId.count)",
+            "pending": "0",
+            "dropped": "\(droppedCount)",
+            "error": lastError ?? ""
+        ])
+
+        return FlushResult(
+            appliedCount: appliedByEventId.count,
+            pendingCount: 0,
+            lastError: lastError,
+            appliedByEventId: appliedByEventId
+        )
+    }
+
+    private static func loadStore() async -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
         let result = await CloudDataStore.bootstrapWithFallback()
         switch result {
         case .ready(let store, let mode, let reason, let warning):
-            return StoreBootstrapInfo(
-                store: store,
-                mode: mode,
-                cloudReason: reason,
-                warning: warning
+            return .success(
+                StoreBootstrapInfo(
+                    store: store,
+                    mode: mode,
+                    cloudReason: reason,
+                    warning: warning
+                )
             )
         case .failed(let error):
-            throw IpadShortcutStageIntentError.bootstrapFailed(error)
+            return .failure(StoreBootstrapFailure(detail: error))
         }
     }
 
-    private static func applyStartShooting(now: Date, store: CloudDataStore) -> ActionWriteResult {
-        if let active = latestActiveSession(from: store.sessionRecords) {
-            let revision = bumpedRevision(now: now, existing: active.revision)
-            store.upsertSessionTiming(
-                sessionId: active.id,
-                stage: WatchSyncStore.StageSyncKey.stageShooting,
-                shootingStart: active.shootingStart ?? now,
-                selectingStart: active.selectingStart,
-                endedAt: nil,
-                revision: revision,
-                updatedAt: now,
-                sourceDevice: sourceDevice
-            )
-            return ActionWriteResult(
-                sessionId: active.id,
-                action: "startShooting",
-                revision: revision
-            )
+    private static func applyQueuedEvent(
+        event: IpadShortcutStageEvent,
+        action: IpadShortcutStageAction,
+        store: CloudDataStore,
+        sessionStates: inout [String: SessionState]
+    ) -> AppliedEventInfo? {
+        let eventTime = event.createdAtDate
+        guard let resolution = resolveSessionId(
+            for: event,
+            action: action,
+            sessionStates: sessionStates
+        ) else {
+            return nil
         }
-        let sessionId = makeSessionId(now: now, existingIds: Set(store.sessionRecords.map(\.id)))
-        let revision = bumpedRevision(now: now, existing: nil)
-        store.upsertSessionTiming(
-            sessionId: sessionId,
-            stage: WatchSyncStore.StageSyncKey.stageShooting,
-            shootingStart: now,
+        let sessionId = resolution.sessionId
+
+        var state = sessionStates[sessionId] ?? SessionState(
+            id: sessionId,
+            shootingStart: nil,
             selectingStart: nil,
             endedAt: nil,
-            revision: revision,
-            updatedAt: now,
-            sourceDevice: sourceDevice
+            revision: 0,
+            isVoided: false,
+            isDeleted: false,
+            updatedAt: Date.distantPast,
+            stage: WatchSyncStore.StageSyncKey.stageStopped
         )
-        return ActionWriteResult(
+
+        if state.isDeleted || state.isVoided {
+            return nil
+        }
+
+        let nextRevision = max(event.revision, state.revision + 1)
+        switch action {
+        case .startShooting:
+            let shootingStart = state.shootingStart ?? eventTime
+            store.upsertSessionTiming(
+                sessionId: sessionId,
+                stage: WatchSyncStore.StageSyncKey.stageShooting,
+                shootingStart: shootingStart,
+                selectingStart: state.selectingStart,
+                endedAt: nil,
+                revision: nextRevision,
+                updatedAt: eventTime,
+                sourceDevice: sourceDevice
+            )
+            state.shootingStart = shootingStart
+            state.endedAt = nil
+            state.stage = WatchSyncStore.StageSyncKey.stageShooting
+
+        case .startSelecting:
+            let shootingStart = state.shootingStart ?? eventTime
+            let selectingStart = state.selectingStart ?? eventTime
+            store.upsertSessionTiming(
+                sessionId: sessionId,
+                stage: WatchSyncStore.StageSyncKey.stageSelecting,
+                shootingStart: shootingStart,
+                selectingStart: selectingStart,
+                endedAt: nil,
+                revision: nextRevision,
+                updatedAt: eventTime,
+                sourceDevice: sourceDevice
+            )
+            state.shootingStart = shootingStart
+            state.selectingStart = selectingStart
+            state.endedAt = nil
+            state.stage = WatchSyncStore.StageSyncKey.stageSelecting
+
+        case .endSession:
+            let shootingStart = state.shootingStart ?? state.selectingStart ?? eventTime
+            let selectingStart = state.selectingStart
+            store.upsertSessionTiming(
+                sessionId: sessionId,
+                stage: WatchSyncStore.StageSyncKey.stageStopped,
+                shootingStart: shootingStart,
+                selectingStart: selectingStart,
+                endedAt: eventTime,
+                revision: nextRevision,
+                updatedAt: eventTime,
+                sourceDevice: sourceDevice
+            )
+            state.shootingStart = shootingStart
+            state.selectingStart = selectingStart
+            state.endedAt = eventTime
+            state.stage = WatchSyncStore.StageSyncKey.stageStopped
+        }
+
+        state.revision = nextRevision
+        state.updatedAt = eventTime
+        sessionStates[sessionId] = state
+
+        ActiveSessionPointerStore.write(sessionId)
+
+        return AppliedEventInfo(
             sessionId: sessionId,
-            action: "startShooting",
-            revision: revision
+            action: action,
+            revision: nextRevision,
+            targetSessionId: resolution.targetSessionId,
+            note: resolution.note
         )
     }
 
-    private static func applyStartSelecting(now: Date, store: CloudDataStore) throws -> ActionWriteResult {
-        guard let active = latestActiveSession(from: store.sessionRecords) else {
-            throw IpadShortcutStageIntentError.noActiveSession
-        }
-        let revision = bumpedRevision(now: now, existing: active.revision)
-        store.upsertSessionTiming(
-            sessionId: active.id,
-            stage: WatchSyncStore.StageSyncKey.stageSelecting,
-            shootingStart: active.shootingStart ?? now,
-            selectingStart: active.selectingStart ?? now,
-            endedAt: nil,
-            revision: revision,
-            updatedAt: now,
-            sourceDevice: sourceDevice
-        )
-        return ActionWriteResult(
-            sessionId: active.id,
-            action: "startSelecting",
-            revision: revision
-        )
-    }
-
-    private static func applyEndSession(now: Date, store: CloudDataStore) throws -> ActionWriteResult {
-        guard let active = latestActiveSession(from: store.sessionRecords) else {
-            throw IpadShortcutStageIntentError.noActiveSession
-        }
-        let revision = bumpedRevision(now: now, existing: active.revision)
-        let resolvedShootingStart = active.shootingStart ?? active.selectingStart ?? now
-        store.upsertSessionTiming(
-            sessionId: active.id,
-            stage: WatchSyncStore.StageSyncKey.stageStopped,
-            shootingStart: resolvedShootingStart,
-            selectingStart: active.selectingStart,
-            endedAt: now,
-            revision: revision,
-            updatedAt: now,
-            sourceDevice: sourceDevice
-        )
-        return ActionWriteResult(
-            sessionId: active.id,
-            action: "endSession",
-            revision: revision
-        )
-    }
-
-    private static func latestActiveSession(from records: [CloudDataStore.SessionRecord]) -> CloudDataStore.SessionRecord? {
-        records
-            .filter { !$0.isDeleted && !$0.isVoided && $0.endedAt == nil }
-            .max { lhs, rhs in
-                if lhs.revision == rhs.revision {
-                    return lhs.updatedAt < rhs.updatedAt
+    private static func resolveSessionId(
+        for event: IpadShortcutStageEvent,
+        action: IpadShortcutStageAction,
+        sessionStates: [String: SessionState]
+    ) -> SessionResolution? {
+        if let target = normalizedSessionId(event.targetSessionId) {
+            if let state = sessionStates[target] {
+                if state.isDeleted || state.isVoided {
+                    return nil
                 }
-                return lhs.revision < rhs.revision
+                if action != .startShooting && !isActive(state: state) {
+                    return nil
+                }
+                return SessionResolution(sessionId: target, targetSessionId: target, note: nil)
             }
+            if action == .startShooting {
+                return SessionResolution(sessionId: target, targetSessionId: target, note: nil)
+            }
+            return nil
+        }
+
+        if let fallbackTarget = resolveFallbackActiveSessionId(from: sessionStates) {
+            return SessionResolution(sessionId: fallbackTarget, targetSessionId: fallbackTarget, note: nil)
+        }
+
+        guard action == .startShooting else {
+            return nil
+        }
+        let createdId = makeSessionId(now: event.createdAtDate, existingIds: Set(sessionStates.keys))
+        return SessionResolution(
+            sessionId: createdId,
+            targetSessionId: createdId,
+            note: "未找到进行中会话，已创建新会话"
+        )
     }
 
-    private static func bumpedRevision(now: Date, existing: Int64?) -> Int64 {
-        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
-        guard let existing else { return nowMillis }
-        return max(nowMillis, existing + 1)
+    private static func resolveFallbackActiveSessionId(from sessionStates: [String: SessionState]) -> String? {
+        if let activePointer = ActiveSessionPointerStore.read(),
+           let state = sessionStates[activePointer],
+           isActive(state: state) {
+            return activePointer
+        }
+
+        return latestActiveSessionId(from: sessionStates)
+    }
+
+    private static func latestActiveSessionId(from states: [String: SessionState]) -> String? {
+        states.values
+            .filter { isActive(state: $0) }
+            .max { lhs, rhs in
+                if lhs.updatedAt == rhs.updatedAt {
+                    return lhs.revision < rhs.revision
+                }
+                return lhs.updatedAt < rhs.updatedAt
+            }?
+            .id
+    }
+
+    private static func isActive(state: SessionState) -> Bool {
+        !state.isDeleted &&
+            !state.isVoided &&
+            state.endedAt == nil &&
+            state.stage.lowercased() != WatchSyncStore.StageSyncKey.stageStopped.lowercased() &&
+            state.stage.lowercased() != "ended"
+    }
+
+    private static func makeSessionStates(from records: [CloudDataStore.SessionRecord]) -> [String: SessionState] {
+        var states: [String: SessionState] = [:]
+        for record in records {
+            let candidate = SessionState(
+                id: record.id,
+                shootingStart: record.shootingStart,
+                selectingStart: record.selectingStart,
+                endedAt: record.endedAt,
+                revision: record.revision,
+                isVoided: record.isVoided,
+                isDeleted: record.isDeleted,
+                updatedAt: record.updatedAt,
+                stage: record.stage
+            )
+            if let existing = states[record.id] {
+                if candidate.revision > existing.revision {
+                    states[record.id] = candidate
+                } else if candidate.revision == existing.revision && candidate.endedAt == nil && existing.endedAt != nil {
+                    states[record.id] = candidate
+                }
+            } else {
+                states[record.id] = candidate
+            }
+        }
+        return states
     }
 
     private static func makeSessionId(now: Date, existingIds: Set<String>) -> String {
@@ -12420,6 +13165,19 @@ private enum IpadShortcutStageExecutor {
         }
         return base
     }
+
+    private static func normalizedSessionId(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func normalizedError(_ value: String) -> String {
+        let compact = value
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return compact.isEmpty ? "已入队，等待同步。" : compact
+    }
 }
 
 struct PhotoFlowStartShootingIntent: AppIntent {
@@ -12427,8 +13185,8 @@ struct PhotoFlowStartShootingIntent: AppIntent {
     static let description = IntentDescription("在不打开 PhotoFlow UI 的情况下执行开始拍摄。")
     static let openAppWhenRun = false
 
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let message = try await IpadShortcutStageExecutor.perform(action: .startShooting)
+    func perform() async -> some IntentResult & ProvidesDialog {
+        let message = await IpadShortcutStageExecutor.perform(action: .startShooting)
         return .result(dialog: IntentDialog(stringLiteral: message))
     }
 }
@@ -12438,8 +13196,8 @@ struct PhotoFlowStartSelectingIntent: AppIntent {
     static let description = IntentDescription("在不打开 PhotoFlow UI 的情况下执行开始选片。")
     static let openAppWhenRun = false
 
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let message = try await IpadShortcutStageExecutor.perform(action: .startSelecting)
+    func perform() async -> some IntentResult & ProvidesDialog {
+        let message = await IpadShortcutStageExecutor.perform(action: .startSelecting)
         return .result(dialog: IntentDialog(stringLiteral: message))
     }
 }
@@ -12449,8 +13207,8 @@ struct PhotoFlowEndSessionIntent: AppIntent {
     static let description = IntentDescription("在不打开 PhotoFlow UI 的情况下执行结束会话。")
     static let openAppWhenRun = false
 
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let message = try await IpadShortcutStageExecutor.perform(action: .endSession)
+    func perform() async -> some IntentResult & ProvidesDialog {
+        let message = await IpadShortcutStageExecutor.perform(action: .endSession)
         return .result(dialog: IntentDialog(stringLiteral: message))
     }
 }
