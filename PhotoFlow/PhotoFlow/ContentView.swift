@@ -152,6 +152,47 @@ private func encodeDailyReviewNote(notesAll: String?, aiSummary: DailyReviewAiSu
     return dailyReviewNotePrefix + json
 }
 
+private func mergeSourcePriority(_ source: String) -> Int {
+    switch source.lowercased() {
+    case "phone":
+        return 3
+    case "ipad", "pad":
+        return 2
+    case "watch":
+        return 1
+    default:
+        return 0
+    }
+}
+
+private func shouldReplaceSessionWinner(
+    candidate: CloudDataStore.SessionRecord,
+    existing: CloudDataStore.SessionRecord
+) -> Bool {
+    if candidate.revision != existing.revision {
+        return candidate.revision > existing.revision
+    }
+
+    let candidatePriority = mergeSourcePriority(candidate.sourceDevice)
+    let existingPriority = mergeSourcePriority(existing.sourceDevice)
+    if candidatePriority != existingPriority {
+        return candidatePriority > existingPriority
+    }
+
+    if candidate.updatedAt != existing.updatedAt {
+        return candidate.updatedAt > existing.updatedAt
+    }
+
+    // Prefer tombstones/voided winners on exact ties to avoid resurrection.
+    if candidate.isDeleted != existing.isDeleted {
+        return candidate.isDeleted
+    }
+    if candidate.isVoided != existing.isVoided {
+        return candidate.isVoided
+    }
+    return false
+}
+
 @MainActor
 private enum IntentActiveSessionStore {
     private static let appGroupId = "group.com.zhengxinrong.photoflow"
@@ -225,6 +266,14 @@ private enum IntentActiveSessionStore {
               let normalizedDayKey = normalized(dayKey) else {
             clearAnchor()
             return
+        }
+        if let existing = loadAnchor(), existing.dayKey == normalizedDayKey {
+            if existing.revision > revision {
+                return
+            }
+            if existing.revision == revision && existing.updatedAt > updatedAt {
+                return
+            }
         }
         defaults.set(normalizedSessionId, forKey: activeSessionIdKey)
         defaults.set(normalizedDayKey, forKey: activeSessionDayKey)
@@ -401,10 +450,7 @@ private enum IntentActiveSessionStore {
         candidate: CloudDataStore.SessionRecord,
         existing: CloudDataStore.SessionRecord
     ) -> Bool {
-        if candidate.revision != existing.revision {
-            return candidate.revision > existing.revision
-        }
-        return candidate.updatedAt > existing.updatedAt
+        shouldReplaceSessionWinner(candidate: candidate, existing: existing)
     }
 
     private static func latestActiveSession(
@@ -721,7 +767,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func updateCanonicalState(_ state: CanonicalState, send: Bool) {
-        applyCanonicalState(state)
+        mergeCanonicalState(state, markIncoming: false)
         if send {
             sendCanonicalState(state)
         }
@@ -767,33 +813,34 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
 
-    private func mergeCanonicalState(_ incoming: CanonicalState) {
-        if shouldApplyState(incoming) {
-            applyCanonicalState(incoming)
+    private func mergeCanonicalState(_ incoming: CanonicalState, markIncoming: Bool = true) {
+        guard shouldApplyCanonicalState(incoming) else { return }
+        applyCanonicalState(incoming)
+        if markIncoming {
             incomingCanonicalState = incoming
         }
     }
 
-    private func shouldApplyState(_ incoming: CanonicalState) -> Bool {
+    private func shouldApplyCanonicalState(_ incoming: CanonicalState) -> Bool {
         guard let current = canonicalState else { return true }
-        if incoming.revision > current.revision {
-            return true
+        if incoming.revision != current.revision {
+            return incoming.revision > current.revision
         }
-        if incoming.revision < current.revision {
-            return false
-        }
-        return sourcePriority(incoming.sourceDevice) > sourcePriority(current.sourceDevice)
-    }
 
-    private func sourcePriority(_ source: String) -> Int {
-        switch source {
-        case "phone":
-            return 2
-        case "watch":
-            return 1
-        default:
-            return 0
+        let incomingPriority = mergeSourcePriority(incoming.sourceDevice)
+        let currentPriority = mergeSourcePriority(current.sourceDevice)
+        if incomingPriority != currentPriority {
+            return incomingPriority > currentPriority
         }
+
+        let incomingUpdatedAt = incoming.updatedAt.timeIntervalSince1970
+        let currentUpdatedAt = current.updatedAt.timeIntervalSince1970
+        if incomingUpdatedAt != currentUpdatedAt {
+            return incomingUpdatedAt >= currentUpdatedAt
+        }
+
+        // Idempotent no-op when payloads are identical.
+        return incoming != current
     }
 
     private func encodeCanonicalState(_ state: CanonicalState) -> [String: Any] {
@@ -1126,6 +1173,8 @@ final class CloudDataStore: ObservableObject {
         let rejectedCount: Int
         let pendingCount: Int
         let summary: String
+        let lastProcessedAt: Date?
+        let processError: String?
         let shouldClearShortcutChain: Bool
     }
 
@@ -1149,10 +1198,14 @@ final class CloudDataStore: ObservableObject {
     @Published private(set) var cloudTestMemoCount: Int?
     @Published private(set) var cloudTestSessionCount: Int?
     @Published private(set) var isCloudEnabled: Bool = true
+    @Published private(set) var cloudBootReason: String = "unknown"
+    @Published private(set) var iCloudSignedIn: Bool?
     @Published private(set) var pendingStageEventCount: Int = 0
     @Published private(set) var pendingStageOldestAge: TimeInterval?
     @Published private(set) var lastPendingConsumeAt: Date?
     @Published private(set) var lastPendingConsumeResult: String = "idle"
+    @Published private(set) var lastPendingProcessedAt: Date?
+    @Published private(set) var lastPendingProcessError: String?
 
     private enum EntityName {
         static let session = "SessionRecord"
@@ -1174,6 +1227,10 @@ final class CloudDataStore: ObservableObject {
         case enabled
         case simulator
         case userDisabled
+        case noICloud = "no_iCloud"
+        case restricted
+        case couldNotDetermine
+        case accountStatusError
     }
 
     private enum SessionField {
@@ -1308,7 +1365,17 @@ final class CloudDataStore: ObservableObject {
         let container: NSPersistentCloudKitContainer
         let cloudEnabled: Bool
         let storeCloudEnabled: Bool
+        let bootReason: String
+        let iCloudSignedIn: Bool?
+        let cloudAccountStatus: String
         let loadError: Error?
+    }
+
+    private struct CloudBootDecision {
+        let cloudEnabled: Bool
+        let reason: CloudBootReason
+        let iCloudSignedIn: Bool?
+        let accountStatus: String
     }
 
     private init(setup: ContainerSetup) {
@@ -1317,6 +1384,9 @@ final class CloudDataStore: ObservableObject {
         context = container.viewContext
         isCloudEnabled = setup.cloudEnabled
         storeCloudEnabled = setup.storeCloudEnabled
+        cloudBootReason = setup.bootReason
+        iCloudSignedIn = setup.iCloudSignedIn
+        cloudAccountStatus = setup.cloudAccountStatus
         if let error = setup.loadError {
             let detail = Self.formatError(error)
             storeLoadError = detail
@@ -1336,7 +1406,7 @@ final class CloudDataStore: ObservableObject {
     }
 
     static func bootstrapWithFallback() async -> BootResult {
-        let decision = cloudBootDecision()
+        let decision = await cloudBootDecision()
         let model = makeModel()
 
         if decision.cloudEnabled {
@@ -1347,6 +1417,9 @@ final class CloudDataStore: ObservableObject {
                     container: cloudContainer,
                     cloudEnabled: true,
                     storeCloudEnabled: true,
+                    bootReason: decision.reason.rawValue,
+                    iCloudSignedIn: decision.iCloudSignedIn,
+                    cloudAccountStatus: decision.accountStatus,
                     loadError: cloudLoad.error
                 )
                 return .ready(
@@ -1364,6 +1437,9 @@ final class CloudDataStore: ObservableObject {
                     container: localContainer,
                     cloudEnabled: false,
                     storeCloudEnabled: false,
+                    bootReason: decision.reason.rawValue,
+                    iCloudSignedIn: decision.iCloudSignedIn,
+                    cloudAccountStatus: decision.accountStatus,
                     loadError: cloudLoad.error ?? localLoad.error
                 )
                 let warning = cloudLoad.error.map {
@@ -1393,6 +1469,9 @@ final class CloudDataStore: ObservableObject {
                 container: localContainer,
                 cloudEnabled: false,
                 storeCloudEnabled: false,
+                bootReason: decision.reason.rawValue,
+                iCloudSignedIn: decision.iCloudSignedIn,
+                cloudAccountStatus: decision.accountStatus,
                 loadError: localLoad.error
             )
             return .ready(
@@ -1419,7 +1498,7 @@ final class CloudDataStore: ObservableObject {
     }
 
     private static func bootstrapForcedCloud() async -> BootResult {
-        let decision = cloudBootDecision()
+        let decision = await cloudBootDecision()
         guard decision.cloudEnabled else {
             return .failed(error: "forced cloud unavailable: \(decision.reason.rawValue)")
         }
@@ -1434,6 +1513,9 @@ final class CloudDataStore: ObservableObject {
             container: cloudContainer,
             cloudEnabled: true,
             storeCloudEnabled: true,
+            bootReason: decision.reason.rawValue,
+            iCloudSignedIn: decision.iCloudSignedIn,
+            cloudAccountStatus: decision.accountStatus,
             loadError: cloudLoad.error
         )
         return .ready(
@@ -1456,6 +1538,9 @@ final class CloudDataStore: ObservableObject {
             container: localContainer,
             cloudEnabled: false,
             storeCloudEnabled: false,
+            bootReason: "forced_local",
+            iCloudSignedIn: nil,
+            cloudAccountStatus: "forced_local",
             loadError: localLoad.error
         )
         return .ready(
@@ -1495,9 +1580,65 @@ final class CloudDataStore: ObservableObject {
         let eventId = UUID().uuidString
         let dayKey = IntentActiveSessionStore.dayKey(for: createdAt)
         let timestamp = createdAt.timeIntervalSince1970
+        let dedupeWindowSeconds: TimeInterval = 2
 
-        let persisted = await withCheckedContinuation { continuation in
+        let persistedEvent: PendingStageEvent? = await withCheckedContinuation { (continuation: CheckedContinuation<PendingStageEvent?, Never>) in
             container.performBackgroundTask { context in
+                func int64Value(_ object: NSManagedObject, key: String) -> Int64 {
+                    if let value = object.value(forKey: key) as? Int64 { return value }
+                    if let value = object.value(forKey: key) as? NSNumber { return value.int64Value }
+                    return 0
+                }
+
+                func doubleValue(_ object: NSManagedObject, key: String) -> Double {
+                    if let value = object.value(forKey: key) as? Double { return value }
+                    if let value = object.value(forKey: key) as? NSNumber { return value.doubleValue }
+                    return 0
+                }
+
+                func stringValue(_ object: NSManagedObject, key: String, fallback: String = "") -> String {
+                    (object.value(forKey: key) as? String) ?? fallback
+                }
+
+                func pendingEvent(from object: NSManagedObject) -> PendingStageEvent? {
+                    guard let id = object.value(forKey: StageEventField.id) as? String,
+                          !id.isEmpty else { return nil }
+                    let status = stringValue(object, key: StageEventField.status, fallback: "queued")
+                    return PendingStageEvent(
+                        id: id,
+                        dayKey: stringValue(object, key: StageEventField.dayKey, fallback: dayKey),
+                        stageAfter: stringValue(object, key: StageEventField.stageAfter, fallback: normalizedStage),
+                        createdAt: doubleValue(object, key: StageEventField.createdAt),
+                        revision: int64Value(object, key: StageEventField.revision),
+                        sourceDevice: stringValue(object, key: StageEventField.sourceDevice, fallback: sourceDevice),
+                        appliedAt: object.value(forKey: StageEventField.appliedAt) as? Double,
+                        appliedBy: object.value(forKey: StageEventField.appliedBy) as? String,
+                        status: status,
+                        note: object.value(forKey: StageEventField.note) as? String,
+                        updatedAt: doubleValue(object, key: StageEventField.updatedAt)
+                    )
+                }
+
+                let duplicateRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.stageEvent)
+                duplicateRequest.predicate = NSPredicate(
+                    format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@ AND %K >= %f",
+                    StageEventField.status, "queued",
+                    StageEventField.stageAfter, normalizedStage,
+                    StageEventField.sourceDevice, sourceDevice,
+                    StageEventField.dayKey, dayKey,
+                    StageEventField.createdAt, timestamp - dedupeWindowSeconds
+                )
+                duplicateRequest.sortDescriptors = [
+                    NSSortDescriptor(key: StageEventField.createdAt, ascending: false),
+                    NSSortDescriptor(key: StageEventField.revision, ascending: false)
+                ]
+                duplicateRequest.fetchLimit = 1
+                if let duplicate = (try? context.fetch(duplicateRequest))?.first,
+                   let existing = pendingEvent(from: duplicate) {
+                    continuation.resume(returning: existing)
+                    return
+                }
+
                 let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.stageEvent, into: context)
                 target.setValue(eventId, forKey: StageEventField.id)
                 target.setValue(dayKey, forKey: StageEventField.dayKey)
@@ -1514,28 +1655,16 @@ final class CloudDataStore: ObservableObject {
                     if context.hasChanges {
                         try context.save()
                     }
-                    continuation.resume(returning: true)
+                    continuation.resume(returning: pendingEvent(from: target))
                 } catch {
-                    continuation.resume(returning: false)
+                    continuation.resume(returning: nil)
                 }
             }
         }
 
-        guard persisted else { return nil }
+        guard let persistedEvent else { return nil }
         refreshAll(reason: "pending_event_enqueue", debounceNanoseconds: 0)
-        return PendingStageEvent(
-            id: eventId,
-            dayKey: dayKey,
-            stageAfter: normalizedStage,
-            createdAt: timestamp,
-            revision: revision,
-            sourceDevice: sourceDevice,
-            appliedAt: nil,
-            appliedBy: nil,
-            status: "queued",
-            note: "queued_on_\(sourceDevice)",
-            updatedAt: timestamp
-        )
+        return persistedEvent
     }
 
     @discardableResult
@@ -1546,6 +1675,8 @@ final class CloudDataStore: ObservableObject {
                 rejectedCount: 0,
                 pendingCount: pendingStageEventCount,
                 summary: "skip_non_phone",
+                lastProcessedAt: nil,
+                processError: nil,
                 shouldClearShortcutChain: false
             )
         }
@@ -1605,9 +1736,29 @@ final class CloudDataStore: ObservableObject {
                         if let existing = winners[id] {
                             let candidateRevision = int64Value(object, key: SessionField.revision)
                             let existingRevision = int64Value(existing, key: SessionField.revision)
+                            let candidateSource = stringValue(object, key: SessionField.sourceDevice, fallback: "unknown")
+                            let existingSource = stringValue(existing, key: SessionField.sourceDevice, fallback: "unknown")
+                            let candidateUpdatedAt = doubleValue(object, key: SessionField.updatedAt)
+                            let existingUpdatedAt = doubleValue(existing, key: SessionField.updatedAt)
+                            let candidateDeleted = boolValue(object, key: SessionField.isDeleted)
+                            let existingDeleted = boolValue(existing, key: SessionField.isDeleted)
+                            let candidateVoided = boolValue(object, key: SessionField.isVoided)
+                            let existingVoided = boolValue(existing, key: SessionField.isVoided)
                             if candidateRevision > existingRevision ||
                                 (candidateRevision == existingRevision &&
-                                    doubleValue(object, key: SessionField.updatedAt) > doubleValue(existing, key: SessionField.updatedAt)) {
+                                    mergeSourcePriority(candidateSource) > mergeSourcePriority(existingSource)) ||
+                                (candidateRevision == existingRevision &&
+                                    mergeSourcePriority(candidateSource) == mergeSourcePriority(existingSource) &&
+                                    candidateUpdatedAt > existingUpdatedAt) ||
+                                (candidateRevision == existingRevision &&
+                                    mergeSourcePriority(candidateSource) == mergeSourcePriority(existingSource) &&
+                                    candidateUpdatedAt == existingUpdatedAt &&
+                                    candidateDeleted && !existingDeleted) ||
+                                (candidateRevision == existingRevision &&
+                                    mergeSourcePriority(candidateSource) == mergeSourcePriority(existingSource) &&
+                                    candidateUpdatedAt == existingUpdatedAt &&
+                                    candidateDeleted == existingDeleted &&
+                                    candidateVoided && !existingVoided) {
                                 winners[id] = object
                             }
                         } else {
@@ -1632,6 +1783,8 @@ final class CloudDataStore: ObservableObject {
                             rejectedCount: 0,
                             pendingCount: 0,
                             summary: "no_pending",
+                            lastProcessedAt: nil,
+                            processError: nil,
                             shouldClearShortcutChain: false
                         )
                     )
@@ -1768,6 +1921,8 @@ final class CloudDataStore: ObservableObject {
                             rejectedCount: rejectedCount,
                             pendingCount: max(pending, 0),
                             summary: "applied=\(appliedCount) rejected=\(rejectedCount) pending=\(max(pending, 0))",
+                            lastProcessedAt: now,
+                            processError: nil,
                             shouldClearShortcutChain: shouldClearShortcutChain
                         )
                     )
@@ -1778,6 +1933,8 @@ final class CloudDataStore: ObservableObject {
                             rejectedCount: rejectedCount,
                             pendingCount: events.count,
                             summary: "save_failed",
+                            lastProcessedAt: now,
+                            processError: "save_failed: \(Self.formatError(error))",
                             shouldClearShortcutChain: false
                         )
                     )
@@ -1791,6 +1948,14 @@ final class CloudDataStore: ObservableObject {
             }
             lastPendingConsumeAt = Date()
             lastPendingConsumeResult = "\(trigger): \(result.summary)"
+            if let processedAt = result.lastProcessedAt {
+                lastPendingProcessedAt = processedAt
+            }
+            if let processError = result.processError, !processError.isEmpty {
+                lastPendingProcessError = processError
+            } else if result.lastProcessedAt != nil {
+                lastPendingProcessError = nil
+            }
             refreshAll(reason: "pending_event_consume_\(trigger)", debounceNanoseconds: 0)
         }
         return result
@@ -2460,7 +2625,7 @@ final class CloudDataStore: ObservableObject {
 
     private func updateDeletedSnapshot() {
         let deleted = sessionRecords.filter(\.isDeleted).map(\.id)
-        blockedSessionIds.formUnion(deleted)
+        blockedSessionIds = Set(deleted)
     }
 
     private func updatePendingStageDiagnostics(now: Date = Date()) {
@@ -2588,16 +2753,7 @@ final class CloudDataStore: ObservableObject {
         }
 
         func sourcePriority(_ source: String) -> Int {
-            switch source {
-            case "phone":
-                return 3
-            case "ipad":
-                return 2
-            case "watch":
-                return 1
-            default:
-                return 0
-            }
+            mergeSourcePriority(source)
         }
 
         func shouldApply(
@@ -2683,6 +2839,17 @@ final class CloudDataStore: ObservableObject {
                 isDeleted: boolValue(object, key: SessionField.isDeleted)
             )
         }
+        var sessionWinners: [String: SessionRecord] = [:]
+        for record in sessions {
+            if let existing = sessionWinners[record.id] {
+                if shouldReplaceSessionWinner(candidate: record, existing: existing) {
+                    sessionWinners[record.id] = record
+                }
+            } else {
+                sessionWinners[record.id] = record
+            }
+        }
+        let filteredSessions = Array(sessionWinners.values)
 
         let shiftRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.shift)
         let shiftObjects = (try? context.fetch(shiftRequest)) ?? []
@@ -2843,7 +3010,7 @@ final class CloudDataStore: ObservableObject {
         }
 
         return StoreSnapshot(
-            sessionRecords: sessions,
+            sessionRecords: filteredSessions,
             shiftRecords: shifts,
             dayMemos: memos,
             dailyReviews: reviews,
@@ -2967,12 +3134,23 @@ final class CloudDataStore: ObservableObject {
         do {
             let status = try await container.accountStatus()
             cloudAccountStatus = Self.accountStatusLabel(status)
+            switch status {
+            case .available:
+                iCloudSignedIn = true
+            case .noAccount, .restricted:
+                iCloudSignedIn = false
+            case .couldNotDetermine:
+                iCloudSignedIn = nil
+            @unknown default:
+                iCloudSignedIn = nil
+            }
             return nil
         } catch {
             let detail = Self.formatError(error)
             cloudSyncError = detail
             lastCloudError = detail
             cloudAccountStatus = "error"
+            iCloudSignedIn = nil
             return error
         }
     }
@@ -3108,7 +3286,7 @@ final class CloudDataStore: ObservableObject {
             revisionKey: SessionField.revision,
             sourceKey: SessionField.sourceDevice
         )
-        return deduped.values.compactMap { object in
+        let sessions: [SessionRecord] = deduped.values.compactMap { object -> SessionRecord? in
             guard let sessionId = object.value(forKey: SessionField.sessionId) as? String,
                   !sessionId.isEmpty else { return nil }
             let stage = stringValue(object, key: SessionField.stage, fallback: Self.defaultStage)
@@ -3130,6 +3308,38 @@ final class CloudDataStore: ObservableObject {
                 isDeleted: boolValue(object, key: SessionField.isDeleted)
             )
         }
+        func shouldReplaceLocalWinner(_ candidate: SessionRecord, _ existing: SessionRecord) -> Bool {
+            if candidate.revision != existing.revision {
+                return candidate.revision > existing.revision
+            }
+            let candidatePriority = mergeSourcePriority(candidate.sourceDevice)
+            let existingPriority = mergeSourcePriority(existing.sourceDevice)
+            if candidatePriority != existingPriority {
+                return candidatePriority > existingPriority
+            }
+            if candidate.updatedAt != existing.updatedAt {
+                return candidate.updatedAt > existing.updatedAt
+            }
+            if candidate.isDeleted != existing.isDeleted {
+                return candidate.isDeleted
+            }
+            if candidate.isVoided != existing.isVoided {
+                return candidate.isVoided
+            }
+            return false
+        }
+
+        var winners: [String: SessionRecord] = [:]
+        for record in sessions {
+            if let existing = winners[record.id] {
+                if shouldReplaceLocalWinner(record, existing) {
+                    winners[record.id] = record
+                }
+            } else {
+                winners[record.id] = record
+            }
+        }
+        return Array(winners.values)
     }
 
     private func fetchShiftRecords() -> [ShiftRecordSnapshot] {
@@ -3407,16 +3617,7 @@ final class CloudDataStore: ObservableObject {
     }
 
     private func sourcePriority(_ source: String) -> Int {
-        switch source {
-        case "phone":
-            return 3
-        case "ipad":
-            return 2
-        case "watch":
-            return 1
-        default:
-            return 0
-        }
+        mergeSourcePriority(source)
     }
 
     private func int64Value(_ object: NSManagedObject?, key: String) -> Int64 {
@@ -3532,15 +3733,73 @@ final class CloudDataStore: ObservableObject {
         return container
     }
 
-    private static func cloudBootDecision() -> (cloudEnabled: Bool, reason: CloudBootReason) {
+    private static func cloudBootDecision() async -> CloudBootDecision {
 #if targetEnvironment(simulator)
-        return (false, .simulator)
+        return CloudBootDecision(
+            cloudEnabled: false,
+            reason: .simulator,
+            iCloudSignedIn: false,
+            accountStatus: "simulator"
+        )
 #else
         if !cloudSyncEnabledPreference() {
-            return (false, .userDisabled)
+            return CloudBootDecision(
+                cloudEnabled: false,
+                reason: .userDisabled,
+                iCloudSignedIn: nil,
+                accountStatus: "userDisabled"
+            )
         }
-        // Do not gate by ubiquityIdentityToken. AppIntent background execution can report nil token.
-        return (true, .enabled)
+
+        let container = CKContainer(identifier: cloudContainerIdentifier)
+        do {
+            let status = try await container.accountStatus()
+            let label = accountStatusLabel(status)
+            switch status {
+            case .available:
+                return CloudBootDecision(
+                    cloudEnabled: true,
+                    reason: .enabled,
+                    iCloudSignedIn: true,
+                    accountStatus: label
+                )
+            case .noAccount:
+                return CloudBootDecision(
+                    cloudEnabled: false,
+                    reason: .noICloud,
+                    iCloudSignedIn: false,
+                    accountStatus: label
+                )
+            case .restricted:
+                return CloudBootDecision(
+                    cloudEnabled: false,
+                    reason: .restricted,
+                    iCloudSignedIn: false,
+                    accountStatus: label
+                )
+            case .couldNotDetermine:
+                return CloudBootDecision(
+                    cloudEnabled: false,
+                    reason: .couldNotDetermine,
+                    iCloudSignedIn: nil,
+                    accountStatus: label
+                )
+            @unknown default:
+                return CloudBootDecision(
+                    cloudEnabled: false,
+                    reason: .couldNotDetermine,
+                    iCloudSignedIn: nil,
+                    accountStatus: "unknown"
+                )
+            }
+        } catch {
+            return CloudBootDecision(
+                cloudEnabled: false,
+                reason: .accountStatusError,
+                iCloudSignedIn: nil,
+                accountStatus: "error"
+            )
+        }
 #endif
     }
 
@@ -4821,18 +5080,6 @@ struct ContentView: View {
     }
 
     nonisolated private static func buildSessionSummaries(_ records: [CloudDataStore.SessionRecord]) -> [SessionSummary] {
-        func sourcePriority(_ source: String) -> Int {
-            switch source {
-            case "phone":
-                return 3
-            case "ipad":
-                return 2
-            case "watch":
-                return 1
-            default:
-                return 0
-            }
-        }
         func sessionSortKey(_ record: CloudDataStore.SessionRecord) -> Date {
             let start = [record.shootingStart, record.selectingStart, record.endedAt].compactMap { $0 }.min()
             return start ?? record.updatedAt
@@ -4840,10 +5087,7 @@ struct ContentView: View {
         var winners: [String: CloudDataStore.SessionRecord] = [:]
         for record in records {
             if let existing = winners[record.id] {
-                if record.revision > existing.revision {
-                    winners[record.id] = record
-                } else if record.revision == existing.revision,
-                          sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
+                if shouldReplaceSessionWinner(candidate: record, existing: existing) {
                     winners[record.id] = record
                 }
             } else {
@@ -4868,12 +5112,8 @@ struct ContentView: View {
         var winners: [String: CloudDataStore.SessionRecord] = [:]
         for record in records {
             if let existing = winners[record.id] {
-                if record.revision > existing.revision {
+                if shouldReplaceSessionWinner(candidate: record, existing: existing) {
                     winners[record.id] = record
-                } else if record.revision == existing.revision {
-                    if sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
-                        winners[record.id] = record
-                    }
                 }
             } else {
                 winners[record.id] = record
@@ -4974,6 +5214,11 @@ struct ContentView: View {
 
     private func lastPendingConsumeAtText() -> String {
         guard let date = cloudStore.lastPendingConsumeAt else { return "—" }
+        return formatApiTestTime(date)
+    }
+
+    private func lastPendingProcessedAtText() -> String {
+        guard let date = cloudStore.lastPendingProcessedAt else { return "—" }
         return formatApiTestTime(date)
     }
 
@@ -5234,19 +5479,6 @@ struct ContentView: View {
         overrides: [String: SessionTimeOverride],
         memos: [String: String]
     ) -> [MarkdownFileWritePayload] {
-        func sourcePriority(_ source: String) -> Int {
-            switch source {
-            case "phone":
-                return 3
-            case "ipad":
-                return 2
-            case "watch":
-                return 1
-            default:
-                return 0
-            }
-        }
-
         func sessionSortKey(_ record: CloudDataStore.SessionRecord) -> Date {
             let start = [record.shootingStart, record.selectingStart, record.endedAt].compactMap { $0 }.min()
             return start ?? record.updatedAt
@@ -5256,10 +5488,7 @@ struct ContentView: View {
             var winners: [String: CloudDataStore.SessionRecord] = [:]
             for record in input {
                 if let existing = winners[record.id] {
-                    if record.revision > existing.revision {
-                        winners[record.id] = record
-                    } else if record.revision == existing.revision,
-                              sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
+                    if shouldReplaceSessionWinner(candidate: record, existing: existing) {
                         winners[record.id] = record
                     }
                 } else {
@@ -6573,16 +6802,22 @@ struct ContentView: View {
             Text("lastShortcutResult: \(shortcutLastRun.lastShortcutResult)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("pendingCount: \(cloudStore.pendingStageEventCount)")
+            Text("pendingEventCount: \(cloudStore.pendingStageEventCount)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("oldestAge: \(pendingStageOldestAgeText())")
+            Text("oldestPendingEventAge: \(pendingStageOldestAgeText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastConsumeAt: \(lastPendingConsumeAtText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastConsumeResult: \(cloudStore.lastPendingConsumeResult)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastProcessedEventAt: \(lastPendingProcessedAtText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastProcessError: \(cloudStore.lastPendingProcessError ?? "—")")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             if let lastError = shortcutLastRun.lastShortcutError, !lastError.isEmpty {
@@ -6781,6 +7016,13 @@ struct ContentView: View {
         let bundleId = Bundle.main.bundleIdentifier ?? "unknown"
         let storeCloudEnabledText = cloudStore.storeCloudEnabled ? "true" : "false"
         let cloudLoadEnabledText = cloudStore.isCloudEnabled ? "true" : "false"
+        let cloudBootReasonText = cloudStore.cloudBootReason
+        let iCloudSignedInText: String = {
+            if let signedIn = cloudStore.iCloudSignedIn {
+                return signedIn ? "true" : "false"
+            }
+            return "unknown"
+        }()
         let accountStatusText = cloudStore.cloudAccountStatus
         let storeLoadErrorText = cloudStore.storeLoadError ?? "—"
         let cloudSyncErrorText = cloudStore.cloudSyncError ?? "—"
@@ -6789,6 +7031,10 @@ struct ContentView: View {
         let refreshErrorText = cloudStore.lastRefreshError ?? "—"
         let cloudMemoCountText = cloudStore.cloudTestMemoCount.map(String.init) ?? "--"
         let cloudSessionCountText = cloudStore.cloudTestSessionCount.map(String.init) ?? "--"
+        let pendingEventCountText = String(cloudStore.pendingStageEventCount)
+        let oldestPendingAgeText = cloudStore.pendingStageOldestAge.map { String(format: "%.1f", $0) } ?? "--"
+        let lastProcessedAtText = cloudStore.lastPendingProcessedAt.map { String(Int($0.timeIntervalSince1970)) } ?? "--"
+        let lastProcessErrorText = cloudStore.lastPendingProcessError ?? "—"
         return VStack(alignment: .leading, spacing: 8) {
             Text("Debug Cloud Test")
                 .font(.caption)
@@ -6866,12 +7112,18 @@ struct ContentView: View {
                 Text("cloudKitContainerIdentifier: \(CloudDataStore.cloudContainerIdentifier)")
                 Text("storeCloudEnabled: \(storeCloudEnabledText)")
                 Text("cloudLoadEnabled: \(cloudLoadEnabledText)")
+                Text("cloudBootReason: \(cloudBootReasonText)")
+                Text("iCloudSignedIn: \(iCloudSignedInText)")
                 Text("CKAccountStatus: \(accountStatusText)")
                 Text("storeLoadError: \(storeLoadErrorText)")
                 Text("cloudSyncError: \(cloudSyncErrorText)")
                 Text("lastCloudError: \(lastCloudErrorText)")
                 Text("refreshStatus: \(refreshStatusText)")
                 Text("refreshError: \(refreshErrorText)")
+                Text("pendingEventCount: \(pendingEventCountText)")
+                Text("oldestPendingEventAge: \(oldestPendingAgeText)")
+                Text("lastProcessedEventAt: \(lastProcessedAtText)")
+                Text("lastProcessError: \(lastProcessErrorText)")
                 Text("localCounts: memo \(testMemos.count) · session \(testSessions.count)")
                 Text("cloudCounts: memo \(cloudMemoCountText) · session \(cloudSessionCountText)")
             }
@@ -10965,16 +11217,7 @@ struct ContentView: View {
     }
 
     private func sourcePriority(_ source: String) -> Int {
-        switch source.lowercased() {
-        case "phone":
-            return 3
-        case "ipad", "pad":
-            return 2
-        case "watch":
-            return 1
-        default:
-            return 0
-        }
+        mergeSourcePriority(source)
     }
 
     private func shortDebugToken() -> String {
@@ -13513,6 +13756,7 @@ private enum IpadShortcutStageExecutor {
         var isDeleted: Bool
         var updatedAt: Date
         var stage: String
+        var sourceDevice: String
     }
 
     private struct SessionResolution {
@@ -13526,8 +13770,9 @@ private enum IpadShortcutStageExecutor {
         let bootstrapResult = await loadStore(storePreference: stickyStoreUsed)
         switch bootstrapResult {
         case .success(let bootstrap):
-            if stickyStoreUsed == nil {
-                IntentActiveSessionStore.saveAnchorStoreUsed(storeUsed(for: bootstrap.mode))
+            let resolvedStoreUsed = storeUsed(for: bootstrap.mode)
+            if stickyStoreUsed != resolvedStoreUsed {
+                IntentActiveSessionStore.saveAnchorStoreUsed(resolvedStoreUsed)
             }
             return await performWithStore(action: action, bootstrap: bootstrap)
 
@@ -13546,7 +13791,9 @@ private enum IpadShortcutStageExecutor {
         let now = Date()
         let dayKey = IntentActiveSessionStore.dayKey(for: now)
         let storeUsed = storeUsed(for: bootstrap.mode).rawValue
-        let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let anchorBefore = IntentActiveSessionStore.loadAnchor()
+        let anchorBeforeSessionId = anchorBefore?.sessionId ?? "nil"
+        let anchorBeforeRevision = anchorBefore?.revision ?? 0
         let stageAfter = eventStageValue(for: action)
 
         guard let event = await store.enqueuePendingStageEvent(
@@ -13565,25 +13812,30 @@ private enum IpadShortcutStageExecutor {
                 result: "failed",
                 error: message
             )
-            return [
-                "storeUsed=\(storeUsed)",
-                "cloudReason=\(bootstrap.cloudReason)",
-                "dayKey=\(dayKey)",
-                "anchorSessionId=\(anchorBeforeSessionId)",
-                "targetSessionId=nil",
-                "recordsFound=0",
-                "didCreateNewSession=false",
-                "stageBefore=unknown",
-                "stageAfter=\(stageAfter)",
-                "note=\(message)"
-            ]
-            .joined(separator: " ")
+            return (
+                [
+                    "storeUsed=\(storeUsed)",
+                    "cloudReason=\(bootstrap.cloudReason)",
+                    "dayKey=\(dayKey)",
+                    "anchorSessionId=\(anchorBeforeSessionId)",
+                    "anchorRevision=\(anchorBeforeRevision)",
+                    "targetSessionId=nil",
+                    "recordsFound=0",
+                    "didCreateNewSession=false",
+                    "stageBefore=unknown",
+                    "stageAfter=\(stageAfter)",
+                    "note=\(message)"
+                ]
+                + diagnosticsFields(store: store)
+            ).joined(separator: " ")
         }
 
         let ackNote = bootstrap.mode == .localOnly
             ? normalizedError(bootstrap.warning ?? "已入队，等待 iPhone 应用")
             : "已入队，等待 iPhone 应用"
-        let anchorAfterSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let anchorAfter = IntentActiveSessionStore.loadAnchor()
+        let anchorAfterSessionId = anchorAfter?.sessionId ?? "nil"
+        let anchorAfterRevision = anchorAfter?.revision ?? 0
         IpadShortcutStageQueueStorage.recordLastRun(
             action: action,
             requestedStage: action.rawValue,
@@ -13594,20 +13846,25 @@ private enum IpadShortcutStageExecutor {
             result: "queued",
             error: nil
         )
-        return [
-            "storeUsed=\(storeUsed)",
-            "cloudReason=\(bootstrap.cloudReason)",
-            "dayKey=\(event.dayKey)",
-            "anchorSessionId=\(anchorAfterSessionId)",
-            "targetSessionId=nil",
-            "recordsFound=0",
-            "didCreateNewSession=false",
-            "stageBefore=queue_only",
-            "stageAfter=\(event.stageAfter)",
-            "eventId=\(event.id)",
-            "status=\(event.status)",
-            "note=\(ackNote)"
-        ].joined(separator: " ")
+        return (
+            [
+                "storeUsed=\(storeUsed)",
+                "cloudReason=\(bootstrap.cloudReason)",
+                "dayKey=\(event.dayKey)",
+                "anchorSessionId=\(anchorAfterSessionId)",
+                "anchorRevision=\(anchorAfterRevision)",
+                "targetSessionId=nil",
+                "recordsFound=0",
+                "didCreateNewSession=false",
+                "stageBefore=queue_only",
+                "stageAfter=\(event.stageAfter)",
+                "eventId=\(event.id)",
+                "eventRevision=\(event.revision)",
+                "status=\(event.status)",
+                "note=\(ackNote)"
+            ]
+            + diagnosticsFields(store: store)
+        ).joined(separator: " ")
     }
 
     private static func performWithoutStore(
@@ -13618,7 +13875,9 @@ private enum IpadShortcutStageExecutor {
     ) -> String {
         let now = Date()
         let dayKey = IntentActiveSessionStore.dayKey(for: now)
-        let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let anchorBefore = IntentActiveSessionStore.loadAnchor()
+        let anchorBeforeSessionId = anchorBefore?.sessionId ?? "nil"
+        let anchorBeforeRevision = anchorBefore?.revision ?? 0
         let storeUsedLabel = stickyStoreUsed?.rawValue ?? "unavailable"
         let message = normalizedError("存储初始化失败，无法入队。\(bootstrapError)")
         IpadShortcutStageQueueStorage.recordLastRun(
@@ -13636,12 +13895,17 @@ private enum IpadShortcutStageExecutor {
             "cloudReason=\(cloudReason)",
             "dayKey=\(dayKey)",
             "anchorSessionId=\(anchorBeforeSessionId)",
+            "anchorRevision=\(anchorBeforeRevision)",
             "targetSessionId=nil",
             "recordsFound=0",
             "didCreateNewSession=false",
             "stageBefore=queue_only",
             "stageAfter=\(eventStageValue(for: action))",
-            "note=\(message)"
+            "note=\(message)",
+            "pendingEventCount=--",
+            "oldestPendingEventAge=--",
+            "lastProcessedEventAt=--",
+            "lastProcessError=\(message)"
         ].joined(separator: " ")
     }
 
@@ -13715,8 +13979,7 @@ private enum IpadShortcutStageExecutor {
         var winners: [String: CloudDataStore.SessionRecord] = [:]
         for record in records {
             if let existing = winners[record.id] {
-                if record.revision > existing.revision ||
-                    (record.revision == existing.revision && record.updatedAt > existing.updatedAt) {
+                if shouldReplaceSessionWinner(candidate: record, existing: existing) {
                     winners[record.id] = record
                 }
             } else {
@@ -13816,20 +14079,13 @@ private enum IpadShortcutStageExecutor {
     private static func loadStore(
         storePreference: IntentActiveSessionStore.ShortcutAnchorStoreUsed?
     ) async -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
-        let bootModePreference: CloudDataStore.BootMode?
-        switch storePreference {
-        case .cloud:
-            bootModePreference = .cloud
-        case .local:
-            bootModePreference = .localOnly
-        case .none:
-            bootModePreference = nil
-        }
-
-        let result = await CloudDataStore.bootstrap(modePreference: bootModePreference)
-        switch result {
-        case .ready(let store, let mode, let reason, let warning):
-            return .success(
+        func makeSuccess(
+            store: CloudDataStore,
+            mode: CloudDataStore.BootMode,
+            reason: String,
+            warning: String?
+        ) -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
+            .success(
                 StoreBootstrapInfo(
                     store: store,
                     mode: mode,
@@ -13837,20 +14093,79 @@ private enum IpadShortcutStageExecutor {
                     warning: warning
                 )
             )
-        case .failed(let error):
-            let reason: String
-            if let sticky = storePreference {
-                reason = "sticky_\(sticky.rawValue)"
-            } else {
-                reason = "bootstrap_failed"
-            }
-            return .failure(
+        }
+
+        func makeFailure(detail: String, reason: String) -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
+            .failure(
                 StoreBootstrapFailure(
-                    detail: error,
+                    detail: detail,
                     cloudReason: reason,
                     stickyStoreUsed: storePreference
                 )
             )
+        }
+
+        switch storePreference {
+        case .cloud:
+            let forced = await CloudDataStore.bootstrap(modePreference: .cloud)
+            switch forced {
+            case .ready(let store, let mode, let reason, let warning):
+                return makeSuccess(store: store, mode: mode, reason: reason, warning: warning)
+            case .failed(let forcedError):
+                let fallback = await CloudDataStore.bootstrapWithFallback()
+                switch fallback {
+                case .ready(let store, let mode, let reason, let warning):
+                    let fallbackWarning = [warning, "forced_cloud_failed: \(forcedError)"]
+                        .compactMap { $0 }
+                        .joined(separator: " | ")
+                    return makeSuccess(
+                        store: store,
+                        mode: mode,
+                        reason: "sticky_cloud_fallback_\(reason)",
+                        warning: fallbackWarning.isEmpty ? nil : fallbackWarning
+                    )
+                case .failed(let fallbackError):
+                    return makeFailure(
+                        detail: "forced_cloud=\(forcedError) | fallback=\(fallbackError)",
+                        reason: "sticky_cloud_failed"
+                    )
+                }
+            }
+
+        case .local:
+            let forced = await CloudDataStore.bootstrap(modePreference: .localOnly)
+            switch forced {
+            case .ready(let store, let mode, let reason, let warning):
+                return makeSuccess(store: store, mode: mode, reason: reason, warning: warning)
+            case .failed(let forcedError):
+                let fallback = await CloudDataStore.bootstrapWithFallback()
+                switch fallback {
+                case .ready(let store, let mode, let reason, let warning):
+                    let fallbackWarning = [warning, "forced_local_failed: \(forcedError)"]
+                        .compactMap { $0 }
+                        .joined(separator: " | ")
+                    return makeSuccess(
+                        store: store,
+                        mode: mode,
+                        reason: "sticky_local_fallback_\(reason)",
+                        warning: fallbackWarning.isEmpty ? nil : fallbackWarning
+                    )
+                case .failed(let fallbackError):
+                    return makeFailure(
+                        detail: "forced_local=\(forcedError) | fallback=\(fallbackError)",
+                        reason: "sticky_local_failed"
+                    )
+                }
+            }
+
+        case .none:
+            let result = await CloudDataStore.bootstrapWithFallback()
+            switch result {
+            case .ready(let store, let mode, let reason, let warning):
+                return makeSuccess(store: store, mode: mode, reason: reason, warning: warning)
+            case .failed(let error):
+                return makeFailure(detail: error, reason: "bootstrap_failed")
+            }
         }
     }
 
@@ -13858,6 +14173,36 @@ private enum IpadShortcutStageExecutor {
         for mode: CloudDataStore.BootMode
     ) -> IntentActiveSessionStore.ShortcutAnchorStoreUsed {
         mode == .cloud ? .cloud : .local
+    }
+
+    private static func diagnosticsFields(store: CloudDataStore) -> [String] {
+        let signedInText: String
+        if let signedIn = store.iCloudSignedIn {
+            signedInText = signedIn ? "true" : "false"
+        } else {
+            signedInText = "unknown"
+        }
+        let oldestAgeText: String
+        if let age = store.pendingStageOldestAge {
+            oldestAgeText = String(format: "%.1f", age)
+        } else {
+            oldestAgeText = "--"
+        }
+        let lastProcessedText: String
+        if let date = store.lastPendingProcessedAt {
+            lastProcessedText = String(Int(date.timeIntervalSince1970))
+        } else {
+            lastProcessedText = "--"
+        }
+        return [
+            "pendingEventCount=\(store.pendingStageEventCount)",
+            "oldestPendingEventAge=\(oldestAgeText)",
+            "lastProcessedEventAt=\(lastProcessedText)",
+            "lastProcessError=\(store.lastPendingProcessError ?? "none")",
+            "cloudBootReason=\(store.cloudBootReason)",
+            "iCloudSignedIn=\(signedInText)",
+            "cloudAccountStatus=\(store.cloudAccountStatus)"
+        ]
     }
 
     private static func applyQueuedEvent(
@@ -13885,7 +14230,8 @@ private enum IpadShortcutStageExecutor {
             isVoided: false,
             isDeleted: false,
             updatedAt: Date.distantPast,
-            stage: WatchSyncStore.StageSyncKey.stageStopped
+            stage: WatchSyncStore.StageSyncKey.stageStopped,
+            sourceDevice: sourceDevice
         )
 
         if state.isDeleted || state.isVoided {
@@ -13952,6 +14298,7 @@ private enum IpadShortcutStageExecutor {
 
         state.revision = nextRevision
         state.updatedAt = eventTime
+        state.sourceDevice = sourceDevice
         sessionStates[sessionId] = state
 
         if action == .endSession {
@@ -14014,7 +14361,17 @@ private enum IpadShortcutStageExecutor {
             return activePointer
         }
 
-        return latestActiveSessionId(from: sessionStates, dayKey: IntentActiveSessionStore.dayKey(for: now))
+        guard let fallback = latestActiveSessionId(from: sessionStates, dayKey: IntentActiveSessionStore.dayKey(for: now)),
+              let fallbackState = sessionStates[fallback] else {
+            return nil
+        }
+        IntentActiveSessionStore.saveAnchor(
+            dayKey: IntentActiveSessionStore.dayKey(for: now),
+            sessionId: fallback,
+            revision: fallbackState.revision,
+            updatedAt: fallbackState.updatedAt.timeIntervalSince1970
+        )
+        return fallback
     }
 
     private static func latestActiveSessionId(from states: [String: SessionState], dayKey: String) -> String? {
@@ -14078,12 +14435,11 @@ private enum IpadShortcutStageExecutor {
                 isVoided: record.isVoided,
                 isDeleted: record.isDeleted,
                 updatedAt: record.updatedAt,
-                stage: record.stage
+                stage: record.stage,
+                sourceDevice: record.sourceDevice
             )
             if let existing = states[record.id] {
-                if candidate.revision > existing.revision {
-                    states[record.id] = candidate
-                } else if candidate.revision == existing.revision && candidate.endedAt == nil && existing.endedAt != nil {
+                if shouldReplaceSessionStateWinner(candidate: candidate, existing: existing) {
                     states[record.id] = candidate
                 }
             } else {
@@ -14091,6 +14447,27 @@ private enum IpadShortcutStageExecutor {
             }
         }
         return states
+    }
+
+    private static func shouldReplaceSessionStateWinner(candidate: SessionState, existing: SessionState) -> Bool {
+        if candidate.revision != existing.revision {
+            return candidate.revision > existing.revision
+        }
+        let candidatePriority = mergeSourcePriority(candidate.sourceDevice)
+        let existingPriority = mergeSourcePriority(existing.sourceDevice)
+        if candidatePriority != existingPriority {
+            return candidatePriority > existingPriority
+        }
+        if candidate.updatedAt != existing.updatedAt {
+            return candidate.updatedAt > existing.updatedAt
+        }
+        if candidate.isDeleted != existing.isDeleted {
+            return candidate.isDeleted
+        }
+        if candidate.isVoided != existing.isVoided {
+            return candidate.isVoided
+        }
+        return false
     }
 
     private static func makeSessionId(now: Date, existingIds: Set<String>) -> String {
