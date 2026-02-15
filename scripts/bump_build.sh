@@ -13,7 +13,11 @@ if ! command -v agvtool >/dev/null 2>&1; then
 fi
 
 echo "Bumping build number for all targets..."
-agvtool next-version -all
+PROJECT_DIR="$(dirname "$PROJECT")"
+(
+  cd "$PROJECT_DIR"
+  agvtool next-version -all
+)
 
 echo "Now commit it:"
 echo "  git add ."

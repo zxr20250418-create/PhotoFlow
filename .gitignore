@@ -5,3 +5,4 @@
 docs/SESSIONS/
 artifacts/
 .worktrees/
+build/
