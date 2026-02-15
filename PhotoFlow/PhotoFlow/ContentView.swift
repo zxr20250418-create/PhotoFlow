@@ -153,79 +153,152 @@ private func encodeDailyReviewNote(notesAll: String?, aiSummary: DailyReviewAiSu
 }
 
 @MainActor
-private enum ActiveSessionPointerStore {
-    private static let defaults = UserDefaults.standard
-    private static let key = "pf_active_session_id_v1"
-
-    static func read() -> String? {
-        normalized(defaults.string(forKey: key))
+private enum IntentActiveSessionStore {
+    private static let appGroupId = "group.com.zhengxinrong.photoflow"
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: appGroupId) ?? UserDefaults.standard
     }
 
-    static func write(_ sessionId: String?) {
-        if let sessionId = normalized(sessionId) {
-            defaults.set(sessionId, forKey: key)
-        } else {
-            defaults.removeObject(forKey: key)
+    private static let activeSessionIdKey = "pf_intent_active_session_id_v1"
+    private static let activeSessionUpdatedAtKey = "pf_intent_active_session_updated_at_v1"
+    private static let activeSessionDayKey = "pf_intent_active_session_day_key_v1"
+
+    private static let dayKeyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .iso8601)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    static func read() -> String? {
+        normalized(defaults.string(forKey: activeSessionIdKey))
+    }
+
+    static func readUpdatedAt() -> TimeInterval? {
+        guard defaults.object(forKey: activeSessionUpdatedAtKey) != nil else { return nil }
+        return defaults.double(forKey: activeSessionUpdatedAtKey)
+    }
+
+    static func readDayKey() -> String? {
+        normalized(defaults.string(forKey: activeSessionDayKey))
+    }
+
+    static func write(_ sessionId: String?, updatedAt: Date = Date()) {
+        guard let sessionId = normalized(sessionId) else {
+            clear()
+            return
         }
+        defaults.set(sessionId, forKey: activeSessionIdKey)
+        defaults.set(updatedAt.timeIntervalSince1970, forKey: activeSessionUpdatedAtKey)
+        defaults.set(dayKey(for: updatedAt), forKey: activeSessionDayKey)
+    }
+
+    static func clear() {
+        defaults.removeObject(forKey: activeSessionIdKey)
+        defaults.removeObject(forKey: activeSessionUpdatedAtKey)
+        defaults.removeObject(forKey: activeSessionDayKey)
     }
 
     static func clearIfMatches(_ sessionId: String) {
         guard let active = read(), active == sessionId else { return }
-        write(nil)
+        clear()
     }
 
-    static func updateFromSessionTiming(sessionId: String, stage: String, endedAt: Date?) {
+    static func updateFromSessionTiming(
+        sessionId: String,
+        stage: String,
+        endedAt: Date?,
+        updatedAt: Date = Date()
+    ) {
         if endedAt != nil || isEndedStage(stage) {
-            write(nil)
-        } else {
-            write(sessionId)
-        }
-    }
-
-    static func reconcile(with records: [CloudDataStore.SessionRecord]) {
-        if let pointer = read(),
-           isEligibleActiveSession(pointer, records: records) {
+            clearIfMatches(sessionId)
             return
         }
-        write(latestActiveSessionId(from: records))
+        write(sessionId, updatedAt: updatedAt)
+    }
+
+    static func reconcile(with records: [CloudDataStore.SessionRecord], now: Date = Date()) {
+        let today = dayKey(for: now)
+        if let storedDayKey = readDayKey(), storedDayKey != today {
+            clear()
+        }
+        if let pointer = read(),
+           isEligibleActiveSession(pointer, records: records, dayKey: today) {
+            return
+        }
+        if let latest = latestActiveSessionId(from: records, dayKey: today) {
+            write(latest, updatedAt: now)
+        } else {
+            clear()
+        }
     }
 
     static func resolveTargetSessionId(
         preferred pointer: String?,
-        records: [CloudDataStore.SessionRecord]
+        records: [CloudDataStore.SessionRecord],
+        now: Date = Date()
     ) -> String? {
+        let today = dayKey(for: now)
         if let pointer = normalized(pointer),
-           isEligibleActiveSession(pointer, records: records) {
+           isEligibleActiveSession(pointer, records: records, dayKey: today) {
             return pointer
         }
-        return latestActiveSessionId(from: records)
+        return nil
     }
 
-    private static func latestActiveSessionId(from records: [CloudDataStore.SessionRecord]) -> String? {
+    static func resolveFallbackInProgressSessionId(
+        records: [CloudDataStore.SessionRecord],
+        now: Date = Date()
+    ) -> String? {
+        latestActiveSessionId(from: records, dayKey: dayKey(for: now))
+    }
+
+    static func dayKey(for date: Date) -> String {
+        dayKeyFormatter.string(from: date)
+    }
+
+    private static func latestActiveSessionId(
+        from records: [CloudDataStore.SessionRecord],
+        dayKey: String
+    ) -> String? {
         records
             .filter { record in
-                !record.isDeleted &&
-                !record.isVoided &&
-                record.endedAt == nil &&
-                !isEndedStage(record.stage)
+                isInProgress(record) &&
+                sessionDayKey(record) == dayKey
             }
             .max { lhs, rhs in
-                if lhs.updatedAt == rhs.updatedAt {
-                    return lhs.revision < rhs.revision
+                if lhs.revision == rhs.revision {
+                    let lhsStart = lhs.shootingStart ?? lhs.selectingStart ?? lhs.updatedAt
+                    let rhsStart = rhs.shootingStart ?? rhs.selectingStart ?? rhs.updatedAt
+                    return lhsStart < rhsStart
                 }
-                return lhs.updatedAt < rhs.updatedAt
+                return lhs.revision < rhs.revision
             }?
             .id
     }
 
-    private static func isEligibleActiveSession(_ sessionId: String, records: [CloudDataStore.SessionRecord]) -> Bool {
+    private static func sessionDayKey(_ record: CloudDataStore.SessionRecord) -> String {
+        let anchor = record.shootingStart ?? record.selectingStart ?? record.updatedAt
+        return dayKey(for: anchor)
+    }
+
+    private static func isEligibleActiveSession(
+        _ sessionId: String,
+        records: [CloudDataStore.SessionRecord],
+        dayKey: String
+    ) -> Bool {
         guard let record = records.first(where: { $0.id == sessionId }) else {
             return false
         }
-        return !record.isDeleted &&
-            !record.isVoided &&
-            record.endedAt == nil &&
-            !isEndedStage(record.stage)
+        return isInProgress(record) && sessionDayKey(record) == dayKey
+    }
+
+    private static func isInProgress(_ record: CloudDataStore.SessionRecord) -> Bool {
+        !record.isDeleted &&
+        !record.isVoided &&
+        (record.endedAt == nil || !isEndedStage(record.stage))
     }
 
     private static func isEndedStage(_ stage: String) -> Bool {
@@ -245,33 +318,13 @@ private enum ActiveSessionPointerStore {
 
 @MainActor
 private enum ShortcutSessionPointerStore {
-    private static let defaults = UserDefaults.standard
-    private static let activeKey = "pf_shortcut_active_session_id_v1"
+    private static let appGroupId = "group.com.zhengxinrong.photoflow"
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: appGroupId) ?? UserDefaults.standard
+    }
+
     private static let lastRequestedStageKey = "pf_shortcut_last_requested_stage_v1"
     private static let lastTargetSessionIdKey = "pf_shortcut_last_target_session_id_v1"
-
-    static func readActiveSessionId() -> String? {
-        normalized(defaults.string(forKey: activeKey))
-    }
-
-    static func writeActiveSessionId(_ sessionId: String?) {
-        if let sessionId = normalized(sessionId) {
-            defaults.set(sessionId, forKey: activeKey)
-        } else {
-            defaults.removeObject(forKey: activeKey)
-        }
-    }
-
-    static func clearIfMatches(_ sessionId: String) {
-        guard let active = readActiveSessionId(), active == sessionId else { return }
-        writeActiveSessionId(nil)
-    }
-
-    static func updateFromSessionTiming(sessionId: String, stage: String, endedAt: Date?) {
-        if endedAt != nil || isEndedStage(stage) {
-            clearIfMatches(sessionId)
-        }
-    }
 
     static func writeLastShortcutMetadata(requestedStage: String?, targetSessionId: String?) {
         if let requestedStage = normalized(requestedStage) {
@@ -292,38 +345,6 @@ private enum ShortcutSessionPointerStore {
 
     static func readLastShortcutTargetSessionId() -> String? {
         normalized(defaults.string(forKey: lastTargetSessionIdKey))
-    }
-
-    static func reconcile(with records: [CloudDataStore.SessionRecord]) {
-        guard let active = readActiveSessionId() else { return }
-        if isEligibleActiveSession(active, records: records) {
-            return
-        }
-        writeActiveSessionId(nil)
-    }
-
-    static func resolveTargetSessionId(records: [CloudDataStore.SessionRecord]) -> String? {
-        guard let active = readActiveSessionId() else { return nil }
-        guard isEligibleActiveSession(active, records: records) else { return nil }
-        return active
-    }
-
-    private static func isEligibleActiveSession(_ sessionId: String, records: [CloudDataStore.SessionRecord]) -> Bool {
-        guard let record = records.first(where: { $0.id == sessionId }) else {
-            return false
-        }
-        return !record.isDeleted &&
-            !record.isVoided &&
-            record.endedAt == nil &&
-            !isEndedStage(record.stage)
-    }
-
-    private static func isEndedStage(_ stage: String) -> Bool {
-        let normalizedStage = stage.lowercased()
-        if normalizedStage == WatchSyncStore.StageSyncKey.stageStopped.lowercased() {
-            return true
-        }
-        return normalizedStage == "ended" || normalizedStage == "end"
     }
 
     private static func normalized(_ value: String?) -> String? {
@@ -1255,15 +1276,11 @@ final class CloudDataStore: ObservableObject {
             setSessionDeleted(existingDeleted, on: target)
         }
         if saveContext() {
-            ActiveSessionPointerStore.updateFromSessionTiming(
+            IntentActiveSessionStore.updateFromSessionTiming(
                 sessionId: sessionId,
                 stage: stage,
-                endedAt: endedAt
-            )
-            ShortcutSessionPointerStore.updateFromSessionTiming(
-                sessionId: sessionId,
-                stage: stage,
-                endedAt: endedAt
+                endedAt: endedAt,
+                updatedAt: updatedAt
             )
         }
     }
@@ -1361,8 +1378,7 @@ final class CloudDataStore: ObservableObject {
             target.setValue(Self.defaultStage, forKey: SessionField.stage)
         }
         if saveContext(), (isDeleted == true || isVoided == true) {
-            ActiveSessionPointerStore.clearIfMatches(sessionId)
-            ShortcutSessionPointerStore.clearIfMatches(sessionId)
+            IntentActiveSessionStore.clearIfMatches(sessionId)
         }
     }
 
@@ -1860,8 +1876,7 @@ final class CloudDataStore: ObservableObject {
         dayMemos = snapshot.dayMemos
         dailyReviews = snapshot.dailyReviews
         weeklyReviews = snapshot.weeklyReviews
-        ActiveSessionPointerStore.reconcile(with: sessionRecords)
-        ShortcutSessionPointerStore.reconcile(with: sessionRecords)
+        IntentActiveSessionStore.reconcile(with: sessionRecords)
         updateRevisionSnapshot()
         updateDeletedSnapshot()
     }
@@ -3880,7 +3895,6 @@ struct ContentView: View {
     @State private var diagnosticsStressRunning = false
     @State private var shortcutLastRun = IpadShortcutLastRunRecord.empty
     @State private var activeSessionId: String?
-    @State private var shortcutActiveSessionId: String?
     @State private var apiTestingSelections: Set<String> = []
     @AppStorage(MarkdownAutoExportStorageKey.folderPath) private var markdownExportFolderPath = ""
     @AppStorage(MarkdownAutoExportStorageKey.lastExportAt) private var markdownLastExportAtRaw: Double = 0
@@ -4240,8 +4254,7 @@ struct ContentView: View {
 
     private func refreshShortcutRunDiagnostics() {
         shortcutLastRun = IpadShortcutStageQueueStorage.loadLastRun()
-        activeSessionId = ActiveSessionPointerStore.read()
-        shortcutActiveSessionId = ShortcutSessionPointerStore.readActiveSessionId()
+        activeSessionId = IntentActiveSessionStore.read()
     }
 
     private func flushPendingShortcutEvents(reason: String) {
@@ -4260,10 +4273,6 @@ struct ContentView: View {
         guard shortcutLastRun.lastShortcutAt > 0 else { return "—" }
         let date = Date(timeIntervalSince1970: shortcutLastRun.lastShortcutAt)
         return formatApiTestTime(date)
-    }
-
-    private func shortcutActiveSessionIdText() -> String {
-        shortcutActiveSessionId?.isEmpty == false ? (shortcutActiveSessionId ?? "—") : "—"
     }
 
     private func activeSessionIdText() -> String {
@@ -5853,19 +5862,13 @@ struct ContentView: View {
             Text("activeSessionId: \(activeSessionIdText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("shortcutActiveSessionId: \(shortcutActiveSessionIdText())")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
             Text("lastShortcutAt: \(shortcutLastRunAtText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("lastShortcutName: \(shortcutLastRun.lastShortcutName)")
+            Text("lastShortcutAction: \(shortcutLastRequestedStageText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("lastShortcutRequestedStage: \(shortcutLastRequestedStageText())")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text("lastShortcutTargetSessionId: \(shortcutLastTargetSessionIdText())")
+            Text("lastResolvedTargetSessionId: \(shortcutLastTargetSessionIdText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastShortcutResult: \(shortcutLastRun.lastShortcutResult)")
@@ -12685,7 +12688,7 @@ private enum IpadShortcutStageQueueStorage {
 @MainActor
 private enum IpadShortcutStageExecutor {
     static let sourceDevice = "ipad"
-    private static let noActiveSessionMessage = "没有进行中会话，请先开始拍摄"
+    private static let noActiveSessionMessage = "未找到进行中会话，请先运行开始拍摄"
 
     private enum TargetDecision {
         case useExisting(sessionId: String)
@@ -12730,7 +12733,8 @@ private enum IpadShortcutStageExecutor {
 
     struct AppliedEventInfo {
         let sessionId: String
-        let action: IpadShortcutStageAction
+        let stage: String
+        let dayKey: String
         let revision: Int64
         let targetSessionId: String
         let note: String?
@@ -12777,8 +12781,10 @@ private enum IpadShortcutStageExecutor {
 
     private static func performWithStore(action: IpadShortcutStageAction, bootstrap: StoreBootstrapInfo) -> String {
         let store = bootstrap.store
+        let now = Date()
+        let dayKey = IntentActiveSessionStore.dayKey(for: now)
         store.refreshFromStore()
-        let decision = resolveTargetDecision(action: action, records: store.sessionRecords)
+        let decision = resolveTargetDecision(action: action, records: store.sessionRecords, now: now)
         switch decision {
         case .reject(let message):
             IpadShortcutStageQueueStorage.recordLastRun(
@@ -12791,8 +12797,7 @@ private enum IpadShortcutStageExecutor {
             return message
 
         case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
-            ActiveSessionPointerStore.write(targetSessionId)
-            ShortcutSessionPointerStore.writeActiveSessionId(targetSessionId)
+            IntentActiveSessionStore.write(targetSessionId, updatedAt: now)
 
             let enqueuedEvent = IpadShortcutStageQueueStorage.enqueue(
                 action: action,
@@ -12806,8 +12811,9 @@ private enum IpadShortcutStageExecutor {
                     "storeUsed=\(storeUsed)",
                     "cloudReason=\(bootstrap.cloudReason)",
                     "sessionId=\(applied.sessionId)",
+                    "stage=\(applied.stage)",
+                    "dayKey=\(applied.dayKey)",
                     "targetSessionId=\(applied.targetSessionId)",
-                    "action=\(applied.action.rawValue)",
                     "revision=\(applied.revision)"
                 ]
                 var lastRunResult = "ok"
@@ -12827,12 +12833,10 @@ private enum IpadShortcutStageExecutor {
                     notes.append(note)
                 }
 
-                if applied.action == .endSession {
-                    ActiveSessionPointerStore.write(nil)
-                    ShortcutSessionPointerStore.writeActiveSessionId(nil)
+                if action == .endSession {
+                    IntentActiveSessionStore.clear()
                 } else {
-                    ActiveSessionPointerStore.write(applied.sessionId)
-                    ShortcutSessionPointerStore.writeActiveSessionId(applied.sessionId)
+                    IntentActiveSessionStore.write(applied.sessionId, updatedAt: now)
                 }
 
                 IpadShortcutStageQueueStorage.recordLastRun(
@@ -12862,8 +12866,9 @@ private enum IpadShortcutStageExecutor {
                 "storeUsed=\(storeUsed)",
                 "cloudReason=\(bootstrap.cloudReason)",
                 "sessionId=pending",
+                "stage=\(stageValue(for: action))",
+                "dayKey=\(dayKey)",
                 "targetSessionId=\(enqueuedEvent.targetSessionId ?? "nil")",
-                "action=\(action.rawValue)",
                 "revision=\(enqueuedEvent.revision)",
                 "note=\(reason)"
             ]
@@ -12872,7 +12877,9 @@ private enum IpadShortcutStageExecutor {
     }
 
     private static func performWithoutStore(action: IpadShortcutStageAction, bootstrapError: String) -> String {
-        let decision = resolveTargetDecisionWithoutRecords(action: action)
+        let now = Date()
+        let dayKey = IntentActiveSessionStore.dayKey(for: now)
+        let decision = resolveTargetDecisionWithoutRecords(action: action, now: now)
         switch decision {
         case .reject(let message):
             IpadShortcutStageQueueStorage.recordLastRun(
@@ -12885,8 +12892,7 @@ private enum IpadShortcutStageExecutor {
             return message
 
         case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
-            ActiveSessionPointerStore.write(targetSessionId)
-            ShortcutSessionPointerStore.writeActiveSessionId(targetSessionId)
+            IntentActiveSessionStore.write(targetSessionId, updatedAt: now)
             let enqueuedEvent = IpadShortcutStageQueueStorage.enqueue(
                 action: action,
                 targetSessionId: targetSessionId,
@@ -12909,8 +12915,9 @@ private enum IpadShortcutStageExecutor {
                 "storeUsed=unavailable",
                 "cloudReason=bootstrap_failed",
                 "sessionId=pending",
+                "stage=\(stageValue(for: action))",
+                "dayKey=\(dayKey)",
                 "targetSessionId=\(targetSessionId)",
-                "action=\(action.rawValue)",
                 "revision=\(enqueuedEvent.revision)",
                 "note=\(reason)"
             ]
@@ -12918,34 +12925,41 @@ private enum IpadShortcutStageExecutor {
         }
     }
 
-    private static func resolveTargetDecision(action: IpadShortcutStageAction, records: [CloudDataStore.SessionRecord]) -> TargetDecision {
-        if let shortcutTarget = ShortcutSessionPointerStore.resolveTargetSessionId(records: records) {
-            return .useExisting(sessionId: shortcutTarget)
-        }
-        let activePointer = ActiveSessionPointerStore.read()
-        if let globalTarget = ActiveSessionPointerStore.resolveTargetSessionId(
+    private static func resolveTargetDecision(
+        action: IpadShortcutStageAction,
+        records: [CloudDataStore.SessionRecord],
+        now: Date
+    ) -> TargetDecision {
+        let activePointer = IntentActiveSessionStore.read()
+        if let globalTarget = IntentActiveSessionStore.resolveTargetSessionId(
             preferred: activePointer,
-            records: records
+            records: records,
+            now: now
         ) {
             return .useExisting(sessionId: globalTarget)
         }
         if action == .startShooting {
-            let createdId = makeSessionId(now: Date(), existingIds: Set(records.map(\.id)))
-            return .createNew(sessionId: createdId, note: "未找到进行中会话，已创建新会话")
+            let createdId = makeSessionId(now: now, existingIds: Set(records.map(\.id)))
+            return .createNew(sessionId: createdId, note: "已创建新会话")
+        }
+        if let fallback = IntentActiveSessionStore.resolveFallbackInProgressSessionId(records: records, now: now) {
+            return .useExisting(sessionId: fallback)
         }
         return .reject(message: noActiveSessionMessage)
     }
 
-    private static func resolveTargetDecisionWithoutRecords(action: IpadShortcutStageAction) -> TargetDecision {
-        if let shortcutTarget = ShortcutSessionPointerStore.readActiveSessionId() {
-            return .useExisting(sessionId: shortcutTarget)
-        }
-        if let globalTarget = ActiveSessionPointerStore.read() {
+    private static func resolveTargetDecisionWithoutRecords(
+        action: IpadShortcutStageAction,
+        now: Date
+    ) -> TargetDecision {
+        let today = IntentActiveSessionStore.dayKey(for: now)
+        if let globalTarget = IntentActiveSessionStore.read(),
+           IntentActiveSessionStore.readDayKey() == today {
             return .useExisting(sessionId: globalTarget)
         }
         if action == .startShooting {
-            let createdId = makeSessionId(now: Date(), existingIds: Set<String>())
-            return .createNew(sessionId: createdId, note: "未找到进行中会话，已创建新会话")
+            let createdId = makeSessionId(now: now, existingIds: Set<String>())
+            return .createNew(sessionId: createdId, note: "已创建新会话")
         }
         return .reject(message: noActiveSessionMessage)
     }
@@ -13116,16 +13130,16 @@ private enum IpadShortcutStageExecutor {
         sessionStates[sessionId] = state
 
         if action == .endSession {
-            ActiveSessionPointerStore.write(nil)
-            ShortcutSessionPointerStore.writeActiveSessionId(nil)
+            IntentActiveSessionStore.clear()
         } else {
-            ActiveSessionPointerStore.write(sessionId)
-            ShortcutSessionPointerStore.writeActiveSessionId(sessionId)
+            IntentActiveSessionStore.write(sessionId, updatedAt: eventTime)
         }
+        let dayKey = IntentActiveSessionStore.dayKey(for: state.shootingStart ?? state.selectingStart ?? eventTime)
 
         return AppliedEventInfo(
             sessionId: sessionId,
-            action: action,
+            stage: stageValue(for: action),
+            dayKey: dayKey,
             revision: nextRevision,
             targetSessionId: resolution.targetSessionId,
             note: resolution.note
@@ -13144,7 +13158,7 @@ private enum IpadShortcutStageExecutor {
             return SessionResolution(sessionId: target, targetSessionId: target, note: nil)
         }
 
-        if let fallbackTarget = resolveFallbackActiveSessionId(from: sessionStates) {
+        if let fallbackTarget = resolveFallbackActiveSessionId(from: sessionStates, now: event.createdAtDate) {
             return SessionResolution(sessionId: fallbackTarget, targetSessionId: fallbackTarget, note: nil)
         }
 
@@ -13159,30 +13173,27 @@ private enum IpadShortcutStageExecutor {
         )
     }
 
-    private static func resolveFallbackActiveSessionId(from sessionStates: [String: SessionState]) -> String? {
-        if let shortcutPointer = ShortcutSessionPointerStore.readActiveSessionId(),
-           let state = sessionStates[shortcutPointer],
-           isActive(state: state) {
-            return shortcutPointer
-        }
-
-        if let activePointer = ActiveSessionPointerStore.read(),
+    private static func resolveFallbackActiveSessionId(from sessionStates: [String: SessionState], now: Date) -> String? {
+        if let activePointer = IntentActiveSessionStore.read(),
+           IntentActiveSessionStore.readDayKey() == IntentActiveSessionStore.dayKey(for: now),
            let state = sessionStates[activePointer],
            isActive(state: state) {
             return activePointer
         }
 
-        return latestActiveSessionId(from: sessionStates)
+        return latestActiveSessionId(from: sessionStates, dayKey: IntentActiveSessionStore.dayKey(for: now))
     }
 
-    private static func latestActiveSessionId(from states: [String: SessionState]) -> String? {
+    private static func latestActiveSessionId(from states: [String: SessionState], dayKey: String) -> String? {
         states.values
-            .filter { isActive(state: $0) }
+            .filter { isActive(state: $0) && sessionDayKey(for: $0) == dayKey }
             .max { lhs, rhs in
-                if lhs.updatedAt == rhs.updatedAt {
-                    return lhs.revision < rhs.revision
+                if lhs.revision == rhs.revision {
+                    let lhsStart = lhs.shootingStart ?? lhs.selectingStart ?? lhs.updatedAt
+                    let rhsStart = rhs.shootingStart ?? rhs.selectingStart ?? rhs.updatedAt
+                    return lhsStart < rhsStart
                 }
-                return lhs.updatedAt < rhs.updatedAt
+                return lhs.revision < rhs.revision
             }?
             .id
     }
@@ -13193,6 +13204,22 @@ private enum IpadShortcutStageExecutor {
             state.endedAt == nil &&
             state.stage.lowercased() != WatchSyncStore.StageSyncKey.stageStopped.lowercased() &&
             state.stage.lowercased() != "ended"
+    }
+
+    private static func stageValue(for action: IpadShortcutStageAction) -> String {
+        switch action {
+        case .startShooting:
+            return WatchSyncStore.StageSyncKey.stageShooting
+        case .startSelecting:
+            return WatchSyncStore.StageSyncKey.stageSelecting
+        case .endSession:
+            return WatchSyncStore.StageSyncKey.stageStopped
+        }
+    }
+
+    private static func sessionDayKey(for state: SessionState) -> String {
+        let anchor = state.shootingStart ?? state.selectingStart ?? state.updatedAt
+        return IntentActiveSessionStore.dayKey(for: anchor)
     }
 
     private static func makeSessionStates(from records: [CloudDataStore.SessionRecord]) -> [String: SessionState] {
