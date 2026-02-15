@@ -1,39 +1,61 @@
-## ACTIVE — TC-IOS-CLOUDKIT-GUARD-LOCALONLY-V1
+## ACTIVE — TC-MULTIDEVICE-OFFLINE-MERGE-CLOUDKIT-GUARD-V1
 Priority: P0
 Goal:
-- 避免 CoreData CloudKit mirroring 在不可靠环境触发 SIGTRAP/卡死
-- 在 Simulator/未登录 iCloud/用户关闭同步时自动走 local-only，App 永远可打开可用
+- 在多设备/离线/重连场景下，保证会话状态最终一致、可恢复、不中断。
+- 建立 CloudKit guard：不满足条件时强制 local-only，避免 mirroring 崩溃与卡死。
+- 修复 iPad Shortcuts 锚定逻辑，确保幂等与“同一会话”连续推进。
 
 Scope:
-1) cloudEnabled 判定（启动时一次性决定）
-- Simulator -> false (reason=simulator)
-- iCloud 未登录 (ubiquityIdentityToken==nil) -> false (reason=no_iCloud)
-- 用户关闭 Cloud Sync -> false (reason=userDisabled)
-- 其他 -> true (reason=enabled)
+1) CloudKit guard + local-only + safe mode
+- 启动时一次性计算 cloudEnabled：Simulator / 未登录 iCloud / 用户关闭同步 => false。
+- cloudEnabled=false 时绝不触发 mirroring setup，仅走 local-only container。
+- cloud 失败自动降级 local-only；local-only 失败进入 safe mode（App 仍可打开）。
 
-2) DataStack 分支
-- cloudEnabled=false 时不得触发 mirroring setup（不设置 cloudKitContainerOptions / 或直接用 NSPersistentContainer local-only）
-- cloudEnabled=true 才允许启用 CloudKit
+2) Canonical 合并入口（revision 统一规则）
+- 所有写入路径（UI/Shortcut/Sync）统一进入 canonical merge。
+- winner 规则：revision 大者优先；相等按 sourceDevice 稳定 tie-break。
+- 严禁分叉写入逻辑导致不同设备状态漂移。
 
-3) UI/Diagnostics
-- 显示 cloudEnabled + reason + iCloudSignedIn + buildFingerprint
-- Cloud Sync 开关（V1：提示重启生效，不做热切换）
+3) Tombstone winner 过滤
+- deleted/voided 以 winner 判定为准。
+- 任何列表/统计/详情统一过滤 winner tombstone，禁止“删除后复活”。
 
-4) Boot 安全
-- 异步加载 store，禁止主线程阻塞
-- fallback：cloud失败 -> local-only；local-only失败 -> safe mode
-- 不改数据模型
+4) iPad shortcut anchor + idempotent
+- 快捷指令必须优先锚定当前 active session（若无再创建）。
+- 同一动作重复触发需幂等：不重复建单、不回滚阶段。
+- 写入必须带 revision/updatedAt/sourceDevice，且可与 canonical 规则一致收敛。
+
+5) Debug diagnostics（全字段）
+- 输出 cloudEnabled/reason/iCloudSignedIn/buildFingerprint。
+- 输出 merge/winner 关键字段（sessionId/stage/revision/updatedAt/sourceDevice）。
+- 输出 pending/outbox/lastSync/lastError 等诊断字段，便于设备侧排障。
 
 Guardrails:
-- Allowed: PhotoFlow/PhotoFlow/**/*.swift
-- Forbidden: Info.plist / project.pbxproj / entitlements / targets / appex / watch / widget config
-- Must run: bash scripts/ios_safe.sh --clean-deriveddata
+- Allowed (whitelist):
+  - PhotoFlow/PhotoFlow/**/*.swift
+  - （仅必要时）PhotoFlow/PhotoFlow/*.xcdatamodeld（新增字段必须 optional/default，且 no unique constraints）
+- Forbidden (blacklist):
+  - **/Info.plist
+  - **/*.pbxproj
+  - **/*.entitlements
+  - targets / appex / watch / widget config
+- Validation:
+  - bash scripts/ios_safe.sh --clean-deriveddata
+- Merge policy:
+  - CI 红灯 = 不合并
+  - 禁止 admin bypass（不允许越过检查强合）
 
 Acceptance:
-A Simulator 启动不再 SIGTRAP/卡死，显示 local-only 原因
-B 真机未登录 iCloud 仍可用（local-only）
-C 真机登录 iCloud 可启用云同步
-D ios_safe PASS；0 配置改动
+A Simulator 启动稳定，自动 local-only，显示 reason=simulator。
+B 真机未登录 iCloud 时稳定 local-only，核心功能可用。
+C 真机登录 iCloud 且开启同步时可进入 cloud 模式。
+D Cloud 初始化失败会自动降级 local-only，不崩溃不卡死。
+E local-only 初始化失败时进入 safe mode，App 仍可打开。
+F 多设备并发更新后最终一致（按 revision + tie-break 收敛）。
+G tombstone winner 过滤生效：删除/作废不会复活。
+H iPad shortcuts 可连续推进同一会话；重复触发保持幂等。
+I Diagnostics 可见全字段，能定位 cloud/merge/sync 问题。
+J ios_safe PASS，且未修改任何 forbidden config files。
 
 ## DONE — TC-IOS-CRASH-INVESTIGATION-V1
 Status: DONE (merged in PR #234)
