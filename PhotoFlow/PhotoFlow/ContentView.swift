@@ -155,39 +155,51 @@ private func encodeDailyReviewNote(notesAll: String?, aiSummary: DailyReviewAiSu
 @MainActor
 private enum ActiveSessionPointerStore {
     private static let defaults = UserDefaults.standard
-    private static let key = "pf_active_session_id_v1"
+    private static let activeSessionIdKey = "pf_active_session_id_v1"
+    private static let lastEndedSessionIdKey = "pf_last_ended_session_id_v1"
 
     static func read() -> String? {
-        normalized(defaults.string(forKey: key))
+        normalized(defaults.string(forKey: activeSessionIdKey))
     }
 
     static func write(_ sessionId: String?) {
         if let sessionId = normalized(sessionId) {
-            defaults.set(sessionId, forKey: key)
+            defaults.set(sessionId, forKey: activeSessionIdKey)
         } else {
-            defaults.removeObject(forKey: key)
+            defaults.removeObject(forKey: activeSessionIdKey)
         }
     }
 
+    static func readLastEndedSessionId() -> String? {
+        normalized(defaults.string(forKey: lastEndedSessionIdKey))
+    }
+
     static func clearIfMatches(_ sessionId: String) {
-        guard let active = read(), active == sessionId else { return }
-        write(nil)
+        if let active = read(), active == sessionId {
+            write(nil)
+        }
+        if let ended = readLastEndedSessionId(), ended == sessionId {
+            defaults.removeObject(forKey: lastEndedSessionIdKey)
+        }
     }
 
     static func updateFromSessionTiming(sessionId: String, stage: String, endedAt: Date?) {
+        write(sessionId)
         if endedAt != nil || isEndedStage(stage) {
-            write(nil)
-        } else {
-            write(sessionId)
+            defaults.set(sessionId, forKey: lastEndedSessionIdKey)
         }
     }
 
     static func reconcile(with records: [CloudDataStore.SessionRecord]) {
         if let pointer = read(),
-           isEligibleActiveSession(pointer, records: records) {
+           isKnownSession(pointer, records: records) {
             return
         }
         write(latestActiveSessionId(from: records))
+        if let ended = readLastEndedSessionId(),
+           !isKnownSession(ended, records: records) {
+            defaults.removeObject(forKey: lastEndedSessionIdKey)
+        }
     }
 
     static func resolveTargetSessionId(
@@ -228,6 +240,13 @@ private enum ActiveSessionPointerStore {
             !isEndedStage(record.stage)
     }
 
+    private static func isKnownSession(_ sessionId: String, records: [CloudDataStore.SessionRecord]) -> Bool {
+        guard let record = records.first(where: { $0.id == sessionId }) else {
+            return false
+        }
+        return !record.isDeleted && !record.isVoided
+    }
+
     private static func isEndedStage(_ stage: String) -> Bool {
         let normalizedStage = stage.lowercased()
         if normalizedStage == WatchSyncStore.StageSyncKey.stageStopped.lowercased() {
@@ -246,32 +265,8 @@ private enum ActiveSessionPointerStore {
 @MainActor
 private enum ShortcutSessionPointerStore {
     private static let defaults = UserDefaults.standard
-    private static let activeKey = "pf_shortcut_active_session_id_v1"
     private static let lastRequestedStageKey = "pf_shortcut_last_requested_stage_v1"
     private static let lastTargetSessionIdKey = "pf_shortcut_last_target_session_id_v1"
-
-    static func readActiveSessionId() -> String? {
-        normalized(defaults.string(forKey: activeKey))
-    }
-
-    static func writeActiveSessionId(_ sessionId: String?) {
-        if let sessionId = normalized(sessionId) {
-            defaults.set(sessionId, forKey: activeKey)
-        } else {
-            defaults.removeObject(forKey: activeKey)
-        }
-    }
-
-    static func clearIfMatches(_ sessionId: String) {
-        guard let active = readActiveSessionId(), active == sessionId else { return }
-        writeActiveSessionId(nil)
-    }
-
-    static func updateFromSessionTiming(sessionId: String, stage: String, endedAt: Date?) {
-        if endedAt != nil || isEndedStage(stage) {
-            clearIfMatches(sessionId)
-        }
-    }
 
     static func writeLastShortcutMetadata(requestedStage: String?, targetSessionId: String?) {
         if let requestedStage = normalized(requestedStage) {
@@ -292,38 +287,6 @@ private enum ShortcutSessionPointerStore {
 
     static func readLastShortcutTargetSessionId() -> String? {
         normalized(defaults.string(forKey: lastTargetSessionIdKey))
-    }
-
-    static func reconcile(with records: [CloudDataStore.SessionRecord]) {
-        guard let active = readActiveSessionId() else { return }
-        if isEligibleActiveSession(active, records: records) {
-            return
-        }
-        writeActiveSessionId(nil)
-    }
-
-    static func resolveTargetSessionId(records: [CloudDataStore.SessionRecord]) -> String? {
-        guard let active = readActiveSessionId() else { return nil }
-        guard isEligibleActiveSession(active, records: records) else { return nil }
-        return active
-    }
-
-    private static func isEligibleActiveSession(_ sessionId: String, records: [CloudDataStore.SessionRecord]) -> Bool {
-        guard let record = records.first(where: { $0.id == sessionId }) else {
-            return false
-        }
-        return !record.isDeleted &&
-            !record.isVoided &&
-            record.endedAt == nil &&
-            !isEndedStage(record.stage)
-    }
-
-    private static func isEndedStage(_ stage: String) -> Bool {
-        let normalizedStage = stage.lowercased()
-        if normalizedStage == WatchSyncStore.StageSyncKey.stageStopped.lowercased() {
-            return true
-        }
-        return normalizedStage == "ended" || normalizedStage == "end"
     }
 
     private static func normalized(_ value: String?) -> String? {
@@ -1260,11 +1223,6 @@ final class CloudDataStore: ObservableObject {
                 stage: stage,
                 endedAt: endedAt
             )
-            ShortcutSessionPointerStore.updateFromSessionTiming(
-                sessionId: sessionId,
-                stage: stage,
-                endedAt: endedAt
-            )
         }
     }
 
@@ -1362,7 +1320,6 @@ final class CloudDataStore: ObservableObject {
         }
         if saveContext(), (isDeleted == true || isVoided == true) {
             ActiveSessionPointerStore.clearIfMatches(sessionId)
-            ShortcutSessionPointerStore.clearIfMatches(sessionId)
         }
     }
 
@@ -1861,7 +1818,6 @@ final class CloudDataStore: ObservableObject {
         dailyReviews = snapshot.dailyReviews
         weeklyReviews = snapshot.weeklyReviews
         ActiveSessionPointerStore.reconcile(with: sessionRecords)
-        ShortcutSessionPointerStore.reconcile(with: sessionRecords)
         updateRevisionSnapshot()
         updateDeletedSnapshot()
     }
@@ -3880,7 +3836,7 @@ struct ContentView: View {
     @State private var diagnosticsStressRunning = false
     @State private var shortcutLastRun = IpadShortcutLastRunRecord.empty
     @State private var activeSessionId: String?
-    @State private var shortcutActiveSessionId: String?
+    @State private var lastEndedSessionId: String?
     @State private var apiTestingSelections: Set<String> = []
     @AppStorage(MarkdownAutoExportStorageKey.folderPath) private var markdownExportFolderPath = ""
     @AppStorage(MarkdownAutoExportStorageKey.lastExportAt) private var markdownLastExportAtRaw: Double = 0
@@ -4241,7 +4197,7 @@ struct ContentView: View {
     private func refreshShortcutRunDiagnostics() {
         shortcutLastRun = IpadShortcutStageQueueStorage.loadLastRun()
         activeSessionId = ActiveSessionPointerStore.read()
-        shortcutActiveSessionId = ShortcutSessionPointerStore.readActiveSessionId()
+        lastEndedSessionId = ActiveSessionPointerStore.readLastEndedSessionId()
     }
 
     private func flushPendingShortcutEvents(reason: String) {
@@ -4262,12 +4218,12 @@ struct ContentView: View {
         return formatApiTestTime(date)
     }
 
-    private func shortcutActiveSessionIdText() -> String {
-        shortcutActiveSessionId?.isEmpty == false ? (shortcutActiveSessionId ?? "—") : "—"
-    }
-
     private func activeSessionIdText() -> String {
         activeSessionId?.isEmpty == false ? (activeSessionId ?? "—") : "—"
+    }
+
+    private func lastEndedSessionIdText() -> String {
+        lastEndedSessionId?.isEmpty == false ? (lastEndedSessionId ?? "—") : "—"
     }
 
     private func shortcutLastRequestedStageText() -> String {
@@ -5853,19 +5809,16 @@ struct ContentView: View {
             Text("activeSessionId: \(activeSessionIdText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("shortcutActiveSessionId: \(shortcutActiveSessionIdText())")
+            Text("lastEndedSessionId: \(lastEndedSessionIdText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastShortcutAt: \(shortcutLastRunAtText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("lastShortcutName: \(shortcutLastRun.lastShortcutName)")
+            Text("lastShortcutAction: \(shortcutLastRequestedStageText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("lastShortcutRequestedStage: \(shortcutLastRequestedStageText())")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text("lastShortcutTargetSessionId: \(shortcutLastTargetSessionIdText())")
+            Text("lastResolvedTargetSessionId: \(shortcutLastTargetSessionIdText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastShortcutResult: \(shortcutLastRun.lastShortcutResult)")
@@ -12685,7 +12638,7 @@ private enum IpadShortcutStageQueueStorage {
 @MainActor
 private enum IpadShortcutStageExecutor {
     static let sourceDevice = "ipad"
-    private static let noActiveSessionMessage = "没有进行中会话，请先开始拍摄"
+    private static let noActiveSessionMessage = "未找到进行中会话，请先运行开始拍摄"
 
     private enum TargetDecision {
         case useExisting(sessionId: String)
@@ -12792,7 +12745,6 @@ private enum IpadShortcutStageExecutor {
 
         case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
             ActiveSessionPointerStore.write(targetSessionId)
-            ShortcutSessionPointerStore.writeActiveSessionId(targetSessionId)
 
             let enqueuedEvent = IpadShortcutStageQueueStorage.enqueue(
                 action: action,
@@ -12827,13 +12779,7 @@ private enum IpadShortcutStageExecutor {
                     notes.append(note)
                 }
 
-                if applied.action == .endSession {
-                    ActiveSessionPointerStore.write(nil)
-                    ShortcutSessionPointerStore.writeActiveSessionId(nil)
-                } else {
-                    ActiveSessionPointerStore.write(applied.sessionId)
-                    ShortcutSessionPointerStore.writeActiveSessionId(applied.sessionId)
-                }
+                ActiveSessionPointerStore.write(applied.sessionId)
 
                 IpadShortcutStageQueueStorage.recordLastRun(
                     action: action,
@@ -12886,7 +12832,6 @@ private enum IpadShortcutStageExecutor {
 
         case .useExisting(let targetSessionId), .createNew(let targetSessionId, _):
             ActiveSessionPointerStore.write(targetSessionId)
-            ShortcutSessionPointerStore.writeActiveSessionId(targetSessionId)
             let enqueuedEvent = IpadShortcutStageQueueStorage.enqueue(
                 action: action,
                 targetSessionId: targetSessionId,
@@ -12919,9 +12864,6 @@ private enum IpadShortcutStageExecutor {
     }
 
     private static func resolveTargetDecision(action: IpadShortcutStageAction, records: [CloudDataStore.SessionRecord]) -> TargetDecision {
-        if let shortcutTarget = ShortcutSessionPointerStore.resolveTargetSessionId(records: records) {
-            return .useExisting(sessionId: shortcutTarget)
-        }
         let activePointer = ActiveSessionPointerStore.read()
         if let globalTarget = ActiveSessionPointerStore.resolveTargetSessionId(
             preferred: activePointer,
@@ -12937,9 +12879,6 @@ private enum IpadShortcutStageExecutor {
     }
 
     private static func resolveTargetDecisionWithoutRecords(action: IpadShortcutStageAction) -> TargetDecision {
-        if let shortcutTarget = ShortcutSessionPointerStore.readActiveSessionId() {
-            return .useExisting(sessionId: shortcutTarget)
-        }
         if let globalTarget = ActiveSessionPointerStore.read() {
             return .useExisting(sessionId: globalTarget)
         }
@@ -13115,13 +13054,7 @@ private enum IpadShortcutStageExecutor {
         state.updatedAt = eventTime
         sessionStates[sessionId] = state
 
-        if action == .endSession {
-            ActiveSessionPointerStore.write(nil)
-            ShortcutSessionPointerStore.writeActiveSessionId(nil)
-        } else {
-            ActiveSessionPointerStore.write(sessionId)
-            ShortcutSessionPointerStore.writeActiveSessionId(sessionId)
-        }
+        ActiveSessionPointerStore.write(sessionId)
 
         return AppliedEventInfo(
             sessionId: sessionId,
@@ -13138,10 +13071,19 @@ private enum IpadShortcutStageExecutor {
         sessionStates: [String: SessionState]
     ) -> SessionResolution? {
         if let target = normalizedSessionId(event.targetSessionId) {
-            if let state = sessionStates[target], (state.isDeleted || state.isVoided) {
-                return nil
+            if let state = sessionStates[target] {
+                if state.isDeleted || state.isVoided {
+                    return nil
+                }
+                if action != .startShooting && !isActive(state: state) {
+                    return nil
+                }
+                return SessionResolution(sessionId: target, targetSessionId: target, note: nil)
             }
-            return SessionResolution(sessionId: target, targetSessionId: target, note: nil)
+            if action == .startShooting {
+                return SessionResolution(sessionId: target, targetSessionId: target, note: nil)
+            }
+            return nil
         }
 
         if let fallbackTarget = resolveFallbackActiveSessionId(from: sessionStates) {
@@ -13160,12 +13102,6 @@ private enum IpadShortcutStageExecutor {
     }
 
     private static func resolveFallbackActiveSessionId(from sessionStates: [String: SessionState]) -> String? {
-        if let shortcutPointer = ShortcutSessionPointerStore.readActiveSessionId(),
-           let state = sessionStates[shortcutPointer],
-           isActive(state: state) {
-            return shortcutPointer
-        }
-
         if let activePointer = ActiveSessionPointerStore.read(),
            let state = sessionStates[activePointer],
            isActive(state: state) {
