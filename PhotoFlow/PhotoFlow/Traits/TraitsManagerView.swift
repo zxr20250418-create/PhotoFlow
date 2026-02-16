@@ -52,7 +52,7 @@ struct TraitsManagerView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("客户画像特征")
+            .navigationTitle("标签管理")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("完成") {

@@ -152,6 +152,47 @@ private func encodeDailyReviewNote(notesAll: String?, aiSummary: DailyReviewAiSu
     return dailyReviewNotePrefix + json
 }
 
+private func mergeSourcePriority(_ source: String) -> Int {
+    switch source.lowercased() {
+    case "phone":
+        return 3
+    case "ipad", "pad":
+        return 2
+    case "watch":
+        return 1
+    default:
+        return 0
+    }
+}
+
+private func shouldReplaceSessionWinner(
+    candidate: CloudDataStore.SessionRecord,
+    existing: CloudDataStore.SessionRecord
+) -> Bool {
+    if candidate.revision != existing.revision {
+        return candidate.revision > existing.revision
+    }
+
+    let candidatePriority = mergeSourcePriority(candidate.sourceDevice)
+    let existingPriority = mergeSourcePriority(existing.sourceDevice)
+    if candidatePriority != existingPriority {
+        return candidatePriority > existingPriority
+    }
+
+    if candidate.updatedAt != existing.updatedAt {
+        return candidate.updatedAt > existing.updatedAt
+    }
+
+    // Prefer tombstones/voided winners on exact ties to avoid resurrection.
+    if candidate.isDeleted != existing.isDeleted {
+        return candidate.isDeleted
+    }
+    if candidate.isVoided != existing.isVoided {
+        return candidate.isVoided
+    }
+    return false
+}
+
 @MainActor
 private enum IntentActiveSessionStore {
     private static let appGroupId = "group.com.zhengxinrong.photoflow"
@@ -225,6 +266,14 @@ private enum IntentActiveSessionStore {
               let normalizedDayKey = normalized(dayKey) else {
             clearAnchor()
             return
+        }
+        if let existing = loadAnchor(), existing.dayKey == normalizedDayKey {
+            if existing.revision > revision {
+                return
+            }
+            if existing.revision == revision && existing.updatedAt > updatedAt {
+                return
+            }
         }
         defaults.set(normalizedSessionId, forKey: activeSessionIdKey)
         defaults.set(normalizedDayKey, forKey: activeSessionDayKey)
@@ -401,10 +450,7 @@ private enum IntentActiveSessionStore {
         candidate: CloudDataStore.SessionRecord,
         existing: CloudDataStore.SessionRecord
     ) -> Bool {
-        if candidate.revision != existing.revision {
-            return candidate.revision > existing.revision
-        }
-        return candidate.updatedAt > existing.updatedAt
+        shouldReplaceSessionWinner(candidate: candidate, existing: existing)
     }
 
     private static func latestActiveSession(
@@ -721,7 +767,7 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     func updateCanonicalState(_ state: CanonicalState, send: Bool) {
-        applyCanonicalState(state)
+        mergeCanonicalState(state, markIncoming: false)
         if send {
             sendCanonicalState(state)
         }
@@ -767,33 +813,34 @@ final class WatchSyncStore: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
 
-    private func mergeCanonicalState(_ incoming: CanonicalState) {
-        if shouldApplyState(incoming) {
-            applyCanonicalState(incoming)
+    private func mergeCanonicalState(_ incoming: CanonicalState, markIncoming: Bool = true) {
+        guard shouldApplyCanonicalState(incoming) else { return }
+        applyCanonicalState(incoming)
+        if markIncoming {
             incomingCanonicalState = incoming
         }
     }
 
-    private func shouldApplyState(_ incoming: CanonicalState) -> Bool {
+    private func shouldApplyCanonicalState(_ incoming: CanonicalState) -> Bool {
         guard let current = canonicalState else { return true }
-        if incoming.revision > current.revision {
-            return true
+        if incoming.revision != current.revision {
+            return incoming.revision > current.revision
         }
-        if incoming.revision < current.revision {
-            return false
-        }
-        return sourcePriority(incoming.sourceDevice) > sourcePriority(current.sourceDevice)
-    }
 
-    private func sourcePriority(_ source: String) -> Int {
-        switch source {
-        case "phone":
-            return 2
-        case "watch":
-            return 1
-        default:
-            return 0
+        let incomingPriority = mergeSourcePriority(incoming.sourceDevice)
+        let currentPriority = mergeSourcePriority(current.sourceDevice)
+        if incomingPriority != currentPriority {
+            return incomingPriority > currentPriority
         }
+
+        let incomingUpdatedAt = incoming.updatedAt.timeIntervalSince1970
+        let currentUpdatedAt = current.updatedAt.timeIntervalSince1970
+        if incomingUpdatedAt != currentUpdatedAt {
+            return incomingUpdatedAt >= currentUpdatedAt
+        }
+
+        // Idempotent no-op when payloads are identical.
+        return incoming != current
     }
 
     private func encodeCanonicalState(_ state: CanonicalState) -> [String: Any] {
@@ -1126,6 +1173,8 @@ final class CloudDataStore: ObservableObject {
         let rejectedCount: Int
         let pendingCount: Int
         let summary: String
+        let lastProcessedAt: Date?
+        let processError: String?
         let shouldClearShortcutChain: Bool
     }
 
@@ -1149,10 +1198,14 @@ final class CloudDataStore: ObservableObject {
     @Published private(set) var cloudTestMemoCount: Int?
     @Published private(set) var cloudTestSessionCount: Int?
     @Published private(set) var isCloudEnabled: Bool = true
+    @Published private(set) var cloudBootReason: String = "unknown"
+    @Published private(set) var iCloudSignedIn: Bool?
     @Published private(set) var pendingStageEventCount: Int = 0
     @Published private(set) var pendingStageOldestAge: TimeInterval?
     @Published private(set) var lastPendingConsumeAt: Date?
     @Published private(set) var lastPendingConsumeResult: String = "idle"
+    @Published private(set) var lastPendingProcessedAt: Date?
+    @Published private(set) var lastPendingProcessError: String?
 
     private enum EntityName {
         static let session = "SessionRecord"
@@ -1174,6 +1227,10 @@ final class CloudDataStore: ObservableObject {
         case enabled
         case simulator
         case userDisabled
+        case noICloud = "no_iCloud"
+        case restricted
+        case couldNotDetermine
+        case accountStatusError
     }
 
     private enum SessionField {
@@ -1308,7 +1365,17 @@ final class CloudDataStore: ObservableObject {
         let container: NSPersistentCloudKitContainer
         let cloudEnabled: Bool
         let storeCloudEnabled: Bool
+        let bootReason: String
+        let iCloudSignedIn: Bool?
+        let cloudAccountStatus: String
         let loadError: Error?
+    }
+
+    private struct CloudBootDecision {
+        let cloudEnabled: Bool
+        let reason: CloudBootReason
+        let iCloudSignedIn: Bool?
+        let accountStatus: String
     }
 
     private init(setup: ContainerSetup) {
@@ -1317,6 +1384,9 @@ final class CloudDataStore: ObservableObject {
         context = container.viewContext
         isCloudEnabled = setup.cloudEnabled
         storeCloudEnabled = setup.storeCloudEnabled
+        cloudBootReason = setup.bootReason
+        iCloudSignedIn = setup.iCloudSignedIn
+        cloudAccountStatus = setup.cloudAccountStatus
         if let error = setup.loadError {
             let detail = Self.formatError(error)
             storeLoadError = detail
@@ -1336,7 +1406,7 @@ final class CloudDataStore: ObservableObject {
     }
 
     static func bootstrapWithFallback() async -> BootResult {
-        let decision = cloudBootDecision()
+        let decision = await cloudBootDecision()
         let model = makeModel()
 
         if decision.cloudEnabled {
@@ -1347,6 +1417,9 @@ final class CloudDataStore: ObservableObject {
                     container: cloudContainer,
                     cloudEnabled: true,
                     storeCloudEnabled: true,
+                    bootReason: decision.reason.rawValue,
+                    iCloudSignedIn: decision.iCloudSignedIn,
+                    cloudAccountStatus: decision.accountStatus,
                     loadError: cloudLoad.error
                 )
                 return .ready(
@@ -1364,6 +1437,9 @@ final class CloudDataStore: ObservableObject {
                     container: localContainer,
                     cloudEnabled: false,
                     storeCloudEnabled: false,
+                    bootReason: decision.reason.rawValue,
+                    iCloudSignedIn: decision.iCloudSignedIn,
+                    cloudAccountStatus: decision.accountStatus,
                     loadError: cloudLoad.error ?? localLoad.error
                 )
                 let warning = cloudLoad.error.map {
@@ -1393,6 +1469,9 @@ final class CloudDataStore: ObservableObject {
                 container: localContainer,
                 cloudEnabled: false,
                 storeCloudEnabled: false,
+                bootReason: decision.reason.rawValue,
+                iCloudSignedIn: decision.iCloudSignedIn,
+                cloudAccountStatus: decision.accountStatus,
                 loadError: localLoad.error
             )
             return .ready(
@@ -1419,7 +1498,7 @@ final class CloudDataStore: ObservableObject {
     }
 
     private static func bootstrapForcedCloud() async -> BootResult {
-        let decision = cloudBootDecision()
+        let decision = await cloudBootDecision()
         guard decision.cloudEnabled else {
             return .failed(error: "forced cloud unavailable: \(decision.reason.rawValue)")
         }
@@ -1434,6 +1513,9 @@ final class CloudDataStore: ObservableObject {
             container: cloudContainer,
             cloudEnabled: true,
             storeCloudEnabled: true,
+            bootReason: decision.reason.rawValue,
+            iCloudSignedIn: decision.iCloudSignedIn,
+            cloudAccountStatus: decision.accountStatus,
             loadError: cloudLoad.error
         )
         return .ready(
@@ -1456,6 +1538,9 @@ final class CloudDataStore: ObservableObject {
             container: localContainer,
             cloudEnabled: false,
             storeCloudEnabled: false,
+            bootReason: "forced_local",
+            iCloudSignedIn: nil,
+            cloudAccountStatus: "forced_local",
             loadError: localLoad.error
         )
         return .ready(
@@ -1495,9 +1580,65 @@ final class CloudDataStore: ObservableObject {
         let eventId = UUID().uuidString
         let dayKey = IntentActiveSessionStore.dayKey(for: createdAt)
         let timestamp = createdAt.timeIntervalSince1970
+        let dedupeWindowSeconds: TimeInterval = 2
 
-        let persisted = await withCheckedContinuation { continuation in
+        let persistedEvent: PendingStageEvent? = await withCheckedContinuation { (continuation: CheckedContinuation<PendingStageEvent?, Never>) in
             container.performBackgroundTask { context in
+                func int64Value(_ object: NSManagedObject, key: String) -> Int64 {
+                    if let value = object.value(forKey: key) as? Int64 { return value }
+                    if let value = object.value(forKey: key) as? NSNumber { return value.int64Value }
+                    return 0
+                }
+
+                func doubleValue(_ object: NSManagedObject, key: String) -> Double {
+                    if let value = object.value(forKey: key) as? Double { return value }
+                    if let value = object.value(forKey: key) as? NSNumber { return value.doubleValue }
+                    return 0
+                }
+
+                func stringValue(_ object: NSManagedObject, key: String, fallback: String = "") -> String {
+                    (object.value(forKey: key) as? String) ?? fallback
+                }
+
+                func pendingEvent(from object: NSManagedObject) -> PendingStageEvent? {
+                    guard let id = object.value(forKey: StageEventField.id) as? String,
+                          !id.isEmpty else { return nil }
+                    let status = stringValue(object, key: StageEventField.status, fallback: "queued")
+                    return PendingStageEvent(
+                        id: id,
+                        dayKey: stringValue(object, key: StageEventField.dayKey, fallback: dayKey),
+                        stageAfter: stringValue(object, key: StageEventField.stageAfter, fallback: normalizedStage),
+                        createdAt: doubleValue(object, key: StageEventField.createdAt),
+                        revision: int64Value(object, key: StageEventField.revision),
+                        sourceDevice: stringValue(object, key: StageEventField.sourceDevice, fallback: sourceDevice),
+                        appliedAt: object.value(forKey: StageEventField.appliedAt) as? Double,
+                        appliedBy: object.value(forKey: StageEventField.appliedBy) as? String,
+                        status: status,
+                        note: object.value(forKey: StageEventField.note) as? String,
+                        updatedAt: doubleValue(object, key: StageEventField.updatedAt)
+                    )
+                }
+
+                let duplicateRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.stageEvent)
+                duplicateRequest.predicate = NSPredicate(
+                    format: "%K == %@ AND %K == %@ AND %K == %@ AND %K == %@ AND %K >= %f",
+                    StageEventField.status, "queued",
+                    StageEventField.stageAfter, normalizedStage,
+                    StageEventField.sourceDevice, sourceDevice,
+                    StageEventField.dayKey, dayKey,
+                    StageEventField.createdAt, timestamp - dedupeWindowSeconds
+                )
+                duplicateRequest.sortDescriptors = [
+                    NSSortDescriptor(key: StageEventField.createdAt, ascending: false),
+                    NSSortDescriptor(key: StageEventField.revision, ascending: false)
+                ]
+                duplicateRequest.fetchLimit = 1
+                if let duplicate = (try? context.fetch(duplicateRequest))?.first,
+                   let existing = pendingEvent(from: duplicate) {
+                    continuation.resume(returning: existing)
+                    return
+                }
+
                 let target = NSEntityDescription.insertNewObject(forEntityName: EntityName.stageEvent, into: context)
                 target.setValue(eventId, forKey: StageEventField.id)
                 target.setValue(dayKey, forKey: StageEventField.dayKey)
@@ -1514,28 +1655,16 @@ final class CloudDataStore: ObservableObject {
                     if context.hasChanges {
                         try context.save()
                     }
-                    continuation.resume(returning: true)
+                    continuation.resume(returning: pendingEvent(from: target))
                 } catch {
-                    continuation.resume(returning: false)
+                    continuation.resume(returning: nil)
                 }
             }
         }
 
-        guard persisted else { return nil }
+        guard let persistedEvent else { return nil }
         refreshAll(reason: "pending_event_enqueue", debounceNanoseconds: 0)
-        return PendingStageEvent(
-            id: eventId,
-            dayKey: dayKey,
-            stageAfter: normalizedStage,
-            createdAt: timestamp,
-            revision: revision,
-            sourceDevice: sourceDevice,
-            appliedAt: nil,
-            appliedBy: nil,
-            status: "queued",
-            note: "queued_on_\(sourceDevice)",
-            updatedAt: timestamp
-        )
+        return persistedEvent
     }
 
     @discardableResult
@@ -1546,6 +1675,8 @@ final class CloudDataStore: ObservableObject {
                 rejectedCount: 0,
                 pendingCount: pendingStageEventCount,
                 summary: "skip_non_phone",
+                lastProcessedAt: nil,
+                processError: nil,
                 shouldClearShortcutChain: false
             )
         }
@@ -1605,9 +1736,29 @@ final class CloudDataStore: ObservableObject {
                         if let existing = winners[id] {
                             let candidateRevision = int64Value(object, key: SessionField.revision)
                             let existingRevision = int64Value(existing, key: SessionField.revision)
+                            let candidateSource = stringValue(object, key: SessionField.sourceDevice, fallback: "unknown")
+                            let existingSource = stringValue(existing, key: SessionField.sourceDevice, fallback: "unknown")
+                            let candidateUpdatedAt = doubleValue(object, key: SessionField.updatedAt)
+                            let existingUpdatedAt = doubleValue(existing, key: SessionField.updatedAt)
+                            let candidateDeleted = boolValue(object, key: SessionField.isDeleted)
+                            let existingDeleted = boolValue(existing, key: SessionField.isDeleted)
+                            let candidateVoided = boolValue(object, key: SessionField.isVoided)
+                            let existingVoided = boolValue(existing, key: SessionField.isVoided)
                             if candidateRevision > existingRevision ||
                                 (candidateRevision == existingRevision &&
-                                    doubleValue(object, key: SessionField.updatedAt) > doubleValue(existing, key: SessionField.updatedAt)) {
+                                    mergeSourcePriority(candidateSource) > mergeSourcePriority(existingSource)) ||
+                                (candidateRevision == existingRevision &&
+                                    mergeSourcePriority(candidateSource) == mergeSourcePriority(existingSource) &&
+                                    candidateUpdatedAt > existingUpdatedAt) ||
+                                (candidateRevision == existingRevision &&
+                                    mergeSourcePriority(candidateSource) == mergeSourcePriority(existingSource) &&
+                                    candidateUpdatedAt == existingUpdatedAt &&
+                                    candidateDeleted && !existingDeleted) ||
+                                (candidateRevision == existingRevision &&
+                                    mergeSourcePriority(candidateSource) == mergeSourcePriority(existingSource) &&
+                                    candidateUpdatedAt == existingUpdatedAt &&
+                                    candidateDeleted == existingDeleted &&
+                                    candidateVoided && !existingVoided) {
                                 winners[id] = object
                             }
                         } else {
@@ -1632,6 +1783,8 @@ final class CloudDataStore: ObservableObject {
                             rejectedCount: 0,
                             pendingCount: 0,
                             summary: "no_pending",
+                            lastProcessedAt: nil,
+                            processError: nil,
                             shouldClearShortcutChain: false
                         )
                     )
@@ -1768,6 +1921,8 @@ final class CloudDataStore: ObservableObject {
                             rejectedCount: rejectedCount,
                             pendingCount: max(pending, 0),
                             summary: "applied=\(appliedCount) rejected=\(rejectedCount) pending=\(max(pending, 0))",
+                            lastProcessedAt: now,
+                            processError: nil,
                             shouldClearShortcutChain: shouldClearShortcutChain
                         )
                     )
@@ -1778,6 +1933,8 @@ final class CloudDataStore: ObservableObject {
                             rejectedCount: rejectedCount,
                             pendingCount: events.count,
                             summary: "save_failed",
+                            lastProcessedAt: now,
+                            processError: "save_failed: \(Self.formatError(error))",
                             shouldClearShortcutChain: false
                         )
                     )
@@ -1791,6 +1948,14 @@ final class CloudDataStore: ObservableObject {
             }
             lastPendingConsumeAt = Date()
             lastPendingConsumeResult = "\(trigger): \(result.summary)"
+            if let processedAt = result.lastProcessedAt {
+                lastPendingProcessedAt = processedAt
+            }
+            if let processError = result.processError, !processError.isEmpty {
+                lastPendingProcessError = processError
+            } else if result.lastProcessedAt != nil {
+                lastPendingProcessError = nil
+            }
             refreshAll(reason: "pending_event_consume_\(trigger)", debounceNanoseconds: 0)
         }
         return result
@@ -2460,7 +2625,7 @@ final class CloudDataStore: ObservableObject {
 
     private func updateDeletedSnapshot() {
         let deleted = sessionRecords.filter(\.isDeleted).map(\.id)
-        blockedSessionIds.formUnion(deleted)
+        blockedSessionIds = Set(deleted)
     }
 
     private func updatePendingStageDiagnostics(now: Date = Date()) {
@@ -2588,16 +2753,7 @@ final class CloudDataStore: ObservableObject {
         }
 
         func sourcePriority(_ source: String) -> Int {
-            switch source {
-            case "phone":
-                return 3
-            case "ipad":
-                return 2
-            case "watch":
-                return 1
-            default:
-                return 0
-            }
+            mergeSourcePriority(source)
         }
 
         func shouldApply(
@@ -2683,6 +2839,17 @@ final class CloudDataStore: ObservableObject {
                 isDeleted: boolValue(object, key: SessionField.isDeleted)
             )
         }
+        var sessionWinners: [String: SessionRecord] = [:]
+        for record in sessions {
+            if let existing = sessionWinners[record.id] {
+                if shouldReplaceSessionWinner(candidate: record, existing: existing) {
+                    sessionWinners[record.id] = record
+                }
+            } else {
+                sessionWinners[record.id] = record
+            }
+        }
+        let filteredSessions = Array(sessionWinners.values)
 
         let shiftRequest = NSFetchRequest<NSManagedObject>(entityName: EntityName.shift)
         let shiftObjects = (try? context.fetch(shiftRequest)) ?? []
@@ -2843,7 +3010,7 @@ final class CloudDataStore: ObservableObject {
         }
 
         return StoreSnapshot(
-            sessionRecords: sessions,
+            sessionRecords: filteredSessions,
             shiftRecords: shifts,
             dayMemos: memos,
             dailyReviews: reviews,
@@ -2967,12 +3134,23 @@ final class CloudDataStore: ObservableObject {
         do {
             let status = try await container.accountStatus()
             cloudAccountStatus = Self.accountStatusLabel(status)
+            switch status {
+            case .available:
+                iCloudSignedIn = true
+            case .noAccount, .restricted:
+                iCloudSignedIn = false
+            case .couldNotDetermine:
+                iCloudSignedIn = nil
+            @unknown default:
+                iCloudSignedIn = nil
+            }
             return nil
         } catch {
             let detail = Self.formatError(error)
             cloudSyncError = detail
             lastCloudError = detail
             cloudAccountStatus = "error"
+            iCloudSignedIn = nil
             return error
         }
     }
@@ -3108,7 +3286,7 @@ final class CloudDataStore: ObservableObject {
             revisionKey: SessionField.revision,
             sourceKey: SessionField.sourceDevice
         )
-        return deduped.values.compactMap { object in
+        let sessions: [SessionRecord] = deduped.values.compactMap { object -> SessionRecord? in
             guard let sessionId = object.value(forKey: SessionField.sessionId) as? String,
                   !sessionId.isEmpty else { return nil }
             let stage = stringValue(object, key: SessionField.stage, fallback: Self.defaultStage)
@@ -3130,6 +3308,38 @@ final class CloudDataStore: ObservableObject {
                 isDeleted: boolValue(object, key: SessionField.isDeleted)
             )
         }
+        func shouldReplaceLocalWinner(_ candidate: SessionRecord, _ existing: SessionRecord) -> Bool {
+            if candidate.revision != existing.revision {
+                return candidate.revision > existing.revision
+            }
+            let candidatePriority = mergeSourcePriority(candidate.sourceDevice)
+            let existingPriority = mergeSourcePriority(existing.sourceDevice)
+            if candidatePriority != existingPriority {
+                return candidatePriority > existingPriority
+            }
+            if candidate.updatedAt != existing.updatedAt {
+                return candidate.updatedAt > existing.updatedAt
+            }
+            if candidate.isDeleted != existing.isDeleted {
+                return candidate.isDeleted
+            }
+            if candidate.isVoided != existing.isVoided {
+                return candidate.isVoided
+            }
+            return false
+        }
+
+        var winners: [String: SessionRecord] = [:]
+        for record in sessions {
+            if let existing = winners[record.id] {
+                if shouldReplaceLocalWinner(record, existing) {
+                    winners[record.id] = record
+                }
+            } else {
+                winners[record.id] = record
+            }
+        }
+        return Array(winners.values)
     }
 
     private func fetchShiftRecords() -> [ShiftRecordSnapshot] {
@@ -3407,16 +3617,7 @@ final class CloudDataStore: ObservableObject {
     }
 
     private func sourcePriority(_ source: String) -> Int {
-        switch source {
-        case "phone":
-            return 3
-        case "ipad":
-            return 2
-        case "watch":
-            return 1
-        default:
-            return 0
-        }
+        mergeSourcePriority(source)
     }
 
     private func int64Value(_ object: NSManagedObject?, key: String) -> Int64 {
@@ -3532,15 +3733,73 @@ final class CloudDataStore: ObservableObject {
         return container
     }
 
-    private static func cloudBootDecision() -> (cloudEnabled: Bool, reason: CloudBootReason) {
+    private static func cloudBootDecision() async -> CloudBootDecision {
 #if targetEnvironment(simulator)
-        return (false, .simulator)
+        return CloudBootDecision(
+            cloudEnabled: false,
+            reason: .simulator,
+            iCloudSignedIn: false,
+            accountStatus: "simulator"
+        )
 #else
         if !cloudSyncEnabledPreference() {
-            return (false, .userDisabled)
+            return CloudBootDecision(
+                cloudEnabled: false,
+                reason: .userDisabled,
+                iCloudSignedIn: nil,
+                accountStatus: "userDisabled"
+            )
         }
-        // Do not gate by ubiquityIdentityToken. AppIntent background execution can report nil token.
-        return (true, .enabled)
+
+        let container = CKContainer(identifier: cloudContainerIdentifier)
+        do {
+            let status = try await container.accountStatus()
+            let label = accountStatusLabel(status)
+            switch status {
+            case .available:
+                return CloudBootDecision(
+                    cloudEnabled: true,
+                    reason: .enabled,
+                    iCloudSignedIn: true,
+                    accountStatus: label
+                )
+            case .noAccount:
+                return CloudBootDecision(
+                    cloudEnabled: false,
+                    reason: .noICloud,
+                    iCloudSignedIn: false,
+                    accountStatus: label
+                )
+            case .restricted:
+                return CloudBootDecision(
+                    cloudEnabled: false,
+                    reason: .restricted,
+                    iCloudSignedIn: false,
+                    accountStatus: label
+                )
+            case .couldNotDetermine:
+                return CloudBootDecision(
+                    cloudEnabled: false,
+                    reason: .couldNotDetermine,
+                    iCloudSignedIn: nil,
+                    accountStatus: label
+                )
+            @unknown default:
+                return CloudBootDecision(
+                    cloudEnabled: false,
+                    reason: .couldNotDetermine,
+                    iCloudSignedIn: nil,
+                    accountStatus: "unknown"
+                )
+            }
+        } catch {
+            return CloudBootDecision(
+                cloudEnabled: false,
+                reason: .accountStatusError,
+                iCloudSignedIn: nil,
+                accountStatus: "error"
+            )
+        }
 #endif
     }
 
@@ -4072,6 +4331,55 @@ struct ContentView: View {
         case stats
     }
 
+    enum HomeSegment: String, CaseIterable {
+        case success
+        case failure
+
+        var title: String {
+            switch self {
+            case .success:
+                return "成功"
+            case .failure:
+                return "失败"
+            }
+        }
+    }
+
+    enum FailureStage: String, CaseIterable, Codable {
+        case beforeTrial = "试拍前"
+        case afterTrial = "试拍后"
+        case afterQuote = "报价后"
+        case selecting = "选片中"
+        case beforePayment = "付款前"
+        case other = "其他"
+    }
+
+    struct FailureRecord: Identifiable, Codable, Equatable, Sendable {
+        let id: String
+        let time: Date
+        let stage: FailureStage
+        let mainTag: String
+        let secondaryTag: String?
+        let quote: String?
+        let nextFix: String
+        let reviewNote: String
+
+        var dayKey: String {
+            ContentView.dayKey(for: time)
+        }
+    }
+
+    private struct FailureRecordDisk: Codable {
+        let id: String
+        let time: Date
+        let stage: String
+        let mainTag: String
+        let secondaryTag: String?
+        let quote: String?
+        let nextFix: String
+        let reviewNote: String
+    }
+
     struct Session {
         var shootingStart: Date?
         var selectingStart: Date?
@@ -4102,7 +4410,11 @@ struct ContentView: View {
     }
 
     private static let reviewLogPrefix = "PF_DECLOG_V1:"
+    private static let failedMarkdownPayloadBegin = "<!-- PHOTOFLOW_FAILED_JSON_BEGIN -->"
+    private static let failedMarkdownPayloadEnd = "<!-- PHOTOFLOW_FAILED_JSON_END -->"
     private let decisionTagOptions = ["话术", "选片", "定价", "筛选", "节奏", "交付"]
+    private let failReasonTagGroup = "failReason"
+    private let successTagGroup = "successTag"
 
     private struct SessionDecisionDrafts: Codable, Equatable {
         var facts: String?
@@ -4402,7 +4714,18 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab: Tab = .home
+    @State private var homeSegment: HomeSegment = .success
     @State private var sessionSummaries: [SessionSummary] = []
+    @State private var failureRecords: [FailureRecord] = []
+    @State private var isFailureEditorPresented = false
+    @State private var failureDraftTime = Date()
+    @State private var failureDraftStage: FailureStage = .beforeTrial
+    @State private var failureDraftMainTagId: String?
+    @State private var failureDraftSecondaryTagId: String?
+    @State private var failureDraftQuote = ""
+    @State private var failureDraftNextFix = ""
+    @State private var failureDraftReviewNote = ""
+    @State private var isMergedReviewPresented = false
     @State private var todayDayKey: String = ContentView.dayKey(for: Date())
     @State private var isTopExpanded = false
     @State private var userIsDragging = false
@@ -4528,6 +4851,8 @@ struct ContentView: View {
     @State private var markdownAutoExportFolderURL: URL?
     @State private var markdownExportDebounceTask: Task<Void, Never>?
     @State private var markdownPendingDayKeys: Set<String> = []
+    @State private var failedExportDebounceTask: Task<Void, Never>?
+    @State private var failedPendingDayKeys: Set<String> = []
     @State private var markdownDigestBySessionId: [String: MarkdownExportDigest] = [:]
     @State private var markdownDigestBootstrapped = false
     @State private var sessionSummaryDebounceTask: Task<Void, Never>?
@@ -4683,6 +5008,7 @@ struct ContentView: View {
         }
         .onAppear {
             syncRetouchPriceDraftFromStorage()
+            ensureFailureTagGroupsAvailable()
             diagnosticsLastRunAbnormal = RuntimeExitState.lastLaunchWasAbnormal()
             runtimeLog("app", "content_appear", extra: [
                 "boot_ready": bootStateReady ? "true" : "false",
@@ -4697,6 +5023,7 @@ struct ContentView: View {
                 debounceNanoseconds: 0
             )
             resolveMarkdownAutoExportFolderURLIfNeeded()
+            reloadFailureRecordsFromDisk()
             observeMarkdownAutoExportChanges(
                 records: cloudStore.sessionRecords,
                 overrides: timeOverrideStore.overrides
@@ -4764,6 +5091,7 @@ struct ContentView: View {
                 )
                 refreshDutyState()
                 updateTodayDayKey()
+                reloadFailureRecordsFromDisk()
                 consumePendingStageEvents(reason: "scene_active")
                 if isReadOnlyDevice {
                     if let state = syncStore.reloadCanonicalState() {
@@ -4821,18 +5149,6 @@ struct ContentView: View {
     }
 
     nonisolated private static func buildSessionSummaries(_ records: [CloudDataStore.SessionRecord]) -> [SessionSummary] {
-        func sourcePriority(_ source: String) -> Int {
-            switch source {
-            case "phone":
-                return 3
-            case "ipad":
-                return 2
-            case "watch":
-                return 1
-            default:
-                return 0
-            }
-        }
         func sessionSortKey(_ record: CloudDataStore.SessionRecord) -> Date {
             let start = [record.shootingStart, record.selectingStart, record.endedAt].compactMap { $0 }.min()
             return start ?? record.updatedAt
@@ -4840,10 +5156,7 @@ struct ContentView: View {
         var winners: [String: CloudDataStore.SessionRecord] = [:]
         for record in records {
             if let existing = winners[record.id] {
-                if record.revision > existing.revision {
-                    winners[record.id] = record
-                } else if record.revision == existing.revision,
-                          sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
+                if shouldReplaceSessionWinner(candidate: record, existing: existing) {
                     winners[record.id] = record
                 }
             } else {
@@ -4868,12 +5181,8 @@ struct ContentView: View {
         var winners: [String: CloudDataStore.SessionRecord] = [:]
         for record in records {
             if let existing = winners[record.id] {
-                if record.revision > existing.revision {
+                if shouldReplaceSessionWinner(candidate: record, existing: existing) {
                     winners[record.id] = record
-                } else if record.revision == existing.revision {
-                    if sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
-                        winners[record.id] = record
-                    }
                 }
             } else {
                 winners[record.id] = record
@@ -4974,6 +5283,11 @@ struct ContentView: View {
 
     private func lastPendingConsumeAtText() -> String {
         guard let date = cloudStore.lastPendingConsumeAt else { return "—" }
+        return formatApiTestTime(date)
+    }
+
+    private func lastPendingProcessedAtText() -> String {
+        guard let date = cloudStore.lastPendingProcessedAt else { return "—" }
         return formatApiTestTime(date)
     }
 
@@ -5234,19 +5548,6 @@ struct ContentView: View {
         overrides: [String: SessionTimeOverride],
         memos: [String: String]
     ) -> [MarkdownFileWritePayload] {
-        func sourcePriority(_ source: String) -> Int {
-            switch source {
-            case "phone":
-                return 3
-            case "ipad":
-                return 2
-            case "watch":
-                return 1
-            default:
-                return 0
-            }
-        }
-
         func sessionSortKey(_ record: CloudDataStore.SessionRecord) -> Date {
             let start = [record.shootingStart, record.selectingStart, record.endedAt].compactMap { $0 }.min()
             return start ?? record.updatedAt
@@ -5256,10 +5557,7 @@ struct ContentView: View {
             var winners: [String: CloudDataStore.SessionRecord] = [:]
             for record in input {
                 if let existing = winners[record.id] {
-                    if record.revision > existing.revision {
-                        winners[record.id] = record
-                    } else if record.revision == existing.revision,
-                              sourcePriority(record.sourceDevice) >= sourcePriority(existing.sourceDevice) {
+                    if shouldReplaceSessionWinner(candidate: record, existing: existing) {
                         winners[record.id] = record
                     }
                 } else {
@@ -5490,6 +5788,414 @@ struct ContentView: View {
             .appendingPathComponent(year, isDirectory: true)
             .appendingPathComponent(month, isDirectory: true)
             .appendingPathComponent("\(dayKey).daily.md", isDirectory: false)
+    }
+
+    private var failReasonTraits: [TraitDefinition] {
+        traitsStore.traits(in: failReasonTagGroup, includeInactive: false)
+    }
+
+    private var secondaryTagTraits: [TraitDefinition] {
+        let failTags = traitsStore.traits(in: failReasonTagGroup, includeInactive: false)
+        let successTags = traitsStore.traits(in: successTagGroup, includeInactive: false)
+        var map: [String: TraitDefinition] = [:]
+        for tag in failTags + successTags {
+            map[tag.id] = tag
+        }
+        return map.values.sorted {
+            if $0.group != $1.group {
+                if $0.group == failReasonTagGroup { return true }
+                if $1.group == failReasonTagGroup { return false }
+                return $0.group < $1.group
+            }
+            if $0.sortIndex != $1.sortIndex {
+                return $0.sortIndex < $1.sortIndex
+            }
+            return $0.name < $1.name
+        }
+    }
+
+    private var todayFailureRecords: [FailureRecord] {
+        let dayKey = Self.dayKey(for: now)
+        return failureRecords
+            .filter { $0.dayKey == dayKey }
+            .sorted { $0.time > $1.time }
+    }
+
+    private func ensureFailureTagGroupsAvailable() {
+        if let mainId = failureDraftMainTagId, traitsStore.trait(for: mainId) == nil {
+            failureDraftMainTagId = nil
+        }
+        if let secondaryId = failureDraftSecondaryTagId, traitsStore.trait(for: secondaryId) == nil {
+            failureDraftSecondaryTagId = nil
+        }
+    }
+
+    private func startFailureDraft() {
+        ensureFailureTagGroupsAvailable()
+        failureDraftTime = now
+        failureDraftStage = .beforeTrial
+        failureDraftMainTagId = nil
+        failureDraftSecondaryTagId = nil
+        failureDraftQuote = ""
+        failureDraftNextFix = ""
+        failureDraftReviewNote = ""
+        isFailureEditorPresented = true
+    }
+
+    private func saveFailureDraft() {
+        guard resolveMarkdownAutoExportFolderURLIfNeeded() != nil else {
+            activeAlert = .validation("请先在设置中选择 Markdown 导出文件夹")
+            return
+        }
+        guard let mainTagId = failureDraftMainTagId,
+              let mainTagName = traitsStore.trait(for: mainTagId)?.name,
+              !mainTagName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            activeAlert = .validation("请先选择失败主标签")
+            return
+        }
+        let nextFix = failureDraftNextFix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !nextFix.isEmpty else {
+            activeAlert = .validation("nextFix 为必填")
+            return
+        }
+        let secondaryTagName = (failureDraftSecondaryTagId.flatMap { traitsStore.trait(for: $0)?.name })?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let quoteText = failureDraftQuote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let record = FailureRecord(
+            id: UUID().uuidString,
+            time: failureDraftTime,
+            stage: failureDraftStage,
+            mainTag: mainTagName,
+            secondaryTag: secondaryTagName?.isEmpty == true ? nil : secondaryTagName,
+            quote: quoteText.isEmpty ? nil : quoteText,
+            nextFix: nextFix,
+            reviewNote: failureDraftReviewNote
+        )
+        failureRecords.append(record)
+        failureRecords.sort { $0.time > $1.time }
+        scheduleFailedMarkdownAutoExport(for: Set([record.dayKey]))
+        isFailureEditorPresented = false
+    }
+
+    private func deleteFailureRecord(_ record: FailureRecord) {
+        failureRecords.removeAll { $0.id == record.id }
+        scheduleFailedMarkdownAutoExport(for: Set([record.dayKey]))
+    }
+
+    private func reloadFailureRecordsFromDisk() {
+        guard let folderURL = resolveMarkdownAutoExportFolderURLIfNeeded() else {
+            failureRecords = []
+            return
+        }
+        Task {
+            let loaded = await Task.detached(priority: .utility) {
+                Self.readFailureRecordsFromMarkdownFiles(baseFolderURL: folderURL)
+            }.value
+            failureRecords = loaded.sorted { $0.time > $1.time }
+        }
+    }
+
+    nonisolated private static func readFailureRecordsFromMarkdownFiles(baseFolderURL: URL) -> [FailureRecord] {
+        let fileManager = FileManager.default
+        let didAccess = baseFolderURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                baseFolderURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        let exportsURL = baseFolderURL.appendingPathComponent("Exports", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: exportsURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return []
+        }
+        guard let enumerator = fileManager.enumerator(
+            at: exportsURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        var recordsById: [String: FailureRecord] = [:]
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "md", url.lastPathComponent.hasSuffix(".failed.md") else { continue }
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let parsed = parseFailureRecords(markdownText: text)
+            for record in parsed {
+                recordsById[record.id] = record
+            }
+        }
+        return Array(recordsById.values)
+    }
+
+    nonisolated private static func parseFailureRecords(markdownText: String) -> [FailureRecord] {
+        guard let beginRange = markdownText.range(of: failedMarkdownPayloadBegin),
+              let endRange = markdownText.range(of: failedMarkdownPayloadEnd),
+              beginRange.upperBound <= endRange.lowerBound else {
+            return []
+        }
+        let jsonText = markdownText[beginRange.upperBound..<endRange.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = jsonText.data(using: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let records = try? decoder.decode([FailureRecordDisk].self, from: data) else { return [] }
+        return records.map { item in
+            let stage = FailureStage(rawValue: item.stage) ?? .other
+            return FailureRecord(
+                id: item.id,
+                time: item.time,
+                stage: stage,
+                mainTag: item.mainTag,
+                secondaryTag: item.secondaryTag,
+                quote: item.quote,
+                nextFix: item.nextFix,
+                reviewNote: item.reviewNote
+            )
+        }
+    }
+
+    private func scheduleFailedMarkdownAutoExport(for dayKeys: Set<String>) {
+        guard bootStateReady else { return }
+        guard !dayKeys.isEmpty else { return }
+        guard resolveMarkdownAutoExportFolderURLIfNeeded() != nil else { return }
+        failedPendingDayKeys.formUnion(dayKeys)
+        failedExportDebounceTask?.cancel()
+        failedExportDebounceTask = Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            let pending = failedPendingDayKeys
+            failedPendingDayKeys.removeAll()
+            await runFailedMarkdownAutoExport(for: pending)
+        }
+    }
+
+    private func runFailedMarkdownAutoExport(for dayKeys: Set<String>) async {
+        guard !dayKeys.isEmpty else { return }
+        guard let folderURL = resolveMarkdownAutoExportFolderURLIfNeeded() else { return }
+        let records = failureRecords
+        let errorText = await Task.detached(priority: .utility) {
+            do {
+                let payloads = Self.failedMarkdownWritePayloads(
+                    for: dayKeys,
+                    records: records
+                )
+                try Self.writeFailedMarkdownFiles(payloads, baseFolderURL: folderURL)
+                return ""
+            } catch {
+                return error.localizedDescription
+            }
+        }.value
+        markdownLastExportAtRaw = Date().timeIntervalSince1970
+        markdownLastExportError = errorText
+    }
+
+    nonisolated private static func failedMarkdownWritePayloads(
+        for dayKeys: Set<String>,
+        records: [FailureRecord]
+    ) -> [MarkdownFileWritePayload] {
+        let grouped = Dictionary(grouping: records, by: \.dayKey)
+        return dayKeys.sorted().map { dayKey in
+            let dayRecords = (grouped[dayKey] ?? []).sorted { $0.time < $1.time }
+            let text = failedMarkdownAutoExportText(dayKey: dayKey, records: dayRecords)
+            return MarkdownFileWritePayload(dayKey: dayKey, text: text)
+        }
+    }
+
+    nonisolated private static func failedMarkdownAutoExportText(dayKey: String, records: [FailureRecord]) -> String {
+        let title = dateFromDayKey(dayKey).map { reviewDateText($0) } ?? dayKey
+        let top3 = topFailMainTags(records: records, limit: 3)
+        let encodedJSON = encodeFailureRecordsJSON(records)
+        var lines: [String] = []
+        lines.append("# \(title) 失败记录")
+        lines.append("")
+        lines.append("## 汇总")
+        lines.append("- 失败数：\(records.count)")
+        if top3.isEmpty {
+            lines.append("- 失败主因 Top3：暂无")
+        } else {
+            let joined = top3.map { "\($0.0)(\($0.1))" }.joined(separator: " / ")
+            lines.append("- 失败主因 Top3：\(joined)")
+        }
+        lines.append("- 更新时间：\(formatDateTime(Date()))")
+        lines.append("")
+        lines.append("## 明细")
+        if records.isEmpty {
+            lines.append("- 暂无记录")
+        } else {
+            for (index, record) in records.enumerated() {
+                lines.append("### \(index + 1). \(formatDateTime(record.time))")
+                lines.append("- 阶段：\(record.stage.rawValue)")
+                lines.append("- 主标签：\(record.mainTag)")
+                if let secondary = record.secondaryTag, !secondary.isEmpty {
+                    lines.append("- 次标签：\(secondary)")
+                }
+                if let quote = record.quote, !quote.isEmpty {
+                    lines.append("- quote：\(quote)")
+                }
+                lines.append("- nextFix：\(record.nextFix)")
+                lines.append("- reviewNote：")
+                lines.append("```")
+                lines.append(record.reviewNote)
+                lines.append("```")
+            }
+        }
+        lines.append("")
+        lines.append(failedMarkdownPayloadBegin)
+        lines.append(encodedJSON)
+        lines.append(failedMarkdownPayloadEnd)
+        lines.append("")
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated private static func writeFailedMarkdownFiles(
+        _ payloads: [MarkdownFileWritePayload],
+        baseFolderURL: URL
+    ) throws {
+        guard !payloads.isEmpty else { return }
+        let fileManager = FileManager.default
+        let didAccess = baseFolderURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                baseFolderURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        for payload in payloads {
+            let targetURL = failedMarkdownFileURL(baseFolderURL: baseFolderURL, dayKey: payload.dayKey)
+            let directoryURL = targetURL.deletingLastPathComponent()
+            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true, attributes: nil)
+            let tempURL = directoryURL.appendingPathComponent(".\(UUID().uuidString).tmp")
+            do {
+                try Data(payload.text.utf8).write(to: tempURL, options: [])
+                if fileManager.fileExists(atPath: targetURL.path) {
+                    _ = try fileManager.replaceItemAt(
+                        targetURL,
+                        withItemAt: tempURL,
+                        backupItemName: nil,
+                        options: []
+                    )
+                } else {
+                    try fileManager.moveItem(at: tempURL, to: targetURL)
+                }
+            } catch {
+                try? fileManager.removeItem(at: tempURL)
+                throw error
+            }
+        }
+    }
+
+    nonisolated private static func failedMarkdownFileURL(baseFolderURL: URL, dayKey: String) -> URL {
+        let parts = dayKey.split(separator: "-")
+        let year = parts.indices.contains(0) ? String(parts[0]) : "unknown"
+        let month = parts.indices.contains(1) ? String(parts[1]) : "00"
+        return baseFolderURL
+            .appendingPathComponent("Exports", isDirectory: true)
+            .appendingPathComponent(year, isDirectory: true)
+            .appendingPathComponent(month, isDirectory: true)
+            .appendingPathComponent("\(dayKey).failed.md", isDirectory: false)
+    }
+
+    nonisolated private static func encodeFailureRecordsJSON(_ records: [FailureRecord]) -> String {
+        let payload = records.map { item in
+            FailureRecordDisk(
+                id: item.id,
+                time: item.time,
+                stage: item.stage.rawValue,
+                mainTag: item.mainTag,
+                secondaryTag: item.secondaryTag,
+                quote: item.quote,
+                nextFix: item.nextFix,
+                reviewNote: item.reviewNote
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(payload),
+              let text = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return text
+    }
+
+    private func failureRecords(for range: StatsRange, referenceDate: Date) -> [FailureRecord] {
+        let calendar = Calendar(identifier: .iso8601)
+        return failureRecords.filter { record in
+            switch range {
+            case .today:
+                return calendar.isDateInToday(record.time)
+            case .week:
+                guard let interval = calendar.dateInterval(of: .weekOfYear, for: referenceDate) else { return false }
+                return interval.contains(record.time)
+            case .month:
+                guard let interval = calendar.dateInterval(of: .month, for: referenceDate) else { return false }
+                return interval.contains(record.time)
+            case .year:
+                guard let interval = calendar.dateInterval(of: .year, for: referenceDate) else { return false }
+                return interval.contains(record.time)
+            }
+        }
+    }
+
+    private func mergedReviewMarkdownText(dayKey targetDayKey: String) -> String {
+        let successSessions = effectiveSessionSummaries
+            .filter { dayKey(for: $0) == targetDayKey }
+            .sorted { effectiveSessionSortKey(for: $0) < effectiveSessionSortKey(for: $1) }
+        let failItems = failureRecords
+            .filter { $0.dayKey == targetDayKey }
+            .sorted { $0.time < $1.time }
+        let successCount = successSessions.count
+        let failCount = failItems.count
+        let totalTouches = successCount + failCount
+        let successRateText = totalTouches > 0
+            ? "\(Int((Double(successCount) / Double(totalTouches) * 100).rounded()))%"
+            : "--"
+        let top3 = Self.topFailMainTags(records: failItems, limit: 3)
+        let titleDate = Self.dateFromDayKey(targetDayKey).map { Self.reviewDateText($0) } ?? targetDayKey
+        var lines: [String] = []
+        lines.append("# \(titleDate) 成功+失败复盘")
+        lines.append("")
+        lines.append("## 统一指标")
+        lines.append("- successCount: \(successCount)")
+        lines.append("- failCount: \(failCount)")
+        lines.append("- totalTouches: \(totalTouches)")
+        lines.append("- successRate: \(successRateText)")
+        if top3.isEmpty {
+            lines.append("- top3 fail mainTag: 暂无")
+        } else {
+            for (name, count) in top3 {
+                lines.append("- top3 fail mainTag: \(name) (\(count))")
+            }
+        }
+        let actionText = todayActionText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        lines.append("- tomorrowOneAction: \(actionText.isEmpty ? "暂无" : actionText)")
+        lines.append("")
+        lines.append("## 失败明细")
+        if failItems.isEmpty {
+            lines.append("- 暂无")
+        } else {
+            for item in failItems {
+                lines.append("- \(Self.formatDateTime(item.time)) · \(item.stage.rawValue) · \(item.mainTag) · nextFix: \(item.nextFix)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated private static func topFailMainTags(records: [FailureRecord], limit: Int) -> [(String, Int)] {
+        var counts: [String: Int] = [:]
+        for record in records {
+            let key = record.mainTag.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            counts[key, default: 0] += 1
+        }
+        return counts
+            .sorted {
+                if $0.value != $1.value {
+                    return $0.value > $1.value
+                }
+                return $0.key < $1.key
+            }
+            .prefix(max(0, limit))
+            .map { ($0.key, $0.value) }
     }
 
     private var effectiveSessionSummaries: [SessionSummary] {
@@ -6573,16 +7279,22 @@ struct ContentView: View {
             Text("lastShortcutResult: \(shortcutLastRun.lastShortcutResult)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("pendingCount: \(cloudStore.pendingStageEventCount)")
+            Text("pendingEventCount: \(cloudStore.pendingStageEventCount)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text("oldestAge: \(pendingStageOldestAgeText())")
+            Text("oldestPendingEventAge: \(pendingStageOldestAgeText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastConsumeAt: \(lastPendingConsumeAtText())")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("lastConsumeResult: \(cloudStore.lastPendingConsumeResult)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastProcessedEventAt: \(lastPendingProcessedAtText())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("lastProcessError: \(cloudStore.lastPendingProcessError ?? "—")")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             if let lastError = shortcutLastRun.lastShortcutError, !lastError.isEmpty {
@@ -6640,6 +7352,7 @@ struct ContentView: View {
             FolderPicker { url in
                 guard let url else { return }
                 persistMarkdownAutoExportFolder(url)
+                reloadFailureRecordsFromDisk()
             }
         }
     }
@@ -6781,6 +7494,13 @@ struct ContentView: View {
         let bundleId = Bundle.main.bundleIdentifier ?? "unknown"
         let storeCloudEnabledText = cloudStore.storeCloudEnabled ? "true" : "false"
         let cloudLoadEnabledText = cloudStore.isCloudEnabled ? "true" : "false"
+        let cloudBootReasonText = cloudStore.cloudBootReason
+        let iCloudSignedInText: String = {
+            if let signedIn = cloudStore.iCloudSignedIn {
+                return signedIn ? "true" : "false"
+            }
+            return "unknown"
+        }()
         let accountStatusText = cloudStore.cloudAccountStatus
         let storeLoadErrorText = cloudStore.storeLoadError ?? "—"
         let cloudSyncErrorText = cloudStore.cloudSyncError ?? "—"
@@ -6789,6 +7509,10 @@ struct ContentView: View {
         let refreshErrorText = cloudStore.lastRefreshError ?? "—"
         let cloudMemoCountText = cloudStore.cloudTestMemoCount.map(String.init) ?? "--"
         let cloudSessionCountText = cloudStore.cloudTestSessionCount.map(String.init) ?? "--"
+        let pendingEventCountText = String(cloudStore.pendingStageEventCount)
+        let oldestPendingAgeText = cloudStore.pendingStageOldestAge.map { String(format: "%.1f", $0) } ?? "--"
+        let lastProcessedAtText = cloudStore.lastPendingProcessedAt.map { String(Int($0.timeIntervalSince1970)) } ?? "--"
+        let lastProcessErrorText = cloudStore.lastPendingProcessError ?? "—"
         return VStack(alignment: .leading, spacing: 8) {
             Text("Debug Cloud Test")
                 .font(.caption)
@@ -6866,12 +7590,18 @@ struct ContentView: View {
                 Text("cloudKitContainerIdentifier: \(CloudDataStore.cloudContainerIdentifier)")
                 Text("storeCloudEnabled: \(storeCloudEnabledText)")
                 Text("cloudLoadEnabled: \(cloudLoadEnabledText)")
+                Text("cloudBootReason: \(cloudBootReasonText)")
+                Text("iCloudSignedIn: \(iCloudSignedInText)")
                 Text("CKAccountStatus: \(accountStatusText)")
                 Text("storeLoadError: \(storeLoadErrorText)")
                 Text("cloudSyncError: \(cloudSyncErrorText)")
                 Text("lastCloudError: \(lastCloudErrorText)")
                 Text("refreshStatus: \(refreshStatusText)")
                 Text("refreshError: \(refreshErrorText)")
+                Text("pendingEventCount: \(pendingEventCountText)")
+                Text("oldestPendingEventAge: \(oldestPendingAgeText)")
+                Text("lastProcessedEventAt: \(lastProcessedAtText)")
+                Text("lastProcessError: \(lastProcessErrorText)")
                 Text("localCounts: memo \(testMemos.count) · session \(testSessions.count)")
                 Text("cloudCounts: memo \(cloudMemoCountText) · session \(cloudSessionCountText)")
             }
@@ -7074,6 +7804,7 @@ struct ContentView: View {
         return NavigationStack {
             let displaySessions = homeTimelineDisplaySessions()
             let activeId = activeTimelineSessionId(from: effectiveSessionSummaries)
+            let todayFails = todayFailureRecords
             ScrollViewReader { proxy in
                 List {
                     Section {
@@ -7083,46 +7814,100 @@ struct ContentView: View {
                             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                     }
 
-                    Section(header: Text("会话时间线").font(.headline).textCase(nil)) {
-                        if displaySessions.isEmpty {
-                            Text("暂无记录")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(Color.clear)
-                        } else {
-                            ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
-                                let total = displaySessions.count
-                                let order = total - displayIndex
-                                sessionTimelineRow(
-                                    summary: summary,
-                                    order: order,
-                                    isActive: summary.id == activeId
-                                )
-                                .listRowSeparator(.hidden)
-                                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                                .listRowBackground(Color.clear)
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button("作废") {
-                                        performSwipeVoid(id: summary.id)
-                                    }
-                                    .tint(.orange)
-                                    Button("删除", role: .destructive) {
-                                        swipeDeleteCandidateId = summary.id
+                    Section {
+                        Picker("", selection: $homeSegment) {
+                            ForEach(HomeSegment.allCases, id: \.self) { item in
+                                Text(item.title).tag(item)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    if homeSegment == .success {
+                        Section(header: Text("会话时间线").font(.headline).textCase(nil)) {
+                            if displaySessions.isEmpty {
+                                Text("暂无记录")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
+                            } else {
+                                ForEach(Array(displaySessions.enumerated()), id: \.element.id) { displayIndex, summary in
+                                    let total = displaySessions.count
+                                    let order = total - displayIndex
+                                    sessionTimelineRow(
+                                        summary: summary,
+                                        order: order,
+                                        isActive: summary.id == activeId
+                                    )
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                                    .listRowBackground(Color.clear)
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                        Button("作废") {
+                                            performSwipeVoid(id: summary.id)
+                                        }
+                                        .tint(.orange)
+                                        Button("删除", role: .destructive) {
+                                            swipeDeleteCandidateId = summary.id
+                                        }
                                     }
                                 }
                             }
+                            pendingDeleteBanner
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                            Color.clear
+                                .frame(height: 1)
+                                .id("timelineBottom")
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                                .onAppear { isTimelineNearBottom = true }
+                                .onDisappear { isTimelineNearBottom = false }
                         }
-                        pendingDeleteBanner
+                    } else {
+                        Section(header: Text("今日失败记录").font(.headline).textCase(nil)) {
+                            HStack(spacing: 12) {
+                                Button("新增失败") {
+                                    startFailureDraft()
+                                }
+                                .buttonStyle(.bordered)
+                                Button("标签管理") {
+                                    isTraitsManagerPresented = true
+                                }
+                                .buttonStyle(.bordered)
+                            }
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
-                        Color.clear
-                            .frame(height: 1)
-                            .id("timelineBottom")
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                            .onAppear { isTimelineNearBottom = true }
-                            .onDisappear { isTimelineNearBottom = false }
+
+                            if markdownExportFolderPath.isEmpty {
+                                Text("请先在设置中开启 Markdown 自动保存并选择文件夹")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
+                            }
+
+                            if todayFails.isEmpty {
+                                Text("今日暂无失败记录")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
+                            } else {
+                                ForEach(todayFails) { record in
+                                    failureTimelineRow(record)
+                                        .listRowSeparator(.hidden)
+                                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                                        .listRowBackground(Color.clear)
+                                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                            Button("删除", role: .destructive) {
+                                                deleteFailureRecord(record)
+                                            }
+                                        }
+                                }
+                            }
+                        }
                     }
                 }
                 .listStyle(.plain)
@@ -7139,6 +7924,7 @@ struct ContentView: View {
                         }
                 )
                 .onChange(of: displaySessions.count) { oldValue, newValue in
+                    guard homeSegment == .success else { return }
                     guard newValue > oldValue else { return }
                     guard !userIsDragging, isTimelineNearBottom else { return }
                     DispatchQueue.main.async {
@@ -7164,6 +7950,156 @@ struct ContentView: View {
                 homeDebugSheet
             }
 #endif
+        }
+        .sheet(isPresented: $isFailureEditorPresented) {
+            failureEditorSheet
+        }
+    }
+
+    private func failureTimelineRow(_ record: FailureRecord) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(formatSessionTime(record.time))
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .monospacedDigit()
+                Spacer(minLength: 8)
+                Text(record.stage.rawValue)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("主标签：\(record.mainTag)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if let secondaryTag = record.secondaryTag, !secondaryTag.isEmpty {
+                Text("次标签：\(secondaryTag)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("nextFix：\(record.nextFix)")
+                .font(.footnote)
+            if !record.reviewNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(record.reviewNote)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var failureEditorSheet: some View {
+        let mainTags = failReasonTraits
+        let secondaryTags = secondaryTagTraits
+        let canSave = failureDraftMainTagId != nil &&
+            !failureDraftNextFix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return NavigationStack {
+            Form {
+                Section("基础") {
+                    DatePicker("时间", selection: $failureDraftTime, displayedComponents: [.date, .hourAndMinute])
+                    Picker("阶段", selection: $failureDraftStage) {
+                        ForEach(FailureStage.allCases, id: \.self) { item in
+                            Text(item.rawValue).tag(item)
+                        }
+                    }
+                }
+
+                Section("主标签（failReason，必填）") {
+                    if mainTags.isEmpty {
+                        Text("暂无 failReason 标签，请先到标签管理新增")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("打开标签管理") {
+                            isTraitsManagerPresented = true
+                        }
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 88), spacing: 8)], alignment: .leading, spacing: 8) {
+                            ForEach(mainTags) { tag in
+                                let selected = failureDraftMainTagId == tag.id
+                                Button {
+                                    failureDraftMainTagId = tag.id
+                                } label: {
+                                    Text(tag.name)
+                                        .font(.caption)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .foregroundStyle(selected ? Color.blue : Color.primary)
+                                        .background(selected ? Color.blue.opacity(0.18) : Color.secondary.opacity(0.12))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+
+                Section("次标签（可选：failReason/successTag）") {
+                    HStack {
+                        Button(failureDraftSecondaryTagId == nil ? "已不选" : "不选") {
+                            failureDraftSecondaryTagId = nil
+                        }
+                        .buttonStyle(.bordered)
+                        Spacer(minLength: 8)
+                    }
+                    if secondaryTags.isEmpty {
+                        Text("暂无可选标签")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 8)], alignment: .leading, spacing: 8) {
+                            ForEach(secondaryTags) { tag in
+                                let selected = failureDraftSecondaryTagId == tag.id
+                                Button {
+                                    failureDraftSecondaryTagId = tag.id
+                                } label: {
+                                    Text(tag.name)
+                                        .font(.caption)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .foregroundStyle(selected ? Color.blue : Color.primary)
+                                        .background(selected ? Color.blue.opacity(0.18) : Color.secondary.opacity(0.12))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+
+                Section("修复动作") {
+                    TextField("quote（可选）", text: $failureDraftQuote)
+                    TextEditor(text: $failureDraftNextFix)
+                        .frame(minHeight: 80)
+                    Text("nextFix 必填")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("复盘备注（不限长度）") {
+                    TextEditor(text: $failureDraftReviewNote)
+                        .frame(minHeight: 150)
+                }
+            }
+            .navigationTitle("新增失败")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        isFailureEditorPresented = false
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        saveFailureDraft()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+            .onAppear {
+                ensureFailureTagGroupsAvailable()
+            }
         }
     }
 
@@ -7621,8 +8557,7 @@ struct ContentView: View {
         if trimmed.isEmpty {
             return "HTTP \(statusCode)"
         }
-        let snippet = String(trimmed.prefix(120))
-        return "HTTP \(statusCode) · \(snippet)"
+        return "HTTP \(statusCode) · \(trimmed)"
     }
 
     private func aiFieldLabel(for key: String) -> String {
@@ -8264,7 +9199,7 @@ struct ContentView: View {
         let baseInstruction = instruction?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let hintLine = baseInstruction.isEmpty ? "" : "校验提示: \(baseInstruction)\n"
         return """
-        请只重写「\(fieldLabel)」字段内容，保持简洁可执行，120 字以内。
+        请只重写「\(fieldLabel)」字段内容，保持简洁可执行。
         只输出重写后的文本，不要 JSON，不要加引号或前缀。
         \(hintLine)
         Facts: \(facts)
@@ -9472,6 +10407,16 @@ struct ContentView: View {
             return (avgText, shareText, weightedText)
         }()
         let reviewDigestText = dailyReviewDigestText()
+        let failRangeRecords = failureRecords(for: statsRange, referenceDate: now)
+        let successCount = count
+        let failCount = failRangeRecords.count
+        let totalTouches = successCount + failCount
+        let successRateText = totalTouches > 0
+            ? "\(Int((Double(successCount) / Double(totalTouches) * 100).rounded()))%"
+            : "--"
+        let top3FailMainTags = Self.topFailMainTags(records: failRangeRecords, limit: 3)
+        let tomorrowOneAction = todayActionText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let mergedReviewText = mergedReviewMarkdownText(dayKey: todayKey)
         let currentWeekKey = isoWeekKey(for: now)
         let currentWeeklyReview = cloudStore.weeklyReview(for: currentWeekKey)
         let showWeeklyGenerate = isSundayNight(now) && currentWeeklyReview == nil
@@ -9674,6 +10619,55 @@ struct ContentView: View {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("关闭") {
                                 isReviewDigestPresented = false
+                            }
+                        }
+                    }
+                }
+            }
+            Text("成功+失败复盘块（V1 App 内）")
+                .font(.headline)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("successCount \(successCount) · failCount \(failCount) · totalTouches \(totalTouches) · successRate \(successRateText)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                if top3FailMainTags.isEmpty {
+                    Text("top3 fail mainTag: 暂无")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("top3 fail mainTag: \(top3FailMainTags.map { "\($0.0)(\($0.1))" }.joined(separator: " / "))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("tomorrowOneAction: \(tomorrowOneAction.isEmpty ? "暂无" : tomorrowOneAction)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button("查看/复制 Markdown") {
+                isMergedReviewPresented = true
+            }
+            .buttonStyle(.bordered)
+            .sheet(isPresented: $isMergedReviewPresented) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ScrollView {
+                            Text(mergedReviewText)
+                                .font(.footnote)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        Button("Copy Markdown to clipboard") {
+                            UIPasteboard.general.string = mergedReviewText
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding()
+                    .navigationTitle("成功+失败复盘块")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("关闭") {
+                                isMergedReviewPresented = false
                             }
                         }
                     }
@@ -10965,16 +11959,7 @@ struct ContentView: View {
     }
 
     private func sourcePriority(_ source: String) -> Int {
-        switch source.lowercased() {
-        case "phone":
-            return 3
-        case "ipad", "pad":
-            return 2
-        case "watch":
-            return 1
-        default:
-            return 0
-        }
+        mergeSourcePriority(source)
     }
 
     private func shortDebugToken() -> String {
@@ -13513,6 +14498,7 @@ private enum IpadShortcutStageExecutor {
         var isDeleted: Bool
         var updatedAt: Date
         var stage: String
+        var sourceDevice: String
     }
 
     private struct SessionResolution {
@@ -13526,8 +14512,9 @@ private enum IpadShortcutStageExecutor {
         let bootstrapResult = await loadStore(storePreference: stickyStoreUsed)
         switch bootstrapResult {
         case .success(let bootstrap):
-            if stickyStoreUsed == nil {
-                IntentActiveSessionStore.saveAnchorStoreUsed(storeUsed(for: bootstrap.mode))
+            let resolvedStoreUsed = storeUsed(for: bootstrap.mode)
+            if stickyStoreUsed != resolvedStoreUsed {
+                IntentActiveSessionStore.saveAnchorStoreUsed(resolvedStoreUsed)
             }
             return await performWithStore(action: action, bootstrap: bootstrap)
 
@@ -13546,7 +14533,9 @@ private enum IpadShortcutStageExecutor {
         let now = Date()
         let dayKey = IntentActiveSessionStore.dayKey(for: now)
         let storeUsed = storeUsed(for: bootstrap.mode).rawValue
-        let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let anchorBefore = IntentActiveSessionStore.loadAnchor()
+        let anchorBeforeSessionId = anchorBefore?.sessionId ?? "nil"
+        let anchorBeforeRevision = anchorBefore?.revision ?? 0
         let stageAfter = eventStageValue(for: action)
 
         guard let event = await store.enqueuePendingStageEvent(
@@ -13565,25 +14554,30 @@ private enum IpadShortcutStageExecutor {
                 result: "failed",
                 error: message
             )
-            return [
-                "storeUsed=\(storeUsed)",
-                "cloudReason=\(bootstrap.cloudReason)",
-                "dayKey=\(dayKey)",
-                "anchorSessionId=\(anchorBeforeSessionId)",
-                "targetSessionId=nil",
-                "recordsFound=0",
-                "didCreateNewSession=false",
-                "stageBefore=unknown",
-                "stageAfter=\(stageAfter)",
-                "note=\(message)"
-            ]
-            .joined(separator: " ")
+            return (
+                [
+                    "storeUsed=\(storeUsed)",
+                    "cloudReason=\(bootstrap.cloudReason)",
+                    "dayKey=\(dayKey)",
+                    "anchorSessionId=\(anchorBeforeSessionId)",
+                    "anchorRevision=\(anchorBeforeRevision)",
+                    "targetSessionId=nil",
+                    "recordsFound=0",
+                    "didCreateNewSession=false",
+                    "stageBefore=unknown",
+                    "stageAfter=\(stageAfter)",
+                    "note=\(message)"
+                ]
+                + diagnosticsFields(store: store)
+            ).joined(separator: " ")
         }
 
         let ackNote = bootstrap.mode == .localOnly
             ? normalizedError(bootstrap.warning ?? "已入队，等待 iPhone 应用")
             : "已入队，等待 iPhone 应用"
-        let anchorAfterSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let anchorAfter = IntentActiveSessionStore.loadAnchor()
+        let anchorAfterSessionId = anchorAfter?.sessionId ?? "nil"
+        let anchorAfterRevision = anchorAfter?.revision ?? 0
         IpadShortcutStageQueueStorage.recordLastRun(
             action: action,
             requestedStage: action.rawValue,
@@ -13594,20 +14588,25 @@ private enum IpadShortcutStageExecutor {
             result: "queued",
             error: nil
         )
-        return [
-            "storeUsed=\(storeUsed)",
-            "cloudReason=\(bootstrap.cloudReason)",
-            "dayKey=\(event.dayKey)",
-            "anchorSessionId=\(anchorAfterSessionId)",
-            "targetSessionId=nil",
-            "recordsFound=0",
-            "didCreateNewSession=false",
-            "stageBefore=queue_only",
-            "stageAfter=\(event.stageAfter)",
-            "eventId=\(event.id)",
-            "status=\(event.status)",
-            "note=\(ackNote)"
-        ].joined(separator: " ")
+        return (
+            [
+                "storeUsed=\(storeUsed)",
+                "cloudReason=\(bootstrap.cloudReason)",
+                "dayKey=\(event.dayKey)",
+                "anchorSessionId=\(anchorAfterSessionId)",
+                "anchorRevision=\(anchorAfterRevision)",
+                "targetSessionId=nil",
+                "recordsFound=0",
+                "didCreateNewSession=false",
+                "stageBefore=queue_only",
+                "stageAfter=\(event.stageAfter)",
+                "eventId=\(event.id)",
+                "eventRevision=\(event.revision)",
+                "status=\(event.status)",
+                "note=\(ackNote)"
+            ]
+            + diagnosticsFields(store: store)
+        ).joined(separator: " ")
     }
 
     private static func performWithoutStore(
@@ -13618,7 +14617,9 @@ private enum IpadShortcutStageExecutor {
     ) -> String {
         let now = Date()
         let dayKey = IntentActiveSessionStore.dayKey(for: now)
-        let anchorBeforeSessionId = IntentActiveSessionStore.loadAnchor()?.sessionId ?? "nil"
+        let anchorBefore = IntentActiveSessionStore.loadAnchor()
+        let anchorBeforeSessionId = anchorBefore?.sessionId ?? "nil"
+        let anchorBeforeRevision = anchorBefore?.revision ?? 0
         let storeUsedLabel = stickyStoreUsed?.rawValue ?? "unavailable"
         let message = normalizedError("存储初始化失败，无法入队。\(bootstrapError)")
         IpadShortcutStageQueueStorage.recordLastRun(
@@ -13636,12 +14637,17 @@ private enum IpadShortcutStageExecutor {
             "cloudReason=\(cloudReason)",
             "dayKey=\(dayKey)",
             "anchorSessionId=\(anchorBeforeSessionId)",
+            "anchorRevision=\(anchorBeforeRevision)",
             "targetSessionId=nil",
             "recordsFound=0",
             "didCreateNewSession=false",
             "stageBefore=queue_only",
             "stageAfter=\(eventStageValue(for: action))",
-            "note=\(message)"
+            "note=\(message)",
+            "pendingEventCount=--",
+            "oldestPendingEventAge=--",
+            "lastProcessedEventAt=--",
+            "lastProcessError=\(message)"
         ].joined(separator: " ")
     }
 
@@ -13715,8 +14721,7 @@ private enum IpadShortcutStageExecutor {
         var winners: [String: CloudDataStore.SessionRecord] = [:]
         for record in records {
             if let existing = winners[record.id] {
-                if record.revision > existing.revision ||
-                    (record.revision == existing.revision && record.updatedAt > existing.updatedAt) {
+                if shouldReplaceSessionWinner(candidate: record, existing: existing) {
                     winners[record.id] = record
                 }
             } else {
@@ -13816,20 +14821,13 @@ private enum IpadShortcutStageExecutor {
     private static func loadStore(
         storePreference: IntentActiveSessionStore.ShortcutAnchorStoreUsed?
     ) async -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
-        let bootModePreference: CloudDataStore.BootMode?
-        switch storePreference {
-        case .cloud:
-            bootModePreference = .cloud
-        case .local:
-            bootModePreference = .localOnly
-        case .none:
-            bootModePreference = nil
-        }
-
-        let result = await CloudDataStore.bootstrap(modePreference: bootModePreference)
-        switch result {
-        case .ready(let store, let mode, let reason, let warning):
-            return .success(
+        func makeSuccess(
+            store: CloudDataStore,
+            mode: CloudDataStore.BootMode,
+            reason: String,
+            warning: String?
+        ) -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
+            .success(
                 StoreBootstrapInfo(
                     store: store,
                     mode: mode,
@@ -13837,20 +14835,79 @@ private enum IpadShortcutStageExecutor {
                     warning: warning
                 )
             )
-        case .failed(let error):
-            let reason: String
-            if let sticky = storePreference {
-                reason = "sticky_\(sticky.rawValue)"
-            } else {
-                reason = "bootstrap_failed"
-            }
-            return .failure(
+        }
+
+        func makeFailure(detail: String, reason: String) -> Result<StoreBootstrapInfo, StoreBootstrapFailure> {
+            .failure(
                 StoreBootstrapFailure(
-                    detail: error,
+                    detail: detail,
                     cloudReason: reason,
                     stickyStoreUsed: storePreference
                 )
             )
+        }
+
+        switch storePreference {
+        case .cloud:
+            let forced = await CloudDataStore.bootstrap(modePreference: .cloud)
+            switch forced {
+            case .ready(let store, let mode, let reason, let warning):
+                return makeSuccess(store: store, mode: mode, reason: reason, warning: warning)
+            case .failed(let forcedError):
+                let fallback = await CloudDataStore.bootstrapWithFallback()
+                switch fallback {
+                case .ready(let store, let mode, let reason, let warning):
+                    let fallbackWarning = [warning, "forced_cloud_failed: \(forcedError)"]
+                        .compactMap { $0 }
+                        .joined(separator: " | ")
+                    return makeSuccess(
+                        store: store,
+                        mode: mode,
+                        reason: "sticky_cloud_fallback_\(reason)",
+                        warning: fallbackWarning.isEmpty ? nil : fallbackWarning
+                    )
+                case .failed(let fallbackError):
+                    return makeFailure(
+                        detail: "forced_cloud=\(forcedError) | fallback=\(fallbackError)",
+                        reason: "sticky_cloud_failed"
+                    )
+                }
+            }
+
+        case .local:
+            let forced = await CloudDataStore.bootstrap(modePreference: .localOnly)
+            switch forced {
+            case .ready(let store, let mode, let reason, let warning):
+                return makeSuccess(store: store, mode: mode, reason: reason, warning: warning)
+            case .failed(let forcedError):
+                let fallback = await CloudDataStore.bootstrapWithFallback()
+                switch fallback {
+                case .ready(let store, let mode, let reason, let warning):
+                    let fallbackWarning = [warning, "forced_local_failed: \(forcedError)"]
+                        .compactMap { $0 }
+                        .joined(separator: " | ")
+                    return makeSuccess(
+                        store: store,
+                        mode: mode,
+                        reason: "sticky_local_fallback_\(reason)",
+                        warning: fallbackWarning.isEmpty ? nil : fallbackWarning
+                    )
+                case .failed(let fallbackError):
+                    return makeFailure(
+                        detail: "forced_local=\(forcedError) | fallback=\(fallbackError)",
+                        reason: "sticky_local_failed"
+                    )
+                }
+            }
+
+        case .none:
+            let result = await CloudDataStore.bootstrapWithFallback()
+            switch result {
+            case .ready(let store, let mode, let reason, let warning):
+                return makeSuccess(store: store, mode: mode, reason: reason, warning: warning)
+            case .failed(let error):
+                return makeFailure(detail: error, reason: "bootstrap_failed")
+            }
         }
     }
 
@@ -13858,6 +14915,36 @@ private enum IpadShortcutStageExecutor {
         for mode: CloudDataStore.BootMode
     ) -> IntentActiveSessionStore.ShortcutAnchorStoreUsed {
         mode == .cloud ? .cloud : .local
+    }
+
+    private static func diagnosticsFields(store: CloudDataStore) -> [String] {
+        let signedInText: String
+        if let signedIn = store.iCloudSignedIn {
+            signedInText = signedIn ? "true" : "false"
+        } else {
+            signedInText = "unknown"
+        }
+        let oldestAgeText: String
+        if let age = store.pendingStageOldestAge {
+            oldestAgeText = String(format: "%.1f", age)
+        } else {
+            oldestAgeText = "--"
+        }
+        let lastProcessedText: String
+        if let date = store.lastPendingProcessedAt {
+            lastProcessedText = String(Int(date.timeIntervalSince1970))
+        } else {
+            lastProcessedText = "--"
+        }
+        return [
+            "pendingEventCount=\(store.pendingStageEventCount)",
+            "oldestPendingEventAge=\(oldestAgeText)",
+            "lastProcessedEventAt=\(lastProcessedText)",
+            "lastProcessError=\(store.lastPendingProcessError ?? "none")",
+            "cloudBootReason=\(store.cloudBootReason)",
+            "iCloudSignedIn=\(signedInText)",
+            "cloudAccountStatus=\(store.cloudAccountStatus)"
+        ]
     }
 
     private static func applyQueuedEvent(
@@ -13885,7 +14972,8 @@ private enum IpadShortcutStageExecutor {
             isVoided: false,
             isDeleted: false,
             updatedAt: Date.distantPast,
-            stage: WatchSyncStore.StageSyncKey.stageStopped
+            stage: WatchSyncStore.StageSyncKey.stageStopped,
+            sourceDevice: sourceDevice
         )
 
         if state.isDeleted || state.isVoided {
@@ -13952,6 +15040,7 @@ private enum IpadShortcutStageExecutor {
 
         state.revision = nextRevision
         state.updatedAt = eventTime
+        state.sourceDevice = sourceDevice
         sessionStates[sessionId] = state
 
         if action == .endSession {
@@ -14014,7 +15103,17 @@ private enum IpadShortcutStageExecutor {
             return activePointer
         }
 
-        return latestActiveSessionId(from: sessionStates, dayKey: IntentActiveSessionStore.dayKey(for: now))
+        guard let fallback = latestActiveSessionId(from: sessionStates, dayKey: IntentActiveSessionStore.dayKey(for: now)),
+              let fallbackState = sessionStates[fallback] else {
+            return nil
+        }
+        IntentActiveSessionStore.saveAnchor(
+            dayKey: IntentActiveSessionStore.dayKey(for: now),
+            sessionId: fallback,
+            revision: fallbackState.revision,
+            updatedAt: fallbackState.updatedAt.timeIntervalSince1970
+        )
+        return fallback
     }
 
     private static func latestActiveSessionId(from states: [String: SessionState], dayKey: String) -> String? {
@@ -14078,12 +15177,11 @@ private enum IpadShortcutStageExecutor {
                 isVoided: record.isVoided,
                 isDeleted: record.isDeleted,
                 updatedAt: record.updatedAt,
-                stage: record.stage
+                stage: record.stage,
+                sourceDevice: record.sourceDevice
             )
             if let existing = states[record.id] {
-                if candidate.revision > existing.revision {
-                    states[record.id] = candidate
-                } else if candidate.revision == existing.revision && candidate.endedAt == nil && existing.endedAt != nil {
+                if shouldReplaceSessionStateWinner(candidate: candidate, existing: existing) {
                     states[record.id] = candidate
                 }
             } else {
@@ -14091,6 +15189,27 @@ private enum IpadShortcutStageExecutor {
             }
         }
         return states
+    }
+
+    private static func shouldReplaceSessionStateWinner(candidate: SessionState, existing: SessionState) -> Bool {
+        if candidate.revision != existing.revision {
+            return candidate.revision > existing.revision
+        }
+        let candidatePriority = mergeSourcePriority(candidate.sourceDevice)
+        let existingPriority = mergeSourcePriority(existing.sourceDevice)
+        if candidatePriority != existingPriority {
+            return candidatePriority > existingPriority
+        }
+        if candidate.updatedAt != existing.updatedAt {
+            return candidate.updatedAt > existing.updatedAt
+        }
+        if candidate.isDeleted != existing.isDeleted {
+            return candidate.isDeleted
+        }
+        if candidate.isVoided != existing.isVoided {
+            return candidate.isVoided
+        }
+        return false
     }
 
     private static func makeSessionId(now: Date, existingIds: Set<String>) -> String {
