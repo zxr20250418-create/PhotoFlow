@@ -1,3 +1,56 @@
+## ACTIVE — TC-IOS-SUCCESS-FAIL-SPLIT-REVIEW-V1
+Priority: P0
+Goal:
+- 在既有成功流程不变前提下，新增失败独立记录与展示
+- 首页成功/失败分栏，复盘统计统一展示成功+失败关键指标
+- 保持 V1 仅 App 内展示 merged review block，不回写 daily.md
+
+Scope:
+1) 成功/失败双轨数据
+- 成功继续使用现有 SessionRecord（不改旧口径）
+- 失败记录改为文件存储：`Exports/YYYY/MM/YYYY-MM-DD.failed.md`
+- 标签组：`failReason`、`successTag`
+- 失败 mainTag 必填且必须为 failReason；secondaryTag 可空，值可为 failReason 或 successTag
+
+2) 失败最小字段与录入 UI
+- 字段：time、stage(试拍前/试拍后/报价后/选片中/付款前/其他)、mainTag、secondaryTag?、quote?、nextFix(必填)、reviewNote(不限长度)
+- 首页分段：成功 | 失败
+- 成功页维持现状；失败页展示今日失败列表 + 新增按钮
+- 新增失败页包含 chips、nextFix、不限长 reviewNote TextEditor
+- 标签管理页支持 App 内维护
+
+3) 统计与复盘
+- 新增指标：successCount、failCount、totalTouches、successRate、top3 fail mainTag、tomorrowOneAction
+- 失败仅影响转化漏斗，不影响收入/RPH/选片率业务指标
+- merged success+fail review block：V1 仅 App 内展示 + “Copy Markdown to clipboard”按钮
+- V1 禁止自动回写 merged block 到 daily.md
+
+4) Markdown 与同步
+- 继续保留成功 `daily.md` 现有行为
+- 失败 `failed.md` 自动写入，沿用项目既有安全原子写策略
+- 文件夹为 iCloud-backed 时依赖 iCloud 文件同步；本地文件夹仍可正常工作
+
+Guardrails:
+- Allowed (Phase 2A queue-only): `docs/AGENTS/queue.md`
+- Allowed (Phase 2B impl-only): `PhotoFlow/PhotoFlow/**/*.swift`
+- Forbidden: `Info.plist`, `*.pbxproj`, entitlements, targets, appex, watch/widget config
+- reviewNote 必须不限长度；任何路径不得做 120 字截断
+- Must run: `bash scripts/ios_safe.sh --clean-deriveddata`
+- CI red: do not merge
+- Admin bypass: forbidden
+
+Acceptance:
+A 成功链路继续基于 SessionRecord，行为与现有成功页一致
+B 失败记录按天自动写入 `Exports/YYYY/MM/YYYY-MM-DD.failed.md`
+C 标签规则满足：mainTag 必填且为 failReason；secondaryTag 可空且允许 failReason/successTag
+D 新增失败时强校验 nextFix 必填，reviewNote 支持长文本持久化
+E 首页存在 成功 | 失败 分栏；失败页可查看今日列表并可新增
+F 标签管理页可在 App 内维护并被失败录入页使用
+G 复盘新增 successCount/failCount/totalTouches/successRate/top3 fail mainTag/tomorrowOneAction
+H 失败数据只影响转化漏斗，不影响收入/RPH/选片率等业务指标
+I merged review block 仅 App 展示并支持复制 Markdown；V1 不自动写回 daily.md
+J `ios_safe` PASS，且无配置文件改动；CI 红灯禁止合并、不得 admin bypass
+
 ## ACTIVE — TC-IOS-CLOUDKIT-GUARD-LOCALONLY-V1
 Priority: P0
 Goal:
